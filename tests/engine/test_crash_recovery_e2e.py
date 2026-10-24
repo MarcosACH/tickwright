@@ -58,6 +58,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueOrderView,
     VenueReadFailure,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.barrier import StartupBarrier
@@ -67,6 +68,7 @@ from tickwright.engine.strategy_host import StrategyHost
 from tickwright.strategies import SingleShotLimitStrategy
 
 _CLOID = derive_cloid("trivial:BTC:1")
+_S = 1_000_000_000
 
 # The store the crash leaves behind, and the store the second life reopens over
 # the same durable backing — one per backend. Postgres auto-skips without a
@@ -455,13 +457,19 @@ def _kafka_life(
     venue: PaperExchange,
     clock: ManualClock,
     *,
-    cancel_after_ticks: int | None = None,
+    cancel_after_seconds: int | None = None,
 ) -> tuple[KafkaBus, Store]:
-    """One process life over Kafka, wired the way the runner wires it.
+    """One process life over Kafka, wired by hand and not by the runner.
 
     The store reopens on the same durable backing. The checkpointer restores
     both read models from it. The host restores the strategy from its snapshot.
     The venue is the remote that outlives every one of our crashes.
+
+    Every handler subscribes before ``bus.start()``, and no startup barrier
+    runs. So these tests prove what the bus, the host and the saga do across a
+    crash. They do not prove the runner's boot order. On paper that order
+    hides the gap of issue #563, because paper's boot never lets the bus poll.
+    ``test_kafka_backlog_gate_e2e.py`` proves it with a venue that does.
     """
     bus = KafkaBus(
         bootstrap_servers="kafka:9092",
@@ -484,7 +492,7 @@ def _kafka_life(
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
                 price=Decimal("41000"),
-                cancel_after_ticks=cancel_after_ticks,
+                cancel_after_seconds=cancel_after_seconds,
             ),
         ),
         symbols={"BTC"},
@@ -596,7 +604,7 @@ def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_r
     async def scenario() -> None:
         # Life 1: dies the instant the place lands in the topic, before any saga.
         broker.on_produce.append(kill_on_signal)
-        bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_ticks=1)
+        bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_seconds=1)
         await bus.start()
         with pytest.raises(_Killed):
             await bus.publish(_first_tick())
@@ -605,10 +613,17 @@ def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_r
         assert store.get_order(_CLOID) is None
         store.close()
 
-        # Life 2: the tick redelivers, and the restored strategy sends its cancel.
-        # Then the old place is handled, and the cancel after it.
-        bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_ticks=1)
-        await _run_until_committed(bus, broker)
+        # Life 2: the tick redelivers, and the old place is handled. This wiring
+        # has no wake loop, so the test publishes the wake-up past the deadline
+        # the runner would. The runner only publishes a slot the clock has
+        # reached, so the clock moves first. The restored strategy sends its cancel.
+        bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_seconds=1)
+        await bus.start()
+        await broker.all_committed()
+        clock.advance_to(2 * _S)
+        await bus.publish(Wake(strategy_id="trivial", ts_event=2 * _S, ts_init=2 * _S))
+        await broker.all_committed()
+        await bus.close()
         # The cancel takes the next seq, not the one the unhandled place holds.
         assert _signals_in_topic(broker) == ["trivial:BTC:1", "trivial:BTC:2"]
         order = store.get_order(_CLOID)

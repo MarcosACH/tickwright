@@ -179,8 +179,12 @@ class ExecutionManager:
         checkpointer: Checkpointer,
         guard: PreTradeGuard | None = None,
         exit_run: bool = False,
+        barrier_cleared: bool = True,
     ) -> None:
         self._bus = bus
+        # False until the runner's startup barrier clears. Open by default
+        # because the runner is the one builder that runs a barrier.
+        self._barrier_cleared = barrier_cleared
         # An exit run hosts no strategy, but a Kafka bus can still replay a
         # strategy signal a crashed life never handled. Placed, it could open
         # new exposure while the operator is getting out (issue #476).
@@ -207,6 +211,10 @@ class ExecutionManager:
         # The pre-trade boundary run before any send (ADR-0017). Defaults to the
         # passthrough guard so the paper/test path needs no policy wired in.
         self._guard = guard if guard is not None else NoopGuard()
+
+    def barrier_has_cleared(self) -> None:
+        """Let orders place. Before this, every order is denied (ADR-0024 step 5)."""
+        self._barrier_cleared = True
 
     async def on_signal(self, signal: Signal) -> None:
         # Signal handling binds the ``signal_id`` for the span of the work
@@ -268,7 +276,12 @@ class ExecutionManager:
             return
 
         decision: GuardDecision
-        if signal.strategy_id == OPERATOR and not is_flatten(signal):
+        if not self._barrier_cleared:
+            # Only a Kafka backlog from an earlier life can arrive this early.
+            # Denied rather than held: a held signal is lost if the process
+            # crashes after its offset commits (issue #563).
+            decision = Denied(reason="the startup barrier has not cleared")
+        elif signal.strategy_id == OPERATOR and not is_flatten(signal):
             # Every operator fill splits over the partitions, and the split is
             # right only for an order that closes the net. So an operator order
             # that is not reduce-only is denied here, whatever guard is wired

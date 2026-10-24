@@ -13,6 +13,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from never_wakes import NeverWakes
+
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import SQLiteStoreConfig
@@ -52,7 +54,7 @@ def spec(symbol: str) -> InstrumentSpec:
     )
 
 
-class BuysBtcOnEveryTick:
+class BuysBtcOnEveryTick(NeverWakes):
     """Sends one BTC market buy per tick it hears, on any symbol."""
 
     def __init__(self, emitter: SignalEmitter) -> None:

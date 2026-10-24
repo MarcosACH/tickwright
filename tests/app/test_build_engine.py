@@ -9,6 +9,7 @@ running it end-to-end.
 """
 
 import asyncio
+import gc
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +22,7 @@ from hyperliquid_fakes import (
     fill_entry,
     order_status_response,
 )
+from kafka_fakes import FakeConsumer, FakeKafkaBroker
 from ledgers import GENESIS
 from pydantic import SecretStr, ValidationError
 
@@ -58,6 +60,7 @@ from tickwright.domain import (
     VenueAccountModeUnreadable,
     VenueOrderView,
     derive_cloid,
+    wake_interval_refusal,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
@@ -94,6 +97,35 @@ def test_bus_discriminant_selects_the_kafka_bus(tmp_path: Path) -> None:
     # so building the Kafka backend needs no running Kafka.
     config = _config(tmp_path, bus="kafka", kafka={"bootstrap_servers": "kafka:9092"})
     assert isinstance(build_bus(config), KafkaBus)
+
+
+def test_the_kafka_consumer_is_not_dropped_while_an_old_record_waits_at_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An old fill waits in the poll loop through the venue's start and the
+    # barrier's first step (#565). Each can use a whole startup budget. Kafka
+    # drops a consumer it does not hear from within its poll limit, and the
+    # commit after that fails. So the limit covers both budgets, with Kafka's
+    # own 300s default on top as room for retries that end late.
+    broker = FakeKafkaBroker()
+    asked: dict[str, object] = {}
+
+    def consumer(*args: object, **kwargs: object) -> FakeConsumer:
+        asked.update(kwargs)
+        return broker.consumer(*args, **kwargs)
+
+    monkeypatch.setattr("tickwright.adapters.bus.kafka.AIOKafkaProducer", broker.producer)
+    monkeypatch.setattr("tickwright.adapters.bus.kafka.AIOKafkaConsumer", consumer)
+    config = _config(tmp_path, bus="kafka", engine={"startup_reconciliation_timeout_seconds": 200})
+    bus = build_bus(config)
+
+    async def boot() -> None:
+        await bus.start()
+        await bus.close()
+
+    asyncio.run(boot())
+
+    assert asked["max_poll_interval_ms"] == (300 + 2 * 200) * 1000
 
 
 def test_store_discriminant_selects_the_sqlite_store(tmp_path: Path) -> None:
@@ -434,6 +466,108 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
     assert _run_until_states(engine, db, wanted) == 0
 
 
+_S = 1_000_000_000
+
+
+def _resting_limit_config(
+    tmp_path: Path,
+    *,
+    cancel_after_seconds: int,
+    ticks: tuple[tuple[str, int], ...] = (("ETH", 1), ("BTC", 100)),
+    life: str = "first",
+) -> AppConfig:
+    """By default one ETH tick at 1 s rests a low BUY limit, and the only later
+    tick is BTC at 100 s. The limit strategy trades ETH alone, so a BTC tick
+    only moves the replay clock. ``ticks`` holds (symbol, seconds) pairs."""
+    path = tmp_path / f"{life}.jsonl"
+    path.write_text(
+        "".join(
+            f'{{"symbol": "{symbol}", "price": "42000", "size": "3", '
+            f'"aggressor_side": "buy", "trade_id": "{life}{i}", "ts_event": {seconds * _S}}}\n'
+            for i, (symbol, seconds) in enumerate(ticks)
+        )
+    )
+    return AppConfig(
+        replay=ReplayFeedConfig(path=path),
+        sqlite=SQLiteStoreConfig(path=tmp_path / "saga.db"),
+        paper=PaperExchangeConfig(
+            instrument_specs={"BTC": _SPEC, "ETH": _SPEC}, genesis_collateral=GENESIS
+        ),
+        strategies=[
+            StrategyConfig(
+                strategy="tickwright.strategies.single_shot_limit:SingleShotLimitStrategy",
+                strategy_id="rester",
+                symbols=["ETH"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.5"),
+                    "price": Decimal("41000"),
+                    "cancel_after_seconds": cancel_after_seconds,
+                },
+            ),
+        ],
+    )
+
+
+def test_a_resting_limit_is_cancelled_by_the_clock_after_its_ticks_stop(tmp_path: Path) -> None:
+    config = _resting_limit_config(tmp_path, cancel_after_seconds=10)
+
+    wanted = {derive_cloid("rester:ETH:1"): OrderState.CANCELLED}
+    assert _run_until_states(build_engine(config), tmp_path / "saga.db", wanted) == 0
+
+
+def test_a_limit_killed_while_resting_is_cancelled_at_its_original_deadline(
+    tmp_path: Path,
+) -> None:
+    # Placed at 1 s, so the deadline is 11 s. The first life is killed at 5 s.
+    first = _resting_limit_config(tmp_path, cancel_after_seconds=10, ticks=(("ETH", 1), ("BTC", 5)))
+    _crash_once(build_engine(first), tmp_path / "saga.db", derive_cloid("rester:ETH:1"))
+    # A killed process frees the store lock (ADR-0052). Collecting the first
+    # life's store does the same here, through its finalizer.
+    gc.collect()
+
+    # The second replay ends at 13 s. Only the saved 11 s deadline falls inside
+    # it. A deadline counted from this life would come at 18 s or later. The
+    # ETH tick at 8 s would place a second order if the snapshot were lost.
+    second = _resting_limit_config(
+        tmp_path, cancel_after_seconds=10, ticks=(("ETH", 8), ("BTC", 13)), life="second"
+    )
+    wanted = {derive_cloid("rester:ETH:1"): OrderState.CANCELLED}
+    assert _run_until_states(build_engine(second), tmp_path / "saga.db", wanted) == 0
+
+    store = SQLiteStore(tmp_path / "saga.db")
+    try:
+        assert [order.cloid for order in store.all_orders()] == [derive_cloid("rester:ETH:1")]
+    finally:
+        store.close()
+
+
+def _crash_once(engine: Engine, db: Path, cloid: str) -> None:
+    """Run ``engine`` until ``cloid`` is LIVE, then kill it.
+
+    Cancelling the run task tears nothing down, like a killed process.
+    """
+
+    async def life() -> None:
+        run = asyncio.create_task(engine.run())
+        reader = SQLiteStore(db)
+        try:
+
+            async def until_live() -> None:
+                while (order := reader.get_order(cloid)) is None or order.state is not (
+                    OrderState.LIVE
+                ):
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(until_live(), timeout=5)
+        finally:
+            reader.close()
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    asyncio.run(life())
+
+
 def test_a_strategy_named_by_import_path_trades_each_of_its_symbols(tmp_path: Path) -> None:
     # The strategy lives in the test tree, as a user's lives in their own repo
     # (ADR-0061). Its settings arrive as config text, so a 0.5 order at the
@@ -563,6 +697,91 @@ def test_a_class_missing_a_strategy_method_is_refused_before_the_store_exists(
     with pytest.raises(StrategyLoadRefusal, match="on_tick, restore"):
         build_engine(config)
     assert not (tmp_path / "saga.db").exists()
+
+
+def test_a_class_with_no_on_wake_is_refused_before_the_store_exists(tmp_path: Path) -> None:
+    # A strategy that never wakes still writes an empty on_wake (ADR-0062).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {"strategy": "user_strategies:LacksOnWake", "strategy_id": "user", "symbols": ["BTC"]}
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="has no on_wake"):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
+def test_a_strategy_that_never_declares_a_wake_interval_is_refused(tmp_path: Path) -> None:
+    # The method check cannot see an attribute. As a bare AttributeError it
+    # would exit 1, and a supervisor would restart it forever.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:LacksWakeInterval",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="has no wake_interval_seconds"):
+        build_engine(config)
+
+
+@pytest.mark.parametrize("interval", [0.5, 0, -1, "60"])
+def test_a_bad_wake_interval_is_refused_with_the_rule_s_own_sentence(
+    tmp_path: Path, interval: object
+) -> None:
+    # The operator reads the same sentence StrategyHost would raise (ADR-0062).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:WakesOnItsSettings",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5", "wake_interval_seconds": interval},
+            }
+        ],
+    )
+    refusal = wake_interval_refusal(interval)
+    assert refusal is not None
+    with pytest.raises(StrategyLoadRefusal) as refused:
+        build_engine(config)
+    assert str(refused.value) == f"strategy 'user': {refusal}"
+
+
+@pytest.mark.parametrize("interval", [None, 1, 60])
+def test_a_good_wake_interval_from_the_settings_loads_and_trades(
+    tmp_path: Path, interval: object
+) -> None:
+    # 1 is the floor itself, so an off-by-one in the rule turns this red.
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        '{"symbol": "BTC", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1000}\n'
+    )
+    db = tmp_path / "saga.db"
+    config = AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=ticks),
+            "sqlite": SQLiteStoreConfig(path=db),
+            "paper": PaperExchangeConfig(
+                instrument_specs={"BTC": _SPEC}, genesis_collateral=GENESIS
+            ),
+            "strategies": [
+                {
+                    "strategy": "user_strategies:WakesOnItsSettings",
+                    "strategy_id": "user",
+                    "symbols": ["BTC"],
+                    "settings": {"quantity": "0.5", "wake_interval_seconds": interval},
+                }
+            ],
+        }
+    )
+    wanted = {derive_cloid("user:BTC:1"): OrderState.FILLED}
+    assert _run_until_states(build_engine(config), db, wanted) == 0
 
 
 def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:

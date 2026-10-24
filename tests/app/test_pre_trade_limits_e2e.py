@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from bus_backends import BUS_BACKENDS, make_bus
+from never_wakes import NeverWakes
 from store_backends import POSTGRES_DSN_ENV, STORE_BACKEND_PARAMS, resolve_backend
 
 from tickwright.adapters.feed import ReplayFeedConfig
@@ -166,7 +167,7 @@ STALE_CLOSE = Step(
 WHOLE_SCENARIO = [*CAPS, FRESH_CLOSE, *FULL_WINDOW, STALE_CLOSE]
 
 
-class ScriptedStrategy:
+class ScriptedStrategy(NeverWakes):
     """Sends, at market, the orders its script lists for a tick's time.
 
     The script is keyed by time, not by tick count, so a restarted strategy

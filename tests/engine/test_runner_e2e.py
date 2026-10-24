@@ -18,6 +18,7 @@ from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
+from never_wakes import NeverWakes
 from recovery_stores import RecoveryOrderStore
 from store_backends import SQLiteBackend
 from structlog.typing import EventDict
@@ -438,7 +439,7 @@ def _flat_ticks(path: Path, *, prices: dict[str, str], rounds: int) -> Path:
     return path
 
 
-class _MarginBlindStrategy:
+class _MarginBlindStrategy(NeverWakes):
     """Places its one order only once the account is *already* underwater.
 
     The reader ADR-0040 §7's "reported when negative, with no rejection and no
@@ -704,7 +705,7 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         reopened.close()
 
 
-class _AccountReadingStrategy:
+class _AccountReadingStrategy(NeverWakes):
     """A strategy that does nothing but read its cash line on the first tick —
     the reader ADR-0041 §6's "``cash`` is Tier-1, never ``None``" is a promise to."""
 
@@ -1305,7 +1306,7 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     assert timeline[:2] == ["ledger.load_account", "cache.all_orders"]
 
 
-class _SeqRecordingStrategy:
+class _SeqRecordingStrategy(NeverWakes):
     """Records the seq the host hands it and trades nothing."""
 
     def __init__(self, strategy_id: str) -> None:

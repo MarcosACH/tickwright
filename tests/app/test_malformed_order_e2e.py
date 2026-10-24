@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from never_wakes import NeverWakes
 
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
@@ -52,7 +53,7 @@ BTC = InstrumentSpec(
 )
 
 
-class SendsABadOrderOnce:
+class SendsABadOrderOnce(NeverWakes):
     """Sends the bad order on its first tick, then a market buy."""
 
     def __init__(
