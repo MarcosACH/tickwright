@@ -38,12 +38,14 @@ Preconditions:
 - **Round trip.** Run `$V await testnet rt --event verify.flat --timeout 240`.
 - **Reconcile.** Run `$V await testnet rt --event account.reconciled --timeout 90`.
 - **Stop.** Run `$V signal testnet rt TERM` at once, then `$V await testnet rt --exit`,
-  `$V dump testnet rt`,
-  `$V secrets-check testnet > .agents/verify/testnet/evidence/secrets.txt`. The file holds
-  `no signing key in evidence` or nothing. A hit goes to stderr as file paths, never the key.
+  `$V dump testnet rt`.
 - **Venue fees.** Run `FEES=$($V venue-fills testnet rt)`. It writes `rt.venue-fills.json` and
   prints the fee sum over every fill whose oid is a `venue_oid` in the `orders` rows. Not the
   cloid: every run places the same cloids, so a cloid cut would adopt the last run's fills.
+- **Key scan.** Run `$V secrets-check testnet > .agents/verify/testnet/evidence/secrets.txt`.
+  It runs after `venue-fills` so the scan covers every evidence file. The file holds
+  `no signing key in evidence` or nothing. A hit goes to stderr as file paths, never the key.
+  With a suffixed run id, change the path too.
 - **Check.** Run `$V check testnet rt tn-materialise --event account.materialised --expect 1`,
   `$V check testnet rt tn-round-trip --sql "select count(*) from orders where state='filled'" --expect 2`,
   `$V check testnet rt tn-round-trip --sql "select signed_size from positions" --expect 0.000`,

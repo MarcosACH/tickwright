@@ -70,7 +70,7 @@ Preconditions:
   `$V check safe-exit reset se-reset --event verify.flat --expect 1`,
   `$V check safe-exit reset se-reset --sql "select count(*) from positions where cast(signed_size as real) != 0" --expect 0`,
   `$V check safe-exit reset se-redaction --file secrets.txt --expect "no signing key in evidence"`.
-  A hit leaves the file empty, so the check fails.
+  A hit leaves the file empty, so the check fails. With a suffixed run id, change the path too.
 - **Report.** Run `$V report safe-exit`. Expected verdict: `PASS`. A FAIL that is not a Gotcha
   below is new, and `$V issue-draft safe-exit` drafts it.
 - **Cleanup.** Run `$V cleanup safe-exit`.
