@@ -2065,6 +2065,38 @@ def test_a_gap_that_changed_size_between_passes_is_not_healed() -> None:
     assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
 
 
+def test_a_real_gap_still_heals_when_both_sides_trade_between_passes() -> None:
+    """A finding is the gap, not the two figures (#574).
+
+    The account is 500 cash and 0.001 BTC apart. Between the passes, both
+    sides book the same 0.001 BTC fill with a fee of 1. Every figure moves,
+    but both gaps stay where they were, so the second pass heals them. Keyed
+    on the figures, a real gap would never heal while trading goes on.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100500", ("BTC", "0.003", "0")), _held("100499", ("BTC", "0.004", "0"))
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    _book_fill(ledger, quantity="0.001", price="64809", seq=2, fee="1")
+    clock.advance_to(8)
+    with capture_events() as second:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.004")}
+    assert ledger.account().cash == Decimal("100499")
+    healed = [log for log in second if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+    assert len(healed) == 2
+    record = _recorded(second)
+    assert (record["tier_1"], record["unconfirmed"]) == (2, 0)
+
+
 def test_a_gap_a_pass_healed_does_not_confirm_the_same_gap_on_the_next_pass() -> None:
     """A healed gap is closed, so the next pass does not count it as seen (#574).
 
