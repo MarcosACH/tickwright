@@ -622,6 +622,23 @@ def test_a_fills_read_that_stays_short_stops_after_three_retries() -> None:
     assert len(fills_reads) == 4
 
 
+def test_a_fills_read_that_holds_every_fill_is_not_read_again() -> None:
+    # Most reads after placement already hold every fill. Those must not make
+    # the placement path wait.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5"), clock=clock))
+
+    assert clock.sleeps == []
+    fills_reads = [p for url, p in post.requests if request_type(url, p) == "userFills"]
+    assert len(fills_reads) == 1
+
+
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     # The venue is the fee's authority on this path, so the adapter reads its
     # number rather than reconstructing one from a tier schedule (ADR-0036): the
