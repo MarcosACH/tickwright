@@ -1067,7 +1067,10 @@ def _drive_account_reconciled() -> None:
         )
         keeper.recover()
         keeper.portfolio.materialise(DERIVED_STATE)
-        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+        cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+        # A gap heals on the second pass that finds it (#574).
+        await cycle.reconcile_account()
+        await cycle.reconcile_account()
 
     asyncio.run(go())
 
@@ -1098,7 +1101,10 @@ def _drive_account_mode_unverified() -> None:
         )
         keeper.recover()
         keeper.portfolio.materialise(DERIVED_STATE)
-        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+        cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+        # The mode is read only before a heal, so on the second pass (#574).
+        await cycle.reconcile_account()
+        await cycle.reconcile_account()
 
     asyncio.run(go())
 

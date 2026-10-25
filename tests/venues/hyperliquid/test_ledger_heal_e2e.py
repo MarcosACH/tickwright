@@ -196,6 +196,8 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
 
     venue, post = _exchange(CROSS_SNAPSHOT)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    # A gap heals on the second pass that finds it (#574).
+    asyncio.run(cycle.reconcile_account())
 
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
@@ -262,11 +264,13 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
     assert restored.account_id == opening.account_spec().account_id
     assert restored.cash == Decimal("25.9604")
 
-    # The mode read is second and there is one of it: it is the guard on the
+    # The mode read is last and there is one of it: it is the guard on the
     # write, so it follows the anchor it guards and is asked only because this
     # pass found a cash line to heal (ADR-0046 §4 buys its affordability that
-    # way — ``userAbstraction`` is weight 20 against the anchor's 2).
+    # way — ``userAbstraction`` is weight 20 against the anchor's 2). The first
+    # pass healed nothing, so it asked for no mode.
     assert [payload["type"] for _, payload in post.requests] == [
+        "clearinghouseState",
         "clearinghouseState",
         "userAbstraction",
     ]
@@ -327,7 +331,8 @@ def test_the_healed_ledger_reproduces_every_figure_the_venue_published() -> None
     # then a mark that lets the Tier-2 figures exist at all.
     venue, post = _exchange(CROSS_SNAPSHOT)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
-    assert asyncio.run(cycle.reconcile_account())
+    assert asyncio.run(cycle.reconcile_account())  # finds the gaps
+    assert asyncio.run(cycle.reconcile_account())  # and heals them (#574)
 
     keeper.portfolio.observe_mark(
         MarkTick(ts_event=7, ts_init=7, symbol="BTC", price=Decimal("64792"))
@@ -368,9 +373,11 @@ def test_the_healed_ledger_reproduces_every_figure_the_venue_published() -> None
         Decimal("1.6198"),  # crossMaintenanceMarginUsed
     )
 
-    # Two anchor reads and the one mode read the first pass's cash heal bought.
-    # The clean pass asks for no mode, having nothing to write behind it.
+    # Three anchor reads and the one mode read the healing pass's cash heal
+    # bought. The finding pass and the clean pass ask for no mode, having
+    # nothing to write behind them.
     assert [payload["type"] for _, payload in post.requests] == [
+        "clearinghouseState",
         "clearinghouseState",
         "userAbstraction",
         "clearinghouseState",

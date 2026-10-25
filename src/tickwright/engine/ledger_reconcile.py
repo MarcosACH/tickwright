@@ -252,6 +252,14 @@ class _CashHeal:
     correction: CashCorrection
 
 
+_Finding = tuple[DivergenceField, str | None]
+"""A finding's identity across passes: its field and its symbol (#574)."""
+
+
+def _finding(divergence: Divergence) -> _Finding:
+    return (divergence.field, divergence.symbol)
+
+
 def _healed(divergence: Divergence, *, event_id: str) -> None:
     """Record the correction that closed ``divergence``, under the key it was
     applied with.
@@ -886,6 +894,8 @@ class ReconcileFindings:
     """The Tier-1 cash finding this pass heals, with the correction that closes it."""
     deferred: int
     """Tier-1 findings a fill inside the read held back. Clears on the next pass."""
+    unconfirmed: int
+    """Tier-1 findings the previous pass did not make. Heals on the next pass if still there."""
     unpriced: int
     """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
 
@@ -911,6 +921,7 @@ class ReconcileFindings:
         band: ValuationBand,
         now_ns: int,
         fills_before: int,
+        previous: frozenset[_Finding],
     ) -> "ReconcileFindings":
         """Compare one reading against one snapshot and decide what to say.
 
@@ -929,6 +940,12 @@ class ReconcileFindings:
         ``fills_before`` is the ledger's fill count read before the venue read.
         Asked of the reading through ``LedgerReading.filled_since``, it names
         the symbols a fill touched while the read was in flight (#284, #324).
+
+        ``previous`` is what the last pass found at Tier-1. A finding heals only
+        if it is in there too (#574). The venue can book a fill or a funding
+        payment before the engine learns of it. A pass that reads the venue in
+        that gap sees a finding that is gone by the next pass. Healing it would
+        count the movement twice.
 
         The leverage pair is read off each row of the reading, never from a
         book handed in beside it (#304). The row reports the pair the ledger
@@ -976,6 +993,7 @@ class ReconcileFindings:
         cash_findings: list[Divergence] = []
         deferred = 0
         unpriced = 0
+        unconfirmed = 0
         for divergence in divergences:
             if divergence.tier is not DivergenceTier.TIER_1:
                 continue
@@ -984,6 +1002,9 @@ class ReconcileFindings:
                 continue
             if divergence.symbol in moved:
                 deferred += 1
+                continue
+            if _finding(divergence) not in previous:
+                unconfirmed += 1
                 continue
             # The price is the venue's own entry price, and a symbol that has
             # none is not healed this pass. ADR-0034's synthetic needs a price
@@ -1020,6 +1041,8 @@ class ReconcileFindings:
         cash: _CashHeal | None = None
         if cash_findings and moved:
             deferred += len(cash_findings)
+        elif any(_finding(finding) not in previous for finding in cash_findings):
+            unconfirmed += len(cash_findings)
         elif cash_findings:
             # At most one, since the account has one collateral pool (ADR-0041
             # §2), and the unpack says so rather than assuming it: a second
@@ -1042,6 +1065,7 @@ class ReconcileFindings:
             heals=tuple(heals),
             cash=cash,
             deferred=deferred,
+            unconfirmed=unconfirmed,
             unpriced=unpriced,
         )
 
@@ -1074,6 +1098,9 @@ class LedgerReconciliation:
         # gets the documented one, and the composition root passes the
         # operator's when there is one (``EngineConfig.band``).
         self._band = band if band is not None else ValuationBand()
+        # In memory only. After a restart the first pass heals nothing, which
+        # costs one pass and never heals a gap that was not seen twice.
+        self._previous: frozenset[_Finding] = frozenset()
 
     async def materialise_account(self) -> bool:
         """The startup barrier's live-only first step: create the account row
@@ -1210,8 +1237,14 @@ class LedgerReconciliation:
             # The one read also stamps the heal, so both halves share a key.
             now_ns=self._checkpointer.clock.timestamp_ns(),
             fills_before=fills_before,
+            previous=self._previous,
         )
         divergences = findings.divergences
+        self._previous = frozenset(
+            _finding(divergence)
+            for divergence in divergences
+            if divergence.tier is DivergenceTier.TIER_1
+        )
         # The heal plan is the findings' (#335). What stays here is the one
         # decision that needs the venue: the mode gate on the cash correction
         # (ADR-0046 §4). A plan with no cash heal never asks.
@@ -1245,6 +1278,7 @@ class LedgerReconciliation:
             unvalued=findings.unvalued,
             suppressed=findings.suppressed,
             deferred=findings.deferred,
+            unconfirmed=findings.unconfirmed,
             unpriced=findings.unpriced,
         )
         return divergences
