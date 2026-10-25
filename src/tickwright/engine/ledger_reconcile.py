@@ -252,12 +252,17 @@ class _CashHeal:
     correction: CashCorrection
 
 
-_Finding = tuple[DivergenceField, str | None]
-"""A finding's identity across passes: its field and its symbol (#574)."""
+_Finding = tuple[DivergenceField, str | None, Decimal]
+"""A finding's identity across passes: its field, its symbol and its gap (#574).
+
+The gap is ``venue − ledger``. A fill both sides have booked moves both
+figures and leaves the gap where it was, so a real gap keeps its identity
+while trading goes on. Two venue-first fills of different sizes do not.
+"""
 
 
 def _finding(divergence: Divergence) -> _Finding:
-    return (divergence.field, divergence.symbol)
+    return (divergence.field, divergence.symbol, divergence.venue - divergence.ledger)
 
 
 def _healed(divergence: Divergence, *, event_id: str) -> None:

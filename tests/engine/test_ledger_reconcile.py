@@ -2037,6 +2037,34 @@ def test_a_funding_payment_the_venue_booked_first_is_not_healed_into_cash() -> N
     assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
 
 
+def test_a_gap_that_changed_size_between_passes_is_not_healed() -> None:
+    """Two passes confirm a finding only if they find the same gap (#574).
+
+    Each pass reads the venue while a different venue-first fill is still
+    unbooked. Both find a BTC size gap, but not the same one. So neither pass
+    is a second look at one gap, and neither heals.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100000", ("BTC", "0.003", "0")), _held("100000", ("BTC", "0.004", "0"))
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    clock.advance_to(8)
+    with capture_events() as second:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+    assert [log for log in second if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(second)
+    assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
+
+
 _BTC_LIQUIDATION = Decimal("52522.4977")
 """The venue's own ``clearinghouseState.liquidationPx``, as measured by #142 and
 recorded in ADR-0040 §3 — the number live must read through rather than solve for."""
