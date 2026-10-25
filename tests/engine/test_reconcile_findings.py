@@ -938,6 +938,39 @@ def test_a_pass_with_a_fill_inside_the_read_reports_both_tier_1_findings_and_hea
     assert findings.unpriced == 0
 
 
+def test_a_finding_a_fill_inside_the_read_held_back_does_not_confirm_the_next_pass() -> None:
+    """A deferred finding compared a fresh ledger against a stale venue (#574).
+
+    Its gap says nothing about the account, so the next pass does not count it
+    as seen. Here the next pass is quiet and finds the same two gaps. They are
+    unconfirmed and not healed. A fill inside the read can leave a gap equal to
+    the last pass's, and that is the case this guards.
+    """
+    state = _missed_opening_fill()
+    first = ReconcileFindings.classify(
+        state,
+        _fee_taken_reading(net="0.4", last_fills={"BTC": 3}),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+        fills_before=2,
+        previous=frozenset(),
+    )
+
+    second = ReconcileFindings.classify(
+        state,
+        _fee_taken_reading(net="0.4", last_fills={"BTC": 3}),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+        fills_before=3,
+        previous=first.seen,
+    )
+
+    assert first.deferred == 2
+    assert second.heals == ()
+    assert second.cash is None
+    assert (second.deferred, second.unconfirmed) == (0, 2)
+
+
 def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp() -> None:
     """The same book with no fill inside the read heals both gaps.
 

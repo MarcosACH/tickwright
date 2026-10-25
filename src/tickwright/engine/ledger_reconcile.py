@@ -1001,6 +1001,11 @@ class ReconcileFindings:
         deferred = 0
         unpriced = 0
         unconfirmed = 0
+        # The findings the next pass must not count as seen (#574). A deferred
+        # one compared a fresh ledger against a stale venue, so its gap says
+        # nothing about the account. A healed one is closed, so the same gap
+        # on the next pass is a new movement.
+        forget: set[_Finding] = set()
         for divergence in divergences:
             if divergence.tier is not DivergenceTier.TIER_1:
                 continue
@@ -1009,6 +1014,7 @@ class ReconcileFindings:
                 continue
             if divergence.symbol in moved:
                 deferred += 1
+                forget.add(_finding(divergence))
                 continue
             if _finding(divergence) not in previous:
                 unconfirmed += 1
@@ -1045,9 +1051,11 @@ class ReconcileFindings:
                     ),
                 )
             )
+            forget.add(_finding(divergence))
         cash: _CashHeal | None = None
         if cash_findings and moved:
             deferred += len(cash_findings)
+            forget.update(_finding(finding) for finding in cash_findings)
         elif any(_finding(finding) not in previous for finding in cash_findings):
             unconfirmed += len(cash_findings)
         elif cash_findings:
@@ -1064,16 +1072,13 @@ class ReconcileFindings:
                 divergence=cash_finding,
                 correction=CashCorrection(target=cash_finding.venue, ts_ns=now_ns),
             )
-        # A gap this pass heals is closed. The same gap on the next pass is a
-        # new movement, so it must not count as seen twice. A planned heal the
-        # cycle then drops is forgotten too, which only costs one more pass.
-        healed = {_finding(heal.divergence) for heal in heals}
-        if cash is not None:
-            healed.add(_finding(cash.divergence))
+            forget.add(_finding(cash_finding))
+        # A planned heal the cycle then drops, at the mode gate or the store,
+        # is forgotten too. That costs one more pass and never a false heal.
         seen = frozenset(
             _finding(divergence)
             for divergence in divergences
-            if divergence.tier is DivergenceTier.TIER_1 and _finding(divergence) not in healed
+            if divergence.tier is DivergenceTier.TIER_1 and _finding(divergence) not in forget
         )
         return cls(
             divergences=divergences,
