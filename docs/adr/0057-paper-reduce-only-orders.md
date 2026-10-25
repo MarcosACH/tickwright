@@ -42,6 +42,11 @@ decides how paper copies them. Decided in
   The composition root hands it that interval. A count of reads would not do. A boot retry reads
   again one second later, and an exit run passes every in-flight interval. The adapter keeps the
   total, and when it first saw it, in memory. A restart forgets it and only waits once more.**)**
+
+  **(Amended by [#575](https://github.com/MarcosACH/tickwright/issues/575):** a short fills read
+  at placement is now read again, up to three times in 3.5 s (ADR-0011). If a retry holds every
+  fill, the adapter sends `CANCELLED` at placement. Only a read that fails, or stays short after
+  the retries, leaves the order to reconcile.**)**
 - **After every fill, paper re-checks its resting reduce-only orders in that symbol.** If the net
   is smaller than an order's working size, the order shrinks to the net. If the net is zero or on
   the order's side, paper cancels the order with the reason "reduce-only cancelled". This copies

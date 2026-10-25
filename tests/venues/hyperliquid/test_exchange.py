@@ -20,6 +20,8 @@ from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    RecordingClock,
+    answers_in_turn,
     fill_entry,
     filled_response,
     idle_ws,
@@ -383,12 +385,17 @@ def test_the_order_action_carries_the_reduce_only_flag(reduce_only: bool) -> Non
 
 
 async def place_and_collect_reports(
-    post: FakeExchangeApi, order: PlaceOrder, *, prime_tick: bool = True
+    post: FakeExchangeApi,
+    order: PlaceOrder,
+    *,
+    prime_tick: bool = True,
+    clock: ManualClock | None = None,
 ) -> list[ExecutionReport]:
     """Drive one placement against canned responses; return the raw venue
     facts the adapter emitted on the bus (its ``Exchange`` contract)."""
     bus = InMemoryBus()
-    clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    if clock is None:
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
     exchange = make_exchange(post, bus=bus, clock=clock)
     reports: list[ExecutionReport] = []
 
@@ -553,6 +560,120 @@ def test_a_shrunk_reduce_only_order_stays_open_when_the_fills_read_comes_back_sh
 
     _ack, fill = reports
     assert isinstance(fill, FillReport)
+
+
+def test_a_short_fills_read_is_read_again_and_the_missing_fill_goes_out_once() -> None:
+    # The venue filled 0.5, but the first read lists only 0.3 of it. Without a
+    # second read the 0.2 waits for the 30 s open-order cycle (#575).
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": answers_in_turn(
+                [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+                [
+                    fill_entry(oid=91, tid=556, px="43250.0", sz="0.3"),
+                    fill_entry(oid=91, tid=557, px="43250.5", sz="0.2"),
+                ],
+            ),
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    reports = asyncio.run(
+        place_and_collect_reports(post, market_order(Side.BUY, "0.5"), clock=clock)
+    )
+
+    _ack, first, second = reports
+    assert isinstance(first, FillReport) and isinstance(second, FillReport)
+    assert (first.trade_id, second.trade_id) == ("556", "557")
+    assert clock.sleeps == [0.5]
+
+
+def test_a_fills_read_that_stays_short_stops_after_three_retries() -> None:
+    # The whole bus waits while it reads again, so the wait is bounded.
+    # After three retries the missing fill is left to reconcile, as before #575.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    reports = asyncio.run(
+        place_and_collect_reports(post, market_order(Side.BUY, "0.5"), clock=clock)
+    )
+
+    _ack, fill = reports
+    assert isinstance(fill, FillReport)
+    assert clock.sleeps == [0.5, 1.0, 2.0]
+    fills_reads = [p for url, p in post.requests if request_type(url, p) == "userFills"]
+    assert len(fills_reads) == 4
+
+
+def test_a_fills_read_that_holds_every_fill_is_not_read_again() -> None:
+    # Most reads after placement already hold every fill. Those must not make
+    # the bus wait.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5"), clock=clock))
+
+    assert clock.sleeps == []
+    fills_reads = [p for url, p in post.requests if request_type(url, p) == "userFills"]
+    assert len(fills_reads) == 1
+
+
+def test_a_shrunk_reduce_only_order_ends_cancelled_once_a_retry_holds_every_fill() -> None:
+    # The venue filled 0.3 of a reduce-only 0.5, and the first read holds only
+    # 0.1. The cut part must wait for every fill (ADR-0057). Once the retry
+    # holds them all, it ends CANCELLED right away rather than at reconcile.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=93, total_sz="0.3", avg_px="43250.0"),
+            "userFills": answers_in_turn(
+                [fill_entry(oid=93, tid=558, px="43250.0", sz="0.1")],
+                [
+                    fill_entry(oid=93, tid=558, px="43250.0", sz="0.1"),
+                    fill_entry(oid=93, tid=559, px="43250.0", sz="0.2"),
+                ],
+            ),
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    _ack, first, second, cancelled = reports
+    assert isinstance(first, FillReport) and isinstance(second, FillReport)
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.reason == "reduce-only shrink"
+
+
+def test_a_fills_retry_that_fails_stops_and_leaves_the_order_to_reconcile() -> None:
+    # The first read holds 0.1 of a shrunk 0.3, and the retry dies in
+    # transport. The venue is not answering, so reading again only adds load.
+    # The saga stays open, with no CANCELLED, for reconcile to heal (ADR-0011).
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=93, total_sz="0.3", avg_px="43250.0"),
+            "userFills": answers_in_turn(
+                [fill_entry(oid=93, tid=558, px="43250.0", sz="0.1")],
+                ConnectionError("connection refused"),
+            ),
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order, clock=clock))
+
+    _ack, fill = reports
+    assert isinstance(fill, FillReport)
+    assert clock.sleeps == [0.5]
+    fills_reads = [p for url, p in post.requests if request_type(url, p) == "userFills"]
+    assert len(fills_reads) == 2
 
 
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:

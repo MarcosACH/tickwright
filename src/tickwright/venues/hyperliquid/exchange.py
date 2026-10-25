@@ -70,6 +70,10 @@ _NS_PER_MS = 1_000_000
 # this saga was created, for the same reason (#354).
 _ACK_SKEW_ALLOWANCE_MS = 60_000
 
+# The waits before each new fills read when the read after placement comes back
+# short (#575). 3.5 s in total. After that the open-order cycle heals the rest.
+_SHORT_FILLS_RETRY_SECONDS = (0.5, 1.0, 2.0)
+
 # The most cancels one venue action carries. A longer list is split (ADR-0055).
 _CANCEL_BATCH_LIMIT = 200
 
@@ -351,7 +355,8 @@ class HyperliquidExchange:
                 # would double-count against reconciliation's venue-tid fills under
                 # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
                 # and emit those. This is the read right after placement: the fills
-                # are the newest, so the whole-history read cannot miss them.
+                # are the newest, so the whole-history read cannot page past them.
+                # The venue can still list them late, so a short read is retried.
                 # A `filled` answer is an ack, the same as `resting`: it carries
                 # the venue's oid. The saga keeps the oid from the LIVE ack, and
                 # that oid is the only key the fill history answers to once the
@@ -365,22 +370,18 @@ class HyperliquidExchange:
                 # nothing more and let reconcile's fetch_order re-read the fills
                 # and heal them (ADR-0011). Which way it failed changes nothing
                 # here — there is no worklist behind this read to spare
-                # (ADR-0049) — but it is checked for explicitly rather than
-                # falsily, since a ``VenueReadFailure`` is truthy and would
-                # otherwise be iterated.
-                fills = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
-                if isinstance(fills, VenueReadFailure):
+                # (ADR-0049).
+                filled = await self._publish_placement_fills(order, oid=oid, total_sz=total_sz)
+                if filled is None:
                     return
-                for fill in fills:
-                    await self._bus.publish(fill)
                 # The venue shrank a reduce-only order to the position. The saga
                 # keeps the size it asked for, so it would stay open forever. The
                 # cut part ends CANCELLED, as on paper (ADR-0057). It goes out
                 # after the fills, because reconcile stops watching a terminal
                 # saga and would never heal fills that came later. For the same
                 # reason it waits until the read holds every fill the venue
-                # reported. A short read leaves the saga open for reconcile.
-                filled = _fill_total(fills)
+                # reported. A read still short after its retries leaves the saga
+                # open for reconcile.
                 if filled == total_sz and _shrunk(
                     reduce_only=order.reduce_only, asked=order.quantity, filled=filled
                 ):
@@ -393,6 +394,37 @@ class HyperliquidExchange:
                 # defect ADR-0048 §4 catalogues. Checked by the type checker, so
                 # growing the union fails the build rather than a live order.
                 assert_never(unreachable)
+
+    async def _publish_placement_fills(
+        self, order: PlaceOrder, *, oid: int, total_sz: Decimal
+    ) -> Decimal | None:
+        """Publish the fills of an order the venue answered ``filled``. Return
+        their total, or ``None`` if a read failed.
+
+        The venue can list a fill only after the first read (#575). So a short
+        read is read again a few times. Otherwise the missing fill waits for the
+        open-order cycle, and the account reconcile meanwhile sees a position
+        the saga does not hold (#574). This runs inside the bus cascade, so the
+        whole bus waits during the retries, not only this placement. So they
+        are few and short. Each fill is published once.
+        """
+        published: dict[str, FillReport] = {}
+        retries = iter(_SHORT_FILLS_RETRY_SECONDS)
+        while True:
+            fills = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
+            # Checked explicitly, not by truthiness. A ``VenueReadFailure`` is
+            # truthy and would otherwise be iterated.
+            if isinstance(fills, VenueReadFailure):
+                return None
+            for fill in fills:
+                if fill.trade_id not in published:
+                    published[fill.trade_id] = fill
+                    await self._bus.publish(fill)
+            filled = _fill_total(list(published.values()))
+            delay = next(retries, None)
+            if filled >= total_sz or delay is None:
+                return filled
+            await self._clock.sleep(delay)
 
     async def _ack(self, order: PlaceOrder, *, oid: int) -> None:
         """Publish the venue's ack: the order is LIVE at ``oid``.

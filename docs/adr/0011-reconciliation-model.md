@@ -55,6 +55,16 @@ ADR-0009).
    rested. A failed fills read leaves the saga `LIVE`, where the open-order cadence heals it by
    the oid within one slow cycle. The adapter does not retry the read. Reconcile owns retries
    (ADR-0008). The paper venue has no oid and keeps its direct `SUBMITTED → FILLED` path. [#328]**)**
+   **(Amended by #575 — a short fills read after placement is read again:**
+   A read that works can still hold less than the venue's `filled` size. The venue can list a
+   fill only after that read. The missing fill then waited up to one slow cycle, and the account
+   reconcile saw a position the saga did not hold (#574). So the adapter reads again after 0.5 s,
+   1 s and 2 s, until the fills reach the filled size. Each fill goes out once. A read still short
+   after that is left to the open-order cadence, as before. A failed read is still not retried.
+   The retries run inside the bus cascade, so the whole bus waits, not only this placement. The
+   feed keeps reading and drops all but the newest tick, so `feed.lagged` can show up (ADR-0023).
+   Events from other tasks queue behind the wait. The ack and the fills already
+   read reach the saga only after it. That is why the retries stop at 3.5 s. [#575]**)**
    **(Amended by #354 — a cloid can name more than one venue order, so every read and cancel
    goes by the oid once there is one:**
    The cloid is derived from the signal id (ADR-0006), and the signal seq restarts at 1 in a
