@@ -373,6 +373,20 @@ class HyperliquidExchange:
                     return
                 for fill in fills:
                     await self._bus.publish(fill)
+                # The venue can list a fill only after this read (#575). A short
+                # read is read again soon. Otherwise the missing fill waits for
+                # the open-order cycle, and the account reconcile meanwhile sees
+                # a position the saga does not hold (#574).
+                if _fill_total(fills) < total_sz:
+                    await self._clock.sleep(0.5)
+                    again = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
+                    if isinstance(again, VenueReadFailure):
+                        return
+                    published = {fill.trade_id for fill in fills}
+                    for fill in again:
+                        if fill.trade_id not in published:
+                            await self._bus.publish(fill)
+                    fills = again
                 # The venue shrank a reduce-only order to the position. The saga
                 # keeps the size it asked for, so it would stay open forever. The
                 # cut part ends CANCELLED, as on paper (ADR-0057). It goes out

@@ -20,6 +20,7 @@ from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    RecordingClock,
     fill_entry,
     filled_response,
     idle_ws,
@@ -383,12 +384,17 @@ def test_the_order_action_carries_the_reduce_only_flag(reduce_only: bool) -> Non
 
 
 async def place_and_collect_reports(
-    post: FakeExchangeApi, order: PlaceOrder, *, prime_tick: bool = True
+    post: FakeExchangeApi,
+    order: PlaceOrder,
+    *,
+    prime_tick: bool = True,
+    clock: ManualClock | None = None,
 ) -> list[ExecutionReport]:
     """Drive one placement against canned responses; return the raw venue
     facts the adapter emitted on the bus (its ``Exchange`` contract)."""
     bus = InMemoryBus()
-    clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    if clock is None:
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
     exchange = make_exchange(post, bus=bus, clock=clock)
     reports: list[ExecutionReport] = []
 
@@ -553,6 +559,46 @@ def test_a_shrunk_reduce_only_order_stays_open_when_the_fills_read_comes_back_sh
 
     _ack, fill = reports
     assert isinstance(fill, FillReport)
+
+
+def answers_in_turn(*answers: object) -> object:
+    """A route that gives each answer once, in order, then repeats the last.
+
+    The venue can list a fill only after the read that follows the placement
+    (#575). So here, unlike everywhere else, the fills read changes between
+    calls."""
+    remaining = list(answers)
+
+    def answer(_payload: dict) -> object:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return answer
+
+
+def test_a_short_fills_read_is_read_again_and_the_missing_fill_goes_out_once() -> None:
+    # The venue filled 0.5, but the first read lists only 0.3 of it. Without a
+    # second read the 0.2 waits for the 30 s open-order cycle (#575).
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": answers_in_turn(
+                [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+                [
+                    fill_entry(oid=91, tid=556, px="43250.0", sz="0.3"),
+                    fill_entry(oid=91, tid=557, px="43250.5", sz="0.2"),
+                ],
+            ),
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    reports = asyncio.run(
+        place_and_collect_reports(post, market_order(Side.BUY, "0.5"), clock=clock)
+    )
+
+    _ack, first, second = reports
+    assert isinstance(first, FillReport) and isinstance(second, FillReport)
+    assert (first.trade_id, second.trade_id) == ("556", "557")
+    assert clock.sleeps == [0.5]
 
 
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
