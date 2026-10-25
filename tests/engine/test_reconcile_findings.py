@@ -984,15 +984,12 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
     state = _missed_opening_fill()
     reading = _fee_taken_reading(net="0.4", last_fills={"BTC": 2})
     # The last pass found both gaps too, so both are confirmed (#574).
-    previous = frozenset(
-        {
-            (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.1")),
-            (DivergenceField.CASH, None, Decimal("10")),
-        }
+    first = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=previous
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=first.seen
     )
 
     (heal,) = findings.heals
@@ -1046,10 +1043,13 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
         mark_observed={"BTC": _NOW_NS},
         last_fills={"BTC": 2},
     )
-    previous = frozenset({(DivergenceField.SIGNED_SIZE, "BTC", Decimal("-0.4"))})
+    # The last pass found the gap too, so only the price holds it back (#574).
+    first = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
+    )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=previous
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=first.seen
     )
 
     tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]

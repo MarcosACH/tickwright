@@ -900,11 +900,11 @@ class ReconcileFindings:
     deferred: int
     """Tier-1 findings a fill inside the read held back. Clears on the next pass."""
     unconfirmed: int
-    """Tier-1 findings the previous pass did not make. Heals on the next pass if still there."""
+    """Tier-1 findings not in ``previous``. Heals on the next pass if the same gap is there."""
     unpriced: int
     """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
     seen: frozenset[_Finding]
-    """The Tier-1 findings this pass left open. The next pass hands them back as ``previous``."""
+    """The Tier-1 findings this pass neither healed nor deferred. The next pass's ``previous``."""
 
     # The two tier counts are derived and not stored, so they cannot disagree
     # with ``divergences``. They live here with the other four counts so the
@@ -948,11 +948,13 @@ class ReconcileFindings:
         Asked of the reading through ``LedgerReading.filled_since``, it names
         the symbols a fill touched while the read was in flight (#284, #324).
 
-        ``previous`` is what the last pass found at Tier-1. A finding heals only
-        if it is in there too (#574). The venue can book a fill or a funding
-        payment before the engine learns of it. A pass that reads the venue in
-        that gap sees a finding that is gone by the next pass. Healing it would
-        count the movement twice.
+        ``previous`` is the last pass's ``seen``. A finding heals only if the
+        last pass found the same gap on the same figure (#574). The venue can
+        book a fill or a funding payment before the engine learns of it. A pass
+        that reads the venue in that gap sees a finding that is gone by the
+        next pass. Healing it would count the movement twice. The fill count
+        stays as well: a fill inside the read can leave a gap equal to the last
+        pass's, and only the count sees that.
 
         The leverage pair is read off each row of the reading, never from a
         book handed in beside it (#304). The row reports the pair the ledger
