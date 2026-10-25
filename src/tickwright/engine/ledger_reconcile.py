@@ -903,6 +903,8 @@ class ReconcileFindings:
     """Tier-1 findings the previous pass did not make. Heals on the next pass if still there."""
     unpriced: int
     """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
+    seen: frozenset[_Finding]
+    """The Tier-1 findings this pass left open. The next pass hands them back as ``previous``."""
 
     # The two tier counts are derived and not stored, so they cannot disagree
     # with ``divergences``. They live here with the other four counts so the
@@ -1062,6 +1064,17 @@ class ReconcileFindings:
                 divergence=cash_finding,
                 correction=CashCorrection(target=cash_finding.venue, ts_ns=now_ns),
             )
+        # A gap this pass heals is closed. The same gap on the next pass is a
+        # new movement, so it must not count as seen twice. A planned heal the
+        # cycle then drops is forgotten too, which only costs one more pass.
+        healed = {_finding(heal.divergence) for heal in heals}
+        if cash is not None:
+            healed.add(_finding(cash.divergence))
+        seen = frozenset(
+            _finding(divergence)
+            for divergence in divergences
+            if divergence.tier is DivergenceTier.TIER_1 and _finding(divergence) not in healed
+        )
         return cls(
             divergences=divergences,
             alerts=tuple(alerts),
@@ -1072,6 +1085,7 @@ class ReconcileFindings:
             deferred=deferred,
             unconfirmed=unconfirmed,
             unpriced=unpriced,
+            seen=seen,
         )
 
 
@@ -1245,11 +1259,7 @@ class LedgerReconciliation:
             previous=self._previous,
         )
         divergences = findings.divergences
-        self._previous = frozenset(
-            _finding(divergence)
-            for divergence in divergences
-            if divergence.tier is DivergenceTier.TIER_1
-        )
+        self._previous = findings.seen
         # The heal plan is the findings' (#335). What stays here is the one
         # decision that needs the venue: the mode gate on the cash correction
         # (ADR-0046 §4). A plan with no cash heal never asks.

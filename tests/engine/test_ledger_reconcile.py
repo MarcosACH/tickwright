@@ -2065,6 +2065,41 @@ def test_a_gap_that_changed_size_between_passes_is_not_healed() -> None:
     assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
 
 
+def test_a_gap_a_pass_healed_does_not_confirm_the_same_gap_on_the_next_pass() -> None:
+    """A healed gap is closed, so the next pass does not count it as seen (#574).
+
+    Two passes find BTC 0.001 short and the second heals it. Then a new
+    venue-first fill of the same 0.001 is still unbooked at the third pass.
+    That gap is new. Healing it would count the fill twice once the engine
+    books it.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100000", ("BTC", "0.003", "0")),
+        _held("100000", ("BTC", "0.003", "0")),
+        _held("100000", ("BTC", "0.004", "0")),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    clock.advance_to(8)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account_net() == {"BTC": Decimal("0.003")}
+    # A fresh stamp, so a heal here would be a new key and not a deduped retry.
+    clock.advance_to(9)
+    with capture_events() as third:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.003")}
+    assert [log for log in third if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(third)
+    assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
+
+
 _BTC_LIQUIDATION = Decimal("52522.4977")
 """The venue's own ``clearinghouseState.liquidationPx``, as measured by #142 and
 recorded in ADR-0040 §3 — the number live must read through rather than solve for."""
