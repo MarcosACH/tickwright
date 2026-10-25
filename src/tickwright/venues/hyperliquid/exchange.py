@@ -355,7 +355,8 @@ class HyperliquidExchange:
                 # would double-count against reconciliation's venue-tid fills under
                 # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
                 # and emit those. This is the read right after placement: the fills
-                # are the newest, so the whole-history read cannot miss them.
+                # are the newest, so the whole-history read cannot page past them.
+                # The venue can still list them late, so a short read is retried.
                 # A `filled` answer is an ack, the same as `resting`: it carries
                 # the venue's oid. The saga keeps the oid from the LIVE ack, and
                 # that oid is the only key the fill history answers to once the
@@ -369,9 +370,7 @@ class HyperliquidExchange:
                 # nothing more and let reconcile's fetch_order re-read the fills
                 # and heal them (ADR-0011). Which way it failed changes nothing
                 # here — there is no worklist behind this read to spare
-                # (ADR-0049) — but it is checked for explicitly rather than
-                # falsily, since a ``VenueReadFailure`` is truthy and would
-                # otherwise be iterated.
+                # (ADR-0049).
                 filled = await self._publish_placement_fills(order, oid=oid, total_sz=total_sz)
                 if filled is None:
                     return
@@ -381,7 +380,8 @@ class HyperliquidExchange:
                 # after the fills, because reconcile stops watching a terminal
                 # saga and would never heal fills that came later. For the same
                 # reason it waits until the read holds every fill the venue
-                # reported. A short read leaves the saga open for reconcile.
+                # reported. A read still short after its retries leaves the saga
+                # open for reconcile.
                 if filled == total_sz and _shrunk(
                     reduce_only=order.reduce_only, asked=order.quantity, filled=filled
                 ):
@@ -411,6 +411,8 @@ class HyperliquidExchange:
         retries = iter(_SHORT_FILLS_RETRY_SECONDS)
         while True:
             fills = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
+            # Checked explicitly, not by truthiness. A ``VenueReadFailure`` is
+            # truthy and would otherwise be iterated.
             if isinstance(fills, VenueReadFailure):
                 return None
             for fill in fills:
