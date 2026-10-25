@@ -639,6 +639,32 @@ def test_a_fills_read_that_holds_every_fill_is_not_read_again() -> None:
     assert len(fills_reads) == 1
 
 
+def test_a_shrunk_reduce_only_order_ends_cancelled_once_a_retry_holds_every_fill() -> None:
+    # The venue filled 0.3 of a reduce-only 0.5, and the first read holds only
+    # 0.1. The cut part must wait for every fill (ADR-0057). Once the retry
+    # holds them all, it ends CANCELLED right away rather than at reconcile.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=93, total_sz="0.3", avg_px="43250.0"),
+            "userFills": answers_in_turn(
+                [fill_entry(oid=93, tid=558, px="43250.0", sz="0.1")],
+                [
+                    fill_entry(oid=93, tid=558, px="43250.0", sz="0.1"),
+                    fill_entry(oid=93, tid=559, px="43250.0", sz="0.2"),
+                ],
+            ),
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    _ack, first, second, cancelled = reports
+    assert isinstance(first, FillReport) and isinstance(second, FillReport)
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.reason == "reduce-only shrink"
+
+
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     # The venue is the fee's authority on this path, so the adapter reads its
     # number rather than reconstructing one from a tier schedule (ADR-0036): the
