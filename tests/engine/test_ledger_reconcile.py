@@ -237,6 +237,15 @@ def _posted(keeper: Checkpointer, *positions: tuple[str, str, str]) -> None:
     keeper.checkpoint_heal((), snapshot=_held("100000", *positions))
 
 
+def _seen(cycle: LedgerReconciliation) -> None:
+    """Run the pass before the one a case asserts on.
+
+    A finding heals only when the previous pass found it too (#574). This pass
+    finds the gaps and heals none of them, so the next pass can.
+    """
+    asyncio.run(cycle.reconcile_account())
+
+
 def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> None:
     """The agreeing pass, and the anchor it rests on: **one** account read is the
     whole cycle's venue cost (ADR-0034), so the read count is also the assertion
@@ -463,6 +472,7 @@ def test_a_size_divergence_heals_through_a_fill_into_the_unattributed_partition(
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())
 
@@ -499,6 +509,7 @@ def test_a_heal_is_durable_and_comes_back_on_the_restart_a_fill_comes_back_on() 
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())
 
@@ -581,6 +592,7 @@ def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
     cycle = LedgerReconciliation(exchange=_AccountVenue(_held("100500")), checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())
 
@@ -616,6 +628,7 @@ def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() ->
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100500"), mode=AccountModeVerdict.CHANGED)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
@@ -658,6 +671,7 @@ def test_a_mode_the_venue_cannot_report_refuses_the_heal_the_same_way_a_changed_
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100500"), mode=AccountModeVerdict.UNREADABLE)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
@@ -695,12 +709,13 @@ def test_a_pass_with_no_cash_heal_to_make_never_asks_the_venue_for_its_mode() ->
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     with capture_events() as logs:
         asyncio.run(cycle.reconcile_account())
 
     assert venue.mode_reads == 0
-    assert venue.account_reads == 1
+    assert venue.account_reads == 2
     assert keeper.portfolio.account_net() == {"SOL": Decimal("10")}
     assert not [log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value]
 
@@ -710,8 +725,9 @@ def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None
     is the whole subject: a heal that closes into a partition realizes PnL onto
     the very line the same pass is correcting.
 
-    Two cycles, because a *closing* heal needs a partition to close into and the
-    only thing that can open an unattributed one is an earlier heal. The first
+    Two heals, because a *closing* heal needs a partition to close into and the
+    only thing that can open an unattributed one is an earlier heal. Each heal
+    runs on the second pass that sees its gap (#574). The first
     books ten SOL at the venue's entry price. The second finds four, sells six at
     a higher price, and realizes 6 × 191 = 1146 on the way past.
 
@@ -734,12 +750,16 @@ def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None
     closing = replace(
         closing, positions=(replace(closing.positions[0], entry_price=Decimal("65000")),)
     )
-    cycle = LedgerReconciliation(exchange=_AccountVenue(opened, closing), checkpointer=keeper)
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(opened, opened, closing), checkpointer=keeper
+    )
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())  # opens the unattributed partition at 64809
     assert keeper.portfolio.account().cash == Decimal("100000")
 
     clock.advance_to(8)
+    _seen(cycle)
     asyncio.run(cycle.reconcile_account())
 
     healed = keeper.portfolio.position("SOL", strategy_id=None)
@@ -776,6 +796,7 @@ def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under(
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100500", ("SOL", "10", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     with capture_events() as logs:
         asyncio.run(cycle.reconcile_account())
@@ -819,6 +840,7 @@ def test_a_heal_leaves_the_funding_mark_where_it_found_it_and_a_correction_re_en
     cycle = LedgerReconciliation(
         exchange=_AccountVenue(_held("100000", ("SOL", "10", "0"))), checkpointer=keeper
     )
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())
 
@@ -1057,6 +1079,7 @@ def test_a_pass_compares_against_the_reading_it_healed_from() -> None:
     _mark(projection, "SOL", "65000")
     venue = _held("100000", ("SOL", "10", "0"))
     cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
 
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
@@ -1343,6 +1366,7 @@ def test_a_mode_frozen_pass_writes_nothing_and_leaves_the_book_readable() -> Non
     held = projection.open_positions(strategy_id="alpha")
     venue = _AccountVenue(_held("100500", ("BTC", "0.002", "0")), mode=AccountModeVerdict.CHANGED)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
     store.seal()
 
     with capture_events() as logs:
@@ -1380,6 +1404,7 @@ def test_a_frozen_cash_grain_leaves_the_same_passs_size_heal_booking() -> None:
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100500", ("SOL", "10", "0")), mode=AccountModeVerdict.CHANGED)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     with capture_events() as logs:
         asyncio.run(cycle.reconcile_account())
@@ -1496,8 +1521,10 @@ def test_a_retried_cycle_books_its_heal_once_and_announces_it_once() -> None:
     """
     store = _SealedStore(":memory:")
     keeper = _ledger(store, equity="100000")
-    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), _held("100000", ("SOL", "12", "0")))
+    healing = _held("100000", ("SOL", "10", "0"))
+    venue = _AccountVenue(healing, healing, _held("100000", ("SOL", "12", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())
     store.seal()
@@ -1540,6 +1567,7 @@ def test_a_heal_that_reduces_the_net_shorts_the_residual_rather_than_closing_a_s
     held = ledger.position("BTC", strategy_id="alpha")
     venue = _AccountVenue(_held("100000", ("BTC", "0.0005", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())
 
@@ -1574,8 +1602,10 @@ def test_a_failed_read_never_un_heals_the_book_it_cannot_see() -> None:
     store = _SealedStore(":memory:")
     keeper = _ledger(store, equity="100000")
     ledger = keeper.portfolio
-    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), None)
+    healing = _held("100000", ("SOL", "10", "0"))
+    venue = _AccountVenue(healing, healing, None)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())  # the pass that put the residual there
     healed = ledger.position("SOL", strategy_id=None)
@@ -1625,6 +1655,7 @@ def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding
     _mark(ledger, "BTC", "65000")
     venue = _AccountVenue(_held("100000.382", ("BTC", "0.002", "100.382")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -1677,15 +1708,17 @@ def test_a_healed_fill_and_the_venues_later_delivery_of_it_converge_on_one_appli
     ledger = keeper.portfolio
     venue = _AccountVenue(_held("100000", ("BTC", "0.002", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     asyncio.run(cycle.reconcile_account())  # the heal stands in for a fill not yet delivered
     assert ledger.account_net() == {"BTC": Decimal("0.002")}
 
     # The venue delivers the trade the heal inferred, down the ordinary fill path.
     _book_fill(ledger, quantity="0.002", price="64809")
-    assert ledger.account_net() == {"BTC": Decimal("0.004")}  # the over-read, for one interval
+    assert ledger.account_net() == {"BTC": Decimal("0.004")}  # the over-read, for two passes
 
     clock.advance_to(8)  # the next deadline: a new pass, so a new heal key
+    _seen(cycle)
     asyncio.run(cycle.reconcile_account())
 
     assert ledger.account_net() == {"BTC": Decimal("0.002")}
@@ -1805,13 +1838,20 @@ def test_a_symbol_that_did_not_move_during_the_read_still_heals_beside_one_that_
     ledger = keeper.portfolio
     _book_fill(ledger, quantity="0.002", price="64809")
 
+    reads: list[None] = []
+
     def a_btc_fill_lands() -> None:
-        _book_fill(ledger, quantity="0.001", price="64810", seq=2)
+        # Only inside the second read. The first pass sees a quiet book and
+        # finds SOL, so the second pass can heal it (#574).
+        reads.append(None)
+        if len(reads) == 2:
+            _book_fill(ledger, quantity="0.001", price="64810", seq=2)
 
     venue = _SlowAccountVenue(
         _held("100000", ("BTC", "0.002", "0"), ("SOL", "10", "0")), during=a_btc_fill_lands
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -1820,9 +1860,9 @@ def test_a_symbol_that_did_not_move_during_the_read_still_heals_beside_one_that_
         (DivergenceField.SIGNED_SIZE, "SOL", Decimal("0"), Decimal("10")),
     ]
     assert ledger.account_net() == {"BTC": Decimal("0.003"), "SOL": Decimal("10")}
-    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
-        (None, "SOL", Decimal("10"))
-    ]
+    # Only the unattributed rows. The first pass also posted alpha's BTC bucket.
+    unattributed = [p for p in store.all_positions() if p.strategy_id is None]
+    assert [(p.symbol, p.signed_size) for p in unattributed] == [("SOL", Decimal("10"))]
 
 
 def test_a_symbol_the_ledger_never_held_opened_during_the_read_is_not_healed() -> None:
@@ -1922,6 +1962,174 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
     # Both findings were held back, and the record says so (#335).
     record = _recorded(logs)
     assert (record["tier_1"], record["deferred"], record["unpriced"]) == (2, 2, 0)
+
+
+def test_a_fill_the_venue_booked_first_is_not_healed_before_the_engine_books_it() -> None:
+    """A size finding heals only when the previous pass found it too (#574).
+
+    The venue books a fill before the engine learns of it. One pass reads the
+    venue in that gap. A heal there would book the fill once, and the engine
+    would book it again when it arrives. Here the engine books it before the
+    next pass, so neither pass heals.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(_held("100000", ("BTC", "0.003", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as first:
+        asyncio.run(cycle.reconcile_account())
+    _book_fill(ledger, quantity="0.001", price="64809", seq=2)
+    clock.advance_to(8)
+    with capture_events() as second:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == ()
+    assert ledger.account_net() == {"BTC": Decimal("0.003")}
+    assert ledger.position("BTC", strategy_id=None) is None
+    healed = [log for log in [*first, *second] if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+    assert healed == []
+    record = _recorded(first)
+    assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
+
+
+def test_a_funding_payment_the_venue_booked_first_is_not_healed_into_cash() -> None:
+    """A cash finding heals only when the previous pass found it too (#574).
+
+    The venue charges funding at the hour. The engine books it a moment later.
+    A pass that reads the venue in that gap finds cash off by the payment. The
+    engine books it before the next pass, so neither pass heals, and the mode
+    guard is never asked.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(_held("99999.997238", ("BTC", "0.002", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as first:
+        asyncio.run(cycle.reconcile_account())
+    keeper.checkpoint_funding(
+        FundingAccrual(
+            ts_event=3_600,
+            ts_init=3_600,
+            account_id=LIVE_ACCOUNT_ID,
+            symbol="BTC",
+            boundary_ts_ns=3_600,
+            amount=Decimal("-0.002762"),
+        )
+    )
+    clock.advance_to(8)
+    with capture_events() as second:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == ()
+    assert ledger.account().cash == Decimal("99999.997238")
+    healed = [log for log in [*first, *second] if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+    assert healed == []
+    assert venue.mode_reads == 0
+    record = _recorded(first)
+    assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
+
+
+def test_a_gap_that_changed_size_between_passes_is_not_healed() -> None:
+    """Two passes confirm a finding only if they find the same gap (#574).
+
+    Each pass reads the venue while a different venue-first fill is still
+    unbooked. Both find a BTC size gap, but not the same one. So neither pass
+    is a second look at one gap, and neither heals.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100000", ("BTC", "0.003", "0")), _held("100000", ("BTC", "0.004", "0"))
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    clock.advance_to(8)
+    with capture_events() as second:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+    assert [log for log in second if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(second)
+    assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
+
+
+def test_a_real_gap_still_heals_when_both_sides_trade_between_passes() -> None:
+    """A finding is the gap, not the two figures (#574).
+
+    The account is 500 cash and 0.001 BTC apart. Between the passes, both
+    sides book the same 0.001 BTC fill with a fee of 1. Every figure moves,
+    but both gaps stay where they were, so the second pass heals them. Keyed
+    on the figures, a real gap would never heal while trading goes on.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100500", ("BTC", "0.003", "0")), _held("100499", ("BTC", "0.004", "0"))
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    _book_fill(ledger, quantity="0.001", price="64809", seq=2, fee="1")
+    clock.advance_to(8)
+    with capture_events() as second:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.004")}
+    assert ledger.account().cash == Decimal("100499")
+    healed = [log for log in second if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+    assert len(healed) == 2
+    record = _recorded(second)
+    assert (record["tier_1"], record["unconfirmed"]) == (2, 0)
+
+
+def test_a_gap_a_pass_healed_does_not_confirm_the_same_gap_on_the_next_pass() -> None:
+    """A healed gap is closed, so the next pass does not count it as seen (#574).
+
+    Two passes find BTC 0.001 short and the second heals it. Then a new
+    venue-first fill of the same 0.001 is still unbooked at the third pass.
+    That gap is new. Healing it would count the fill twice once the engine
+    books it.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100000", ("BTC", "0.003", "0")),
+        _held("100000", ("BTC", "0.003", "0")),
+        _held("100000", ("BTC", "0.004", "0")),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    clock.advance_to(8)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account_net() == {"BTC": Decimal("0.003")}
+    # A fresh stamp, so a heal here would be a new key and not a deduped retry.
+    clock.advance_to(9)
+    with capture_events() as third:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.003")}
+    assert [log for log in third if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(third)
+    assert (record["tier_1"], record["unconfirmed"]) == (1, 1)
 
 
 _BTC_LIQUIDATION = Decimal("52522.4977")

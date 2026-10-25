@@ -151,7 +151,7 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert findings.divergences == (
@@ -236,7 +236,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     )
 
     findings = ReconcileFindings.classify(
-        state, unpriced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, unpriced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     gap = Divergence(
@@ -261,7 +261,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     )
 
     banded = ReconcileFindings.classify(
-        state, priced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, priced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert banded.divergences == (gap,)  # measured either way — the band gates the alert only
@@ -324,7 +324,7 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     gap = Divergence(
@@ -351,6 +351,7 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
         band=ValuationBand(),
         now_ns=_NOW_NS,
         fills_before=0,
+        previous=frozenset(),
     )
 
     assert unlevered.alerts == ()
@@ -408,7 +409,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
     )
 
     findings = ReconcileFindings.classify(
-        state, unpriced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, unpriced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     gap = Divergence(
@@ -432,7 +433,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
     )
 
     banded = ReconcileFindings.classify(
-        state, priced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, priced, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert banded.divergences == (gap,)
@@ -490,7 +491,7 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert findings.divergences == ()
@@ -552,7 +553,7 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert [(d.field, d.symbol) for d in findings.divergences] == [
@@ -621,7 +622,7 @@ def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenanc
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
@@ -693,6 +694,7 @@ def test_a_size_finding_on_a_symbol_the_ledger_never_traded_still_explains_the_a
         band=ValuationBand(),
         now_ns=_NOW_NS,
         fills_before=0,
+        previous=frozenset(),
     )
 
     assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
@@ -724,6 +726,7 @@ def test_a_size_finding_on_a_symbol_closed_to_flat_explains_the_cross_maintenanc
         band=ValuationBand(),
         now_ns=_NOW_NS,
         fills_before=0,
+        previous=frozenset(),
     )
 
     assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
@@ -789,7 +792,7 @@ def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     per_symbol = [(d.field, d.symbol) for d in findings.divergences if d.symbol is not None]
@@ -838,7 +841,7 @@ def test_one_broken_venue_account_figure_is_one_finding_naming_that_figure(
     state = replace(state, **{attribute: getattr(state, attribute) + Decimal("1")})
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     account_grain = [
@@ -879,7 +882,7 @@ def test_every_account_figure_the_pass_could_not_compute_counts_once_as_unvalued
     )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert [d for d in findings.divergences if d.symbol is None] == []
@@ -924,7 +927,7 @@ def test_a_pass_with_a_fill_inside_the_read_reports_both_tier_1_findings_and_hea
     reading = _fee_taken_reading(net="0.4", last_fills={"BTC": 3})
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
     )
 
     tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
@@ -933,6 +936,39 @@ def test_a_pass_with_a_fill_inside_the_read_reports_both_tier_1_findings_and_hea
     assert findings.cash is None
     assert findings.deferred == 2
     assert findings.unpriced == 0
+
+
+def test_a_finding_a_fill_inside_the_read_held_back_does_not_confirm_the_next_pass() -> None:
+    """A deferred finding compared a fresh ledger against a stale venue (#574).
+
+    Its gap says nothing about the account, so the next pass does not count it
+    as seen. Here the next pass is quiet and finds the same two gaps. They are
+    unconfirmed and not healed. A fill inside the read can leave a gap equal to
+    the last pass's, and that is the case this guards.
+    """
+    state = _missed_opening_fill()
+    first = ReconcileFindings.classify(
+        state,
+        _fee_taken_reading(net="0.4", last_fills={"BTC": 3}),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+        fills_before=2,
+        previous=frozenset(),
+    )
+
+    second = ReconcileFindings.classify(
+        state,
+        _fee_taken_reading(net="0.4", last_fills={"BTC": 3}),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+        fills_before=3,
+        previous=first.seen,
+    )
+
+    assert first.deferred == 2
+    assert second.heals == ()
+    assert second.cash is None
+    assert (second.deferred, second.unconfirmed) == (0, 2)
 
 
 def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp() -> None:
@@ -947,9 +983,13 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
     """
     state = _missed_opening_fill()
     reading = _fee_taken_reading(net="0.4", last_fills={"BTC": 2})
+    # The last pass found both gaps too, so both are confirmed (#574).
+    first = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
+    )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=first.seen
     )
 
     (heal,) = findings.heals
@@ -1003,9 +1043,13 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
         mark_observed={"BTC": _NOW_NS},
         last_fills={"BTC": 2},
     )
+    # The last pass found the gap too, so only the price holds it back (#574).
+    first = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
+    )
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=first.seen
     )
 
     tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
@@ -1081,7 +1125,7 @@ def test_every_divergence_field_is_produced_by_a_classifier(field: DivergenceFie
     state, reading = _PRODUCED_BY[field](_agreeing_book())
 
     findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0, previous=frozenset()
     )
 
     assert field in {d.field for d in findings.divergences}

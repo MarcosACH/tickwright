@@ -496,6 +496,13 @@ async def _size_gap(symbol: str, size: Decimal, turns: _Turns, context: ExitCont
     if _held(symbol, context) == size:
         return False
     await turns.account_pass()
+    if _held(symbol, context) == size:
+        return False
+    # A gap heals only on the second pass that finds it (#574). The wait between
+    # passes guards against a fill the engine has not booked yet. Here the
+    # strategies are stopped and the bus is drained, so the second pass runs now
+    # and a dry attempt is not spent waiting for it.
+    await turns.account_pass()
     return _held(symbol, context) != size
 
 

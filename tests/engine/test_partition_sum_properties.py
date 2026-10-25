@@ -342,7 +342,8 @@ def test_a_healed_book_sums_to_the_venues_own_size_on_every_symbol_it_reports(
     cycle = LedgerReconciliation(
         exchange=_AccountVenue(state=_venue_state(venue)), checkpointer=keeper
     )
-    asyncio.run(cycle.reconcile_account())
+    asyncio.run(cycle.reconcile_account())  # finds the gaps
+    asyncio.run(cycle.reconcile_account())  # and heals them (#574)
 
     portfolio = keeper.portfolio
     sums = _partition_sums(portfolio)
