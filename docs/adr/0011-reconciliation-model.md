@@ -62,7 +62,8 @@ ADR-0009).
    1 s and 2 s, until the fills reach the filled size. Each fill goes out once. A read still short
    after that is left to the open-order cadence, as before. A failed read is still not retried.
    The retries run inside the bus cascade, so the whole bus waits, not only this placement. The
-   feed stalls, and events from other tasks queue behind the wait. The ack and the fills already
+   feed keeps reading and drops all but the newest tick, so `feed.lagged` can show up (ADR-0023).
+   Events from other tasks queue behind the wait. The ack and the fills already
    read reach the saga only after it. That is why the retries stop at 3.5 s. [#575]**)**
    **(Amended by #354 — a cloid can name more than one venue order, so every read and cancel
    goes by the oid once there is one:**
