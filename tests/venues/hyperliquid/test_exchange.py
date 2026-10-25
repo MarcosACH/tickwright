@@ -21,6 +21,7 @@ from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
     RecordingClock,
+    answers_in_turn,
     fill_entry,
     filled_response,
     idle_ws,
@@ -559,20 +560,6 @@ def test_a_shrunk_reduce_only_order_stays_open_when_the_fills_read_comes_back_sh
 
     _ack, fill = reports
     assert isinstance(fill, FillReport)
-
-
-def answers_in_turn(*answers: object) -> object:
-    """A route that gives each answer once, in order, then repeats the last.
-
-    The venue can list a fill only after the read that follows the placement
-    (#575). So here, unlike everywhere else, the fills read changes between
-    calls."""
-    remaining = list(answers)
-
-    def answer(_payload: dict) -> object:
-        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
-
-    return answer
 
 
 def test_a_short_fills_read_is_read_again_and_the_missing_fill_goes_out_once() -> None:

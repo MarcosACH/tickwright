@@ -65,7 +65,11 @@ class FakeExchangeApi:
     *which order* is asked about. The venue's state still does not change
     between reads — ``orderStatus`` is per-oid, so two orders in one reconcile
     pass are two different questions to the same endpoint, not one endpoint
-    changing its mind."""
+    changing its mind.
+
+    One case does change between reads. The venue can list a fill only after
+    the read that follows a placement (#575). ``answers_in_turn`` builds that
+    route. Use it only where the test is about a late answer."""
 
     def __init__(self, responses: dict[str, object]) -> None:
         self.requests: list[tuple[str, dict]] = []
@@ -99,6 +103,19 @@ def request_type(url: str, payload: dict) -> str:
     if url.endswith("/exchange"):
         return str(payload["action"]["type"])
     return str(payload["type"])
+
+
+def answers_in_turn(*answers: object) -> object:
+    """A route that gives each answer once, in order, then repeats the last.
+
+    The one ``FakeExchangeApi`` route whose answer changes between reads. The
+    venue can list a fill only after the read that follows a placement (#575)."""
+    remaining = list(answers)
+
+    def answer(_payload: dict) -> object:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return answer
 
 
 def resting_response(oid: int) -> dict:
