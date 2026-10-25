@@ -61,7 +61,9 @@ ADR-0009).
    reconcile saw a position the saga did not hold (#574). So the adapter reads again after 0.5 s,
    1 s and 2 s, until the fills reach the filled size. Each fill goes out once. A read still short
    after that is left to the open-order cadence, as before. A failed read is still not retried.
-   The placement path waits during these retries, which is why they stop at 3.5 s. [#575]**)**
+   The retries run inside the bus cascade, so the whole bus waits, not only this placement. The
+   feed stalls, and events from other tasks queue behind the wait. The ack and the fills already
+   read reach the saga only after it. That is why the retries stop at 3.5 s. [#575]**)**
    **(Amended by #354 — a cloid can name more than one venue order, so every read and cancel
    goes by the oid once there is one:**
    The cloid is derived from the signal id (ADR-0006), and the signal seq restarts at 1 in a

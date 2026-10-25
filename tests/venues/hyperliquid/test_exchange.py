@@ -602,7 +602,7 @@ def test_a_short_fills_read_is_read_again_and_the_missing_fill_goes_out_once() -
 
 
 def test_a_fills_read_that_stays_short_stops_after_three_retries() -> None:
-    # The placement path waits while it reads again, so the wait is bounded.
+    # The whole bus waits while it reads again, so the wait is bounded.
     # After three retries the missing fill is left to reconcile, as before #575.
     post = FakeExchangeApi(
         {
@@ -624,7 +624,7 @@ def test_a_fills_read_that_stays_short_stops_after_three_retries() -> None:
 
 def test_a_fills_read_that_holds_every_fill_is_not_read_again() -> None:
     # Most reads after placement already hold every fill. Those must not make
-    # the placement path wait.
+    # the bus wait.
     post = FakeExchangeApi(
         {
             "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),

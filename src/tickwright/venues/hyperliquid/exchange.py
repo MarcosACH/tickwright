@@ -404,8 +404,9 @@ class HyperliquidExchange:
         The venue can list a fill only after the first read (#575). So a short
         read is read again a few times. Otherwise the missing fill waits for the
         open-order cycle, and the account reconcile meanwhile sees a position
-        the saga does not hold (#574). The placement path waits during the
-        retries, so they are few and short. Each fill is published once.
+        the saga does not hold (#574). This runs inside the bus cascade, so the
+        whole bus waits during the retries, not only this placement. So they
+        are few and short. Each fill is published once.
         """
         published: dict[str, FillReport] = {}
         retries = iter(_SHORT_FILLS_RETRY_SECONDS)
