@@ -665,6 +665,30 @@ def test_a_shrunk_reduce_only_order_ends_cancelled_once_a_retry_holds_every_fill
     assert cancelled.reason == "reduce-only shrink"
 
 
+def test_a_fills_retry_that_fails_stops_and_leaves_the_order_to_reconcile() -> None:
+    # The first read holds 0.1 of a shrunk 0.3, and the retry dies in
+    # transport. The venue is not answering, so reading again only adds load.
+    # The saga stays open, with no CANCELLED, for reconcile to heal (ADR-0011).
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=93, total_sz="0.3", avg_px="43250.0"),
+            "userFills": answers_in_turn(
+                [fill_entry(oid=93, tid=558, px="43250.0", sz="0.1")],
+                ConnectionError("connection refused"),
+            ),
+        }
+    )
+    clock = RecordingClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order, clock=clock))
+
+    _ack, fill = reports
+    assert isinstance(fill, FillReport)
+    assert clock.sleeps == [0.5]
+    fills_reads = [p for url, p in post.requests if request_type(url, p) == "userFills"]
+    assert len(fills_reads) == 2
+
+
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     # The venue is the fee's authority on this path, so the adapter reads its
     # number rather than reconstructing one from a tier schedule (ADR-0036): the
