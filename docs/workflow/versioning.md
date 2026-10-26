@@ -123,3 +123,8 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   Python 3.14 can install Tickwright (#536). Fixes: old wake-ups, order intents, fills, funding
   and marks are handled right after a Kafka restart (#561, #563, #565). Bump PR backed by
   #570.
+- **v0.6.1** (2026-10-25). Fixes found on day 1 of the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI behavior changed. The account reconcile no longer counts a
+  venue-first fill twice (#574). A short fill read after a Hyperliquid placement is read again,
+  so a market fill no longer waits for the open-order cycle (#575). A leaked socket now fails the
+  test run (#572). Bump PR backed by #578.
