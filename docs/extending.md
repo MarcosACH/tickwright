@@ -227,9 +227,11 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   - `fetch_account_state()` returns a `VenueAccountState`, or `None` when you have no venue truth.
     `None` is never "flat". The ledger reconciler freezes on it and heals nothing. Paper answers
     `None` always, because it holds no account state. A live adapter answers `None` on a failed
-    read. Its peer `verify_account_mode()` guards the one path that writes a venue number to disk:
-    answer `VERIFIED` only while the account is in a mode whose numbers may be healed toward
-    (ADR-0046 §4). Paper answers `VERIFIED` always, for the same reason it answers `None` above.
+    read. Set its `cash_quantum` to the smallest cash unit the venue reports, such as `0.000001`
+    for USDC to 6 decimals. The reconciler rounds both cash lines to it before comparing, so a
+    coarser unit hides real gaps (#580). Its peer method `verify_account_mode()` guards the one
+    path that writes a venue number to disk: answer `VERIFIED` only while the account is in a mode
+    whose numbers may be healed toward (ADR-0046 §4). Paper answers `VERIFIED` always, for the same reason it answers `None` above.
   - Funding. If the venue pays funding, publish each payment as a `FundingAccrual` event with the
     venue's own amount, never one you recomputed (ADR-0037). If nobody can be asked, generate it
     in `run()` as `PaperExchange` does. `run()` is where that loop lives, and the bullet below says
