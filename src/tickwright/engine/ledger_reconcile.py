@@ -534,7 +534,8 @@ def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence,
     # Tier 1 is exact at the venue's unit, not at Decimal's 28 digits. The
     # ledger's sums are exact, so a division leaves a remainder far below one
     # unit that no venue figure can hold (#580). The finding keeps both raw
-    # figures, so the record shows the gap the venue unit absorbed.
+    # figures, so the record shows the gap the venue unit absorbed. This does
+    # not cover Hyperliquid's truncation drift on a partial close (#585).
     unit = state.cash_quantum
     if reading.account.cash.quantize(unit, ROUND_HALF_EVEN) == venue.quantize(
         unit, ROUND_HALF_EVEN
