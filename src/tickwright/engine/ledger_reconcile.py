@@ -14,7 +14,7 @@ with itself. What paper has in its place is the atomic ledger write.
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
 from tickwright.domain import (
@@ -531,7 +531,14 @@ def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence,
     pool first, then what it is backing.
     """
     venue = venue_cash(state)
-    if reading.account.cash == venue:
+    # Tier 1 is exact at the venue's unit, not at Decimal's 28 digits. The
+    # ledger's sums are exact, so a division leaves a remainder far below one
+    # unit that no venue figure can hold (#580). The finding keeps both raw
+    # figures, so the record shows the gap the venue unit absorbed.
+    unit = state.cash_quantum
+    if reading.account.cash.quantize(unit, ROUND_HALF_EVEN) == venue.quantize(
+        unit, ROUND_HALF_EVEN
+    ):
         return ()
     return (
         Divergence(
