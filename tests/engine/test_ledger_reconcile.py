@@ -635,6 +635,23 @@ def test_a_cash_gap_below_half_the_venue_unit_is_not_a_divergence() -> None:
     assert projection.account().cash == ledger_cash
 
 
+def test_a_cash_gap_of_one_venue_unit_still_heals() -> None:
+    """Rounding to the venue's unit must not hide a real gap (#580). One unit
+    is the smallest gap the venue can report, so it is a real divergence and
+    heals like any other Tier-1 finding.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(_held("100000.000001")), checkpointer=keeper
+    )
+    _seen(cycle)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert keeper.portfolio.account().cash == Decimal("100000.000001")
+
+
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
     """The heal above is the one thing a mid-run mode switch must not be allowed
     to perform (ADR-0046 §4).

@@ -231,6 +231,7 @@ class VenueAccountState:
     it before comparing (ADR-0034 Tier 1). The ledger's own sums are exact, so
     without it a 1e-25 remainder from a division reads as a divergence and
     heals (#580). It has no default because only the venue knows its unit.
+    Rounding reads only its exponent, so ``0.0000010`` means 7 decimals.
     """
 
     equity: Decimal
