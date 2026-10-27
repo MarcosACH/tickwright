@@ -225,12 +225,19 @@ class VenueAccountState:
     default for the same reason ``VenuePositionState.leverage`` has none: a
     state that claims an instant no venue was read for would put genesis at
     a time of the test's choosing.
+
+    ``cash_quantum`` is the smallest cash unit the venue reports, such as
+    ``0.000001`` for USDC to 6 decimals. The reconcile rounds both cash lines to
+    it before comparing (ADR-0034 Tier 1). The ledger's own sums are exact, so
+    without it a 1e-25 remainder from a division reads as a divergence and
+    heals (#580). It has no default because only the venue knows its unit.
     """
 
     equity: Decimal
     free_margin: Decimal
     cross_maintenance_margin: Decimal
     as_of_ts_ns: int
+    cash_quantum: Decimal
     positions: tuple[VenuePositionState, ...] = ()
 
 

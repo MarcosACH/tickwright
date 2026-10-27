@@ -35,6 +35,9 @@ empty, which would make this an allowlist that refuses **every** mode."""
 
 _NS_PER_MS = 1_000_000
 
+_USDC_QUANTUM: Final = Decimal("0.000001")
+"""Account figures come back in USDC to 6 decimals, e.g. ``"297.783945"``."""
+
 
 def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
     """The venue's static declaration about the account this process trades.
@@ -252,6 +255,7 @@ def normalize_account_state(response: object) -> VenueAccountState:
                 free_margin=figure(cross_equity) - figure(cross_margin_used),
                 cross_maintenance_margin=figure(cross_maintenance),
                 as_of_ts_ns=as_of_ms * _NS_PER_MS,
+                cash_quantum=_USDC_QUANTUM,
                 positions=tuple(_position(entry["position"]) for entry in entries),
             )
     raise ValueError("unrecognized clearinghouseState response")

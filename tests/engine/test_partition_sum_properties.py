@@ -38,7 +38,7 @@ from decimal import Decimal
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from ledgers import GENESIS
-from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
+from venue_doubles import LIVE_ACCOUNT_ID, USDC_QUANTUM, LiveVenueDouble, account_state
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -260,6 +260,7 @@ def _venue_state(sizes: dict[str, Decimal]) -> VenueAccountState:
         free_margin=Decimal("0.0096"),
         cross_maintenance_margin=Decimal("1.6198"),
         as_of_ts_ns=0,
+        cash_quantum=USDC_QUANTUM,
         positions=tuple(
             VenuePositionState(
                 symbol=symbol,

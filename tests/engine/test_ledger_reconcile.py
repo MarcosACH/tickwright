@@ -365,6 +365,7 @@ def _held(
             CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
         ),
         as_of_ts_ns=recorded_state.as_of_ts_ns,
+        cash_quantum=recorded_state.cash_quantum,
         positions=tuple(
             margined(
                 replace(
