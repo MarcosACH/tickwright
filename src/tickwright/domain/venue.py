@@ -231,7 +231,7 @@ class VenueAccountState:
     it before comparing (ADR-0034 Tier 1). The ledger's own sums are exact, so
     without it a 1e-25 remainder from a division reads as a divergence and
     heals (#580). It has no default because only the venue knows its unit.
-    Rounding reads only its exponent, so ``0.0000010`` means 7 decimals.
+    It must be written as ``1`` or ``0.0…01``, with no trailing zero.
     """
 
     equity: Decimal
@@ -240,6 +240,15 @@ class VenueAccountState:
     as_of_ts_ns: int
     cash_quantum: Decimal
     positions: tuple[VenuePositionState, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Rounding reads only the exponent. So ``0`` rounds to whole units and
+        # hides real gaps, and ``0.0000010`` quietly means 7 decimals. Neither
+        # raises on its own, so a wrong unit has to fail here.
+        unit = self.cash_quantum
+        exponent = unit.as_tuple().exponent
+        if not (unit.is_finite() and unit <= 1 and unit == Decimal(1).scaleb(int(exponent))):
+            raise InvariantViolation(f"cash_quantum {unit} is not 1 or 0.0…01")
 
 
 class AccountModeVerdict(Enum):
