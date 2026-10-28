@@ -160,17 +160,19 @@ class AnswersFirst(HeldShort):
 class HalfClosesBesideAGap(HeldShort):
     """Each HYPE close fills half the short. A BTC long the books never hold sits beside it.
 
-    The venue gives the BTC row no ``entryPx``, so no account pass can book it
-    (ADR-0034). BTC's loop then runs an account pass on every attempt.
+    The BTC size grows by 0.001 on every read. An account pass heals a size gap
+    only once two passes see the same gap (#574), so no pass ever books BTC.
+    BTC's loop then runs an account pass on every attempt.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.closes = 0
+        self.btc_reads = 0
 
     def account(self, payload: dict) -> dict:
-        btc = _short("BTC", "0.001", "0.0")
-        del btc["position"]["entryPx"]
+        self.btc_reads += 1
+        btc = _short("BTC", str(Decimal("0.001") * self.btc_reads), "0.0")
         hype = Decimal("-2.0") + self.closes
         return _account(btc, *([_short("HYPE", str(hype), "25.0")] if hype else []))
 

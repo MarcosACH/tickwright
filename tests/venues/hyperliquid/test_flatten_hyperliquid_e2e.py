@@ -105,7 +105,8 @@ def test_an_account_pass_waits_for_another_symbols_close_to_be_booked(tmp_path: 
         )
 
     assert exit_code == 1
-    assert logs[-1]["left"] == "BTC=0.001"
+    # The BTC size grows on every read, so only the coin is fixed.
+    assert logs[-1]["left"].startswith("BTC=")
     closes = [url for url, payload in post.requests if request_type(url, payload) == "order"]
     assert len(closes) == 2
     # Only the first pass heals HYPE: the short opened by hand.

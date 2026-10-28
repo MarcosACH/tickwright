@@ -176,7 +176,8 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
     has no position to carry.
 
     What this asserts past the double-driven suite is **provenance**. ``0.002``
-    and ``64809`` are strings in the recorded body above, and the cash line the
+    is a string in the recorded body above. ``64809`` is the adapter's true
+    entry, from the body's ``positionValue`` and ``unrealizedPnl`` (#582). The cash line the
     heal lands on is not in it at all — it is ``accountValue − Σ unrealizedPnl``,
     the identity ADR-0040 §7 reads backwards, computed by the adapter from two
     venue fields. A test that handed the cycle a ``VenueAccountState`` would have
