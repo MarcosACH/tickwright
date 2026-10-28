@@ -1,6 +1,6 @@
 [project]
 name = "tickwright"
-version = "0.6.1"
+version = "0.7.0"
 description = "A readable, event-driven algorithmic trading engine."
 # No upper bound. Users install Tickwright into their own project. A cap would
 # lock them out of each new Python release until we lift it (issue #536).
