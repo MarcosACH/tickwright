@@ -774,6 +774,9 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
             "an account figure the venue re-typed as a number",
             _with_summary_figure(CROSS_SNAPSHOT, "marginSummary", "accountValue", 25.9264),
         ),
+        # The entry is the cost basis over the size (#582), so a zero size has
+        # no entry. The venue omits a flat coin, so a zero row is not its contract.
+        ("a zero position size", _with_position_figure(CROSS_SNAPSHOT, "szi", "0.0")),
     ],
 )
 def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(
