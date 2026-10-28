@@ -184,3 +184,28 @@ These are the facts the decision waits on.
   - A direct before and after `totalRawUsd` check around one fill.
   - The rounding rule behind `fee`.
   - Whether `ntl` truncation also applies on a flip through zero.
+
+## Testnet check for #582
+
+**Date:** 2026-10-27.
+
+Six BTC fills on testnet: two buys at different prices, two partial closes, a flip, and a close to
+flat. Net cash is `equity − Σ signed positionValue` on the venue side. It is the cash line minus
+the cost basis of every open position.
+
+| Step | Fill | Venue truncation drift | Net cash gap |
+| --- | --- | --- | --- |
+| 1-2 | Buys at 80739 and 80740 | 0 | 0 |
+| 3 | Partial close, 2 fills | −0.0000013 | 0 |
+| 4 | Partial close | −0.0000007 | 0 |
+| 5 | Flip to short | 0, entry resets to the fill price | 0 |
+| 6 | Close to flat | 0 | 0 |
+
+- `equity − Σ signed positionValue` equaled `totalRawUsd` exactly at every step.
+- Net cash moved by exactly `−signed(px × sz) − fee` on every fill.
+- The venue truncates on each partial **fill**, not once per order.
+- No funding was paid during the run.
+
+This settles the open unknowns above. The `totalRawUsd` check is done. The fee rule and the flip
+rule no longer matter, because the reconcile compares net cash and the ledger does not copy the
+truncation.

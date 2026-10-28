@@ -55,8 +55,8 @@ _DOC_SLICE = ".agents/tools/doc-slice"
 # `CONTEXT.md` is the one corpus file whose units are not headings: its `Language` section
 # is a single h2 running 850 of 900 lines, so a table of contents of it is not an index of
 # it, and offering one would send the caller to `doc-slice CONTEXT.md Language` — which
-# returns the file it was just refused. Its 60 bold terms are the index (1,238 characters
-# against 77,403), each with the line number the offset/limit escape takes.
+# returns the file it was just refused. Its 62 bold terms are the index (1,272 characters
+# against 78,404), each with the line number the offset/limit escape takes.
 #
 # Named, not inferred. An ADR's headings *are* its units, and scanning one for
 # bold-prefixed lines would index its emphasis instead.
