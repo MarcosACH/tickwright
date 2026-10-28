@@ -231,12 +231,15 @@ auth, quirk translation — and importing no other adapter. It provides both a `
     for USDC to 6 decimals. The reconciler rounds both cash lines to it before comparing, so a
     coarser unit hides real gaps (#580). A unit that is not `1` or `0.0…01` raises
     `InvariantViolation`. The cash check compares net cash, not the cash line. On the venue side,
-    net cash is `equity − Σ signed notional` (#582). So report `notional` and `unrealized_pnl` as
-    the venue's own figures, at the same mark. A stale or rounded `notional` heals cash to a wrong
-    figure. See **Cost basis** and **Net cash** in [`CONTEXT.md`](../CONTEXT.md).
-    Its peer method `verify_account_mode()` guards the one
-    path that writes a venue number to disk: answer `VERIFIED` only while the account is in a mode
-    whose numbers may be healed toward (ADR-0046 §4). Paper answers `VERIFIED` always, for the same reason it answers `None` above.
+    net cash is `equity − Σ signed notional` (#582). So report `notional` as the figure the venue
+    builds its equity from. Report `unrealized_pnl` at the same mark. On Hyperliquid that figure is
+    `positionValue`, not `ntl`, because the venue truncates `ntl` on a partial close. See
+    [`venues/hyperliquid/account.py`](../src/tickwright/venues/hyperliquid/account.py). A stale or
+    rounded `notional` heals cash to a wrong figure. See **Cost basis** and **Net cash** in
+    [`CONTEXT.md`](../CONTEXT.md). Its peer method `verify_account_mode()` guards the one path that
+    writes a venue number to disk: answer `VERIFIED` only while the account is in a mode whose
+    numbers may be healed toward (ADR-0046 §4). Paper answers `VERIFIED` always, for the same
+    reason it answers `None` above.
   - Funding. If the venue pays funding, publish each payment as a `FundingAccrual` event with the
     venue's own amount, never one you recomputed (ADR-0037). If nobody can be asked, generate it
     in `run()` as `PaperExchange` does. `run()` is where that loop lives, and the bullet below says
