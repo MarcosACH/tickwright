@@ -684,6 +684,45 @@ def test_a_partial_close_the_venue_truncated_does_not_heal_cash_while_the_positi
     assert projection.account().cash == ledger_cash
 
 
+def test_closing_the_rest_of_a_truncated_position_to_flat_does_not_heal_cash() -> None:
+    """At flat the venue's truncation is gone, and its cash line is exact again
+    (#582, testnet step 6). So the ledger must not have healed while the
+    position was open, or it would now be off by that heal and heal it back.
+
+    The open book is the case above. A sell of the last 0.002 at 80750 adds
+    161.5, so both sides end at 838.51144 + 161.5 = 1000.01144.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="1000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.001", price="80739", seq=1)
+    _book_fill(projection, quantity="0.002", price="80740", seq=2)
+    _book_fill(projection, quantity="0.00011", price="80734", seq=3, side=Side.SELL)
+    _book_fill(projection, quantity="0.00089", price="80730", seq=4, side=Side.SELL)
+    venue = _AccountVenue(
+        _held("999.990772", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"}),
+        _held("999.990772", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"}),
+        _held("1000.01144"),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    passes = []
+    for ts_ns in (8, 9):  # two passes while open, so a finding there could heal
+        clock.advance_to(ts_ns)
+        passes.append(asyncio.run(cycle.reconcile_account()))
+    _book_fill(projection, quantity="0.002", price="80750", seq=5, side=Side.SELL)
+    ledger_cash = projection.account().cash
+    for ts_ns in (10, 11):  # two passes at flat, for the same reason
+        clock.advance_to(ts_ns)
+        passes.append(asyncio.run(cycle.reconcile_account()))
+
+    for divergences in passes:
+        assert divergences is not None
+        assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+    assert projection.account().cash == ledger_cash
+    assert ledger_cash.quantize(Decimal("0.000001")) == Decimal("1000.01144")
+
+
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
     """The heal above is the one thing a mid-run mode switch must not be allowed
     to perform (ADR-0046 §4).
