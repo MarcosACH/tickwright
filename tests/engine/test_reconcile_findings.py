@@ -93,6 +93,7 @@ def _row(
     margin_used: str | None = "0",
     maintenance_margin: str | None = "0",
     leverage: LeverageSpec = DEFAULT_LEVERAGE,
+    entry_price: str = "100000",
 ) -> SymbolValuation:
     """One symbol's row of the ledger's side, with the figures a case is not
     about at zero.
@@ -101,10 +102,14 @@ def _row(
     own zeros, and the pair defaults to what a run that configured nothing holds
     every symbol at (ADR-0040 §5). A case whose subject is the mode says so on
     the row, since the classification reads the pair there and nowhere else.
+
+    ``entry_price`` defaults to ``_position``'s, so a symbol both sides hold at
+    one size agrees on cost basis and so on net cash (#582).
     """
     return SymbolValuation(
         symbol=symbol,
         net=Decimal(net),
+        cost_basis=Decimal(net) * Decimal(entry_price),
         unrealized_pnl=None if unrealized_pnl is None else Decimal(unrealized_pnl),
         notional=None if notional is None else Decimal(notional),
         isolated_collateral=Decimal("0"),
@@ -404,7 +409,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
         account=account,
         rows={
             "BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000"),
-            "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None),
+            "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None, entry_price="3800"),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
@@ -545,9 +550,15 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
                 notional="60000",
                 maintenance_margin="1000",
                 leverage=_CROSS_1X,
+                entry_price="50000",
             ),
             "ETH": _row(
-                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+                "ETH",
+                net="1",
+                unrealized_pnl="0",
+                notional="40000",
+                maintenance_margin="500",
+                entry_price="40000",
             ),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
@@ -614,9 +625,15 @@ def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenanc
                 notional="60000",
                 maintenance_margin="1000",
                 leverage=_CROSS_1X,
+                entry_price="50000",
             ),
             "ETH": _row(
-                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+                "ETH",
+                net="1",
+                unrealized_pnl="0",
+                notional="40000",
+                maintenance_margin="500",
+                entry_price="40000",
             ),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},

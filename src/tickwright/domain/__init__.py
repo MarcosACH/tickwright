@@ -5,7 +5,7 @@ This package *defines* the seams every adapter and the engine compile against.
 It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
-from .account import Account, AccountSpec, AccountView, venue_cash
+from .account import Account, AccountSpec, AccountView, venue_cash, venue_net_cash
 from .duration import duration_ns
 from .economics import fill_fee, funding_amount, funding_boundaries
 from .emitter import SignalEmitter
@@ -256,6 +256,8 @@ __all__ = [
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",
+    # the figure the live cash check compares (#582)
+    "venue_net_cash",
     # Tier-2 view assembly (pure, never stored)
     "LiquidationSource",
     "SymbolValuation",

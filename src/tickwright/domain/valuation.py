@@ -475,6 +475,9 @@ class SymbolValuation:
     symbol: str
     net: Decimal
     """The account-net signed size, over every partition."""
+    cost_basis: Decimal
+    """Signed size times entry price, summed over every partition. Tier 1, so
+    never ``None``. The cash check subtracts it to compare net cash (#582)."""
     unrealized_pnl: Decimal | None
     notional: Decimal | None
     isolated_collateral: Decimal | None
@@ -591,10 +594,17 @@ def account_valuation(
     held = tuple(positions)
     upnl: dict[str, Decimal | None] = {}
     buckets: dict[str, Decimal | None] = {}
+    # Per partition and not off the net, because each partition holds its own
+    # entry. Two strategies on opposite sides net to zero size but not to zero
+    # cost basis.
+    cost_basis: dict[str, Decimal] = {}
     for position in held:
         symbol = position.symbol
         upnl[symbol] = _total(upnl.get(symbol, _ZERO), _unrealized_pnl(position, marks.get(symbol)))
         buckets[symbol] = _total(buckets.get(symbol, _ZERO), position.isolated_collateral)
+        cost_basis[symbol] = (
+            cost_basis.get(symbol, _ZERO) + position.signed_size * position.entry_price
+        )
     rows: dict[str, SymbolValuation] = {}
     for symbol, size in account_net_size(held).items():
         symbol_leverage = leverage.for_symbol(symbol)
@@ -602,6 +612,7 @@ def account_valuation(
         rows[symbol] = SymbolValuation(
             symbol=symbol,
             net=size,
+            cost_basis=cost_basis[symbol],
             unrealized_pnl=upnl[symbol],
             notional=notional,
             isolated_collateral=buckets[symbol],

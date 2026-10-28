@@ -48,6 +48,17 @@ def venue_cash(state: VenueAccountState) -> Decimal:
     return state.equity - sum((position.unrealized_pnl for position in state.positions), _ZERO)
 
 
+def venue_net_cash(state: VenueAccountState) -> Decimal:
+    """The venue's cash line minus the cost basis of its open positions.
+
+    It works out to ``equity − Σ signed notional``. The live cash check compares
+    this and not ``venue_cash`` (#582). A venue may round its cost basis on a
+    partial close. That moves its cash line by the rounding and leaves net cash
+    alone. On Hyperliquid this equals ``totalRawUsd``, measured on testnet.
+    """
+    return venue_cash(state) - sum((position.cost_basis for position in state.positions), _ZERO)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AccountSpec:
     """The venue adapter's static declarations about the account it trades.

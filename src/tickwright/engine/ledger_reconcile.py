@@ -28,6 +28,7 @@ from tickwright.domain import (
     VenuePositionState,
     duration_ns,
     venue_cash,
+    venue_net_cash,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -531,13 +532,30 @@ def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence,
     pool first, then what it is backing.
     """
     venue = venue_cash(state)
+    # Net cash and not the cash line. A venue may round its cost basis on a
+    # partial close, which moves its cash line and leaves net cash alone (#582).
+    # A symbol with a size finding takes the venue's cost basis on both sides.
+    # Its gap is the size finding's to report, and counted here too it would
+    # read as a cash gap the size of the missed fill.
+    venue_basis = {position.symbol: position.cost_basis for position in state.positions}
+    diverged = {symbol for symbol, _, _ in _net_diff(reading.net, _venue_net(state))}
+    ledger_net = reading.account.cash - sum(
+        (
+            venue_basis.get(symbol, Decimal(0)) if symbol in diverged else row.cost_basis
+            for symbol, row in reading.rows.items()
+        ),
+        Decimal(0),
+    )
+    # A diverged symbol the ledger never held has no row.
+    ledger_net -= sum(
+        (venue_basis[symbol] for symbol in diverged - reading.rows.keys()), Decimal(0)
+    )
     # Tier 1 is exact at the venue's unit, not at Decimal's 28 digits. The
     # ledger's sums are exact, so a division leaves a remainder far below one
     # unit that no venue figure can hold (#580). The finding keeps both raw
-    # figures, so the record shows the gap the venue unit absorbed. This does
-    # not cover Hyperliquid's truncation drift on a partial close (#585).
+    # figures, so the record shows the gap the venue unit absorbed.
     unit = state.cash_quantum
-    if reading.account.cash.quantize(unit, ROUND_HALF_EVEN) == venue.quantize(
+    if ledger_net.quantize(unit, ROUND_HALF_EVEN) == venue_net_cash(state).quantize(
         unit, ROUND_HALF_EVEN
     ):
         return ()
@@ -594,7 +612,6 @@ def _sizes(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence
     reads: the grain that decides a symbol is flat and the grain that decides
     it is unheld cannot be looking at two folds.
     """
-    venue = {position.symbol: position.signed_size for position in state.positions}
     return tuple(
         Divergence(
             tier=DivergenceTier.TIER_1,
@@ -603,8 +620,13 @@ def _sizes(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence
             ledger=held,
             venue=seen,
         )
-        for symbol, held, seen in _net_diff(reading.net, venue)
+        for symbol, held, seen in _net_diff(reading.net, _venue_net(state))
     )
+
+
+def _venue_net(state: VenueAccountState) -> dict[str, Decimal]:
+    """The venue's signed size per symbol, the size check's right-hand side."""
+    return {position.symbol: position.signed_size for position in state.positions}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

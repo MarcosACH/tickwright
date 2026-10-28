@@ -411,6 +411,7 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
         ("BTC", "0.003", "0"),  # a fill the ledger missed
         ("DOGE", "100", "0"),  # agrees
         ("SOL", "10", "0"),  # flow the engine never placed
+        entry={"DOGE": "0.4"},  # agrees on cost basis too, so net cash agrees (#582)
     )  # ETH: held by the ledger, flat at the venue
     cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
@@ -650,6 +651,37 @@ def test_a_cash_gap_of_one_venue_unit_still_heals() -> None:
     asyncio.run(cycle.reconcile_account())
 
     assert keeper.portfolio.account().cash == Decimal("100000.000001")
+
+
+def test_a_partial_close_the_venue_truncated_does_not_heal_cash_while_the_position_is_open() -> (
+    None
+):
+    """Hyperliquid cuts a position's cost basis to 6 decimals on each partial
+    close fill. Its cash line moves with that cut, and its net cash does not
+    (#582). These are the fills from the testnet check on #582.
+
+    Two buys give a cost basis of 242.219. Two sell fills close 0.001 of 0.003.
+    The venue then holds a cost basis of 161.479332, measured. The exact one is
+    161.4793333…, so the two cash lines differ by 1.33 micro-USDC. Net cash is
+    1000 − 242.219 + 80734 × 0.00011 + 80730 × 0.00089 = 838.51144 on both sides.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="1000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.001", price="80739", seq=1)
+    _book_fill(projection, quantity="0.002", price="80740", seq=2)
+    _book_fill(projection, quantity="0.00011", price="80734", seq=3, side=Side.SELL)
+    _book_fill(projection, quantity="0.00089", price="80730", seq=4, side=Side.SELL)
+    ledger_cash = projection.account().cash
+    venue = _held("999.990772", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+    assert projection.account().cash == ledger_cash
 
 
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
