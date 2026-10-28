@@ -268,11 +268,10 @@ def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     it whenever the price would be non-positive, which is the majority case for a
     long (ADR-0046 §6), and nothing here may substitute a number for it.
 
-    ``entryPx`` is the one field here the venue types **optional**, so its absence
-    is a legal response and must not freeze the reconcile — the freeze is for
-    responses we cannot read, and no comparison depends on this field. Every
-    other field is required: missing one means we are not reading what we think
-    we are, and the caller turns that into a failed read.
+    ``entryPx`` is not read. The venue types it optional and displays it
+    truncated, so the entry comes from required fields instead (issue #582).
+    Every field read here is required. Missing one means we are not reading what
+    we think we are, and the caller turns that into a failed read.
 
     The ``leverage`` sub-object is read **once**, into the pair, and the mode is
     taken off that pair rather than parsed a second time for the collateral. Two
@@ -282,14 +281,19 @@ def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     """
     margin_used = figure(reported["marginUsed"])
     unrealized_pnl = figure(reported["unrealizedPnl"])
-    entry_price = reported.get("entryPx")
+    signed_size = figure(reported["szi"])
+    notional = figure(reported["positionValue"])
+    # The displayed entryPx is truncated, and a size heal copies this entry into
+    # the ledger's cost basis. So the entry comes from the exact cost basis
+    # instead (issue #582). A zero szi divides by zero, which fails the read.
+    cost_basis = notional.copy_sign(signed_size) - unrealized_pnl
     liquidation_price = reported["liquidationPx"]
     leverage = reported_leverage(reported["leverage"])
     return VenuePositionState(
         symbol=str(reported["coin"]),
-        signed_size=figure(reported["szi"]),
-        entry_price=None if entry_price is None else figure(entry_price),
-        notional=figure(reported["positionValue"]),
+        signed_size=signed_size,
+        entry_price=cost_basis / signed_size,
+        notional=notional,
         unrealized_pnl=unrealized_pnl,
         margin_used=margin_used,
         isolated_collateral=_isolated_collateral(

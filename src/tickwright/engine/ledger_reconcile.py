@@ -27,7 +27,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenuePositionState,
     duration_ns,
-    venue_cash,
+    venue_net_cash,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -87,7 +87,7 @@ class DivergenceField(Enum):
     (``Divergence.symbol``), which is the other half of what a consumer keys on.
     """
 
-    CASH = "cash"
+    NET_CASH = "net_cash"
     SIGNED_SIZE = "signed_size"
     EQUITY = "equity"
     FREE_MARGIN = "free_margin"
@@ -516,37 +516,57 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     return _sum(reading.rows[symbol].notional for symbol in terms)
 
 
-def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
-    """Tier-1: the accumulated cash line against the one the snapshot implies.
+def _net_cash(
+    state: VenueAccountState, reading: LedgerReading, size_findings: tuple[Divergence, ...]
+) -> tuple[Divergence, ...]:
+    """Tier-1: the ledger's net cash against the venue's (#582).
 
-    The venue publishes no cash line, so the comparison is against
-    ``venue_cash(state)`` — ADR-0040 §7's ``equity = cash + Σ uPnL`` read
-    backwards, and the *same* function the genesis was ingested through, so
-    the line an account opened at and the line it is checked against can
-    never be two derivations.
+    Net cash is the cash line minus the cost basis of every open position. The
+    venue side is ``venue_net_cash(state)``. It is built on ``venue_cash``, the
+    function the genesis was ingested through, so the two are one derivation.
+
+    ``size_findings`` is this pass's ``_sizes``, taken as an input and not
+    worked out again. The cash heal waits on those same findings, so the check
+    and the heal cannot disagree on which symbols diverged.
 
     Account grain, so the record carries no symbol: the account has one
     collateral pool and open PnL is not attributable to it. Ahead of the
     per-symbol findings because that is the order the two are read in — the
     pool first, then what it is backing.
     """
-    venue = venue_cash(state)
+    venue = venue_net_cash(state)
+    # Net cash and not the cash line. A venue may round its cost basis on a
+    # partial close, which moves its cash line and leaves net cash alone (#582).
+    # A symbol with a size finding takes the venue's cost basis on both sides.
+    # Its gap is the size finding's to report, and counted here too it would
+    # read as a cash gap the size of the missed fill.
+    venue_basis = {position.symbol: position.cost_basis for position in state.positions}
+    # A size finding always carries its symbol. The filter only narrows the type.
+    diverged = {finding.symbol for finding in size_findings if finding.symbol is not None}
+    ledger_net = reading.account.cash - sum(
+        (
+            venue_basis.get(symbol, Decimal(0)) if symbol in diverged else row.cost_basis
+            for symbol, row in reading.rows.items()
+        ),
+        Decimal(0),
+    )
+    # A diverged symbol the ledger never held has no row.
+    ledger_net -= sum(
+        (venue_basis[symbol] for symbol in diverged - reading.rows.keys()), Decimal(0)
+    )
     # Tier 1 is exact at the venue's unit, not at Decimal's 28 digits. The
     # ledger's sums are exact, so a division leaves a remainder far below one
     # unit that no venue figure can hold (#580). The finding keeps both raw
-    # figures, so the record shows the gap the venue unit absorbed. This does
-    # not cover Hyperliquid's truncation drift on a partial close (#585).
+    # figures, so the record shows the gap the venue unit absorbed.
     unit = state.cash_quantum
-    if reading.account.cash.quantize(unit, ROUND_HALF_EVEN) == venue.quantize(
-        unit, ROUND_HALF_EVEN
-    ):
+    if ledger_net.quantize(unit, ROUND_HALF_EVEN) == venue.quantize(unit, ROUND_HALF_EVEN):
         return ()
     return (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field=DivergenceField.CASH,
+            field=DivergenceField.NET_CASH,
             symbol=None,
-            ledger=reading.account.cash,
+            ledger=ledger_net,
             venue=venue,
         ),
     )
@@ -906,13 +926,16 @@ class ReconcileFindings:
     cash: _CashHeal | None
     """The Tier-1 cash finding this pass heals, with the correction that closes it."""
     deferred: int
-    """Tier-1 findings a fill inside the read held back. Clears on the next pass."""
+    """Tier-1 findings a fill inside the read held back. Clears on the next pass.
+    Also a cash finding held back while an unconfirmed size finding waits (#582)."""
     unconfirmed: int
     """Tier-1 findings not in ``previous``. Heals on the next pass if the same gap is there."""
     unpriced: int
-    """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
+    """Tier-1 size findings the venue posts no entry price for. Persists while it does not.
+    Also a cash finding held back while such a size finding waits (#582)."""
     seen: frozenset[_Finding]
-    """The Tier-1 findings this pass neither healed nor deferred. The next pass's ``previous``."""
+    """The Tier-1 findings this pass neither healed nor deferred for a fill. The next
+    pass's ``previous``."""
 
     # The two tier counts are derived and not stored, so they cannot disagree
     # with ``divergences``. They live here with the other four counts so the
@@ -971,7 +994,8 @@ class ReconcileFindings:
         range over entries the venue never returned, and it cannot disagree
         with the margin figure it sits next to.
         """
-        divergences = _cash(state, reading) + _sizes(state, reading)
+        size_findings = _sizes(state, reading)
+        divergences = _net_cash(state, reading, size_findings) + size_findings
         for account_figure in _ACCOUNT_GRAIN:
             divergences += _account_grain(state, reading, account_figure)
         for compared in _PER_SYMBOL:
@@ -1019,7 +1043,7 @@ class ReconcileFindings:
         for divergence in divergences:
             if divergence.tier is not DivergenceTier.TIER_1:
                 continue
-            if divergence.field is DivergenceField.CASH:
+            if divergence.field is DivergenceField.NET_CASH:
                 cash_findings.append(divergence)
                 continue
             if divergence.symbol in moved:
@@ -1063,24 +1087,35 @@ class ReconcileFindings:
             )
             forget.add(_finding(divergence))
         cash: _CashHeal | None = None
+        # The cash heal adds the ledger's cost basis after the size fills
+        # (#582). A size finding held back leaves that cost basis at the old
+        # size, so the cash heal waits for it. Unlike a moved symbol, the gap
+        # it compared is sound, so it stays seen and heals with the size.
         if cash_findings and moved:
             deferred += len(cash_findings)
             forget.update(_finding(finding) for finding in cash_findings)
         elif any(_finding(finding) not in previous for finding in cash_findings):
             unconfirmed += len(cash_findings)
+        elif cash_findings and len(heals) < len(size_findings):
+            # Counted with what holds it. An unpriced size does not clear on
+            # its own, so neither does this wait.
+            if unpriced:
+                unpriced += len(cash_findings)
+            else:
+                deferred += len(cash_findings)
         elif cash_findings:
             # At most one, since the account has one collateral pool (ADR-0041
             # §2), and the unpack says so rather than assuming it: a second
-            # would mean ``_cash`` had grown a grain, and healing to whichever
-            # came first is the failure a ``next`` hides. Deliberately not an
-            # ``InvariantViolation``, on ``exchange.py``'s adjudicator idiom: no
-            # input through this seam reaches it, and the two fault the run
-            # the same way. The target is the finding's own venue side, so the
-            # figure healed to is the figure classified against.
+            # would mean ``_net_cash`` had grown a grain, and healing to
+            # whichever came first is the failure a ``next`` hides. Deliberately
+            # not an ``InvariantViolation``, on ``exchange.py``'s adjudicator
+            # idiom: no input through this seam reaches it, and the two fault
+            # the run the same way. The target is the finding's own venue side,
+            # so the figure healed to is the figure classified against.
             (cash_finding,) = cash_findings
             cash = _CashHeal(
                 divergence=cash_finding,
-                correction=CashCorrection(target=cash_finding.venue, ts_ns=now_ns),
+                correction=CashCorrection(net_cash=cash_finding.venue, ts_ns=now_ns),
             )
             forget.add(_finding(cash_finding))
         # A planned heal the cycle then drops, at the mode gate or the store,

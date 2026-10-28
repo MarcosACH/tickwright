@@ -890,6 +890,20 @@ an admission gate this surface does not implement), margin **call**, buying powe
 (enforcement/broker terms — this surface only reports), margin **tier** (the piecewise table is a
 deferred extension point).
 
+**Cost basis**:
+A [[Position]]'s signed size times its entry price. It is what the open position cost. The venue side
+is recovered as `signed positionValue − unrealizedPnl`. See issue #582.
+_Avoid_: entry notional ([[Notional]] is unsigned and valued at the mark), `ntl` (Hyperliquid's
+field name, which the venue truncates on a partial close).
+
+**Net cash**:
+The [[Account]]'s cash line minus the [[Cost basis|cost basis]] of every open [[Position]]. The venue
+side is `equity − Σ signed positionValue`. The Tier-1 cash check compares net cash, not the cash
+line, because a venue can round its cost basis and so move its cash line without moving net cash.
+See issue #582.
+_Avoid_: raw USD (`rawUsd` is a Hyperliquid field, and its per-position form was once mistaken for
+collateral), collateral.
+
 **Unposted bucket**:
 A live isolated `isolated_collateral` the venue has not posted since our last open, add or partial
 close of that [[Position]], so its value is unknown and the figures built on it read `None`. Only an

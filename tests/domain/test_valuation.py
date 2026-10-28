@@ -1285,6 +1285,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
         "BTC": SymbolValuation(
             symbol="BTC",
             net=Decimal("0.5"),
+            cost_basis=Decimal("29000"),
             unrealized_pnl=Decimal("1000"),
             notional=Decimal("30000"),
             isolated_collateral=Decimal("0"),
@@ -1296,6 +1297,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
         "ETH": SymbolValuation(
             symbol="ETH",
             net=Decimal("10"),
+            cost_basis=Decimal("30000"),
             unrealized_pnl=Decimal("2000"),
             notional=Decimal("32000"),
             isolated_collateral=Decimal("6000"),
@@ -1307,6 +1309,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
         "SOL": SymbolValuation(
             symbol="SOL",
             net=Decimal("100"),
+            cost_basis=Decimal("2000"),
             unrealized_pnl=None,
             notional=None,
             isolated_collateral=Decimal("0"),

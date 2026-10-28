@@ -197,6 +197,16 @@ class VenuePositionState:
     liquidation_price: Decimal | None
     leverage: LeverageSpec
 
+    @property
+    def cost_basis(self) -> Decimal:
+        """Signed size times entry, as the venue holds it (#582).
+
+        Read off the notional and the unrealized PnL rather than off
+        ``entry_price``, because a venue may display a rounded entry. These two
+        figures are the ones its own cash line is built from.
+        """
+        return self.notional.copy_sign(self.signed_size) - self.unrealized_pnl
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VenueAccountState:

@@ -93,6 +93,7 @@ def _row(
     margin_used: str | None = "0",
     maintenance_margin: str | None = "0",
     leverage: LeverageSpec = DEFAULT_LEVERAGE,
+    entry_price: str = "100000",
 ) -> SymbolValuation:
     """One symbol's row of the ledger's side, with the figures a case is not
     about at zero.
@@ -101,10 +102,14 @@ def _row(
     own zeros, and the pair defaults to what a run that configured nothing holds
     every symbol at (ADR-0040 §5). A case whose subject is the mode says so on
     the row, since the classification reads the pair there and nowhere else.
+
+    ``entry_price`` defaults to ``_position``'s, so a symbol both sides hold at
+    one size agrees on cost basis and so on net cash (#582).
     """
     return SymbolValuation(
         symbol=symbol,
         net=Decimal(net),
+        cost_basis=Decimal(net) * Decimal(entry_price),
         unrealized_pnl=None if unrealized_pnl is None else Decimal(unrealized_pnl),
         notional=None if notional is None else Decimal(notional),
         isolated_collateral=Decimal("0"),
@@ -404,7 +409,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
         account=account,
         rows={
             "BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000"),
-            "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None),
+            "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None, entry_price="3800"),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
@@ -545,9 +550,15 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
                 notional="60000",
                 maintenance_margin="1000",
                 leverage=_CROSS_1X,
+                entry_price="50000",
             ),
             "ETH": _row(
-                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+                "ETH",
+                net="1",
+                unrealized_pnl="0",
+                notional="40000",
+                maintenance_margin="500",
+                entry_price="40000",
             ),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
@@ -614,9 +625,15 @@ def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenanc
                 notional="60000",
                 maintenance_margin="1000",
                 leverage=_CROSS_1X,
+                entry_price="50000",
             ),
             "ETH": _row(
-                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+                "ETH",
+                net="1",
+                unrealized_pnl="0",
+                notional="40000",
+                maintenance_margin="500",
+                entry_price="40000",
             ),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
@@ -933,7 +950,7 @@ def test_a_pass_with_a_fill_inside_the_read_reports_both_tier_1_findings_and_hea
     )
 
     tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
-    assert tier_1 == [(DivergenceField.CASH, None), (DivergenceField.SIGNED_SIZE, "BTC")]
+    assert tier_1 == [(DivergenceField.NET_CASH, None), (DivergenceField.SIGNED_SIZE, "BTC")]
     assert findings.heals == ()
     assert findings.cash is None
     assert findings.deferred == 2
@@ -978,10 +995,14 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
 
     The fill count stood at 2 before the read and BTC's last fill was the
     second, so nothing moved. The size heal buys the 0.1 the ledger is short,
-    at the venue's own entry price, and the cash correction assigns the venue's
-    100,000. Each rides next to the finding it closes, and both carry the one
+    at the venue's own entry price. The cash correction carries the venue's net
+    cash, 110,000 equity less 60,000 notional (#582). Each rides next to the
+    finding it closes, and both carry the one
     instant the classification was made at, so a retried pass mints the same
     keys for both halves.
+
+    The cash finding carries net cash on both sides. BTC has a size finding, so
+    the ledger side takes the venue's cost basis of 50,000 too: 99,990 − 50,000.
     """
     state = _missed_opening_fill()
     reading = _fee_taken_reading(net="0.4", last_fills={"BTC": 2})
@@ -1012,12 +1033,13 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
     assert findings.cash is not None
     assert findings.cash.divergence == Divergence(
         tier=DivergenceTier.TIER_1,
-        field=DivergenceField.CASH,
+        field=DivergenceField.NET_CASH,
         symbol=None,
-        ledger=Decimal("99990"),
-        venue=Decimal("100000"),
+        ledger=Decimal("49990"),
+        venue=Decimal("50000"),
     )
-    assert findings.cash.correction == CashCorrection(target=Decimal("100000"), ts_ns=_NOW_NS)
+    assert findings.cash.divergence.field.value == "net_cash"
+    assert findings.cash.correction == CashCorrection(net_cash=Decimal("50000"), ts_ns=_NOW_NS)
     assert (findings.deferred, findings.unpriced) == (0, 0)
 
 
@@ -1061,6 +1083,43 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
     assert (findings.deferred, findings.unpriced) == (0, 1)
 
 
+def test_a_cash_heal_held_behind_an_unpriced_size_is_counted_unpriced() -> None:
+    """The book above, plus the cash the venue's close realized (#582).
+
+    The cash heal waits while a size finding does not heal. Here that size
+    finding is unpriced, so the wait lasts as long as it does. A deferral
+    clears on the next pass, so the held cash finding is counted as
+    ``unpriced`` with the size that holds it.
+    """
+    state = _venue(equity="100000", free_margin="100000", positions=())
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("99990"),
+            equity=Decimal("99990"),
+            total_margin_used=Decimal("40000"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("59990"),
+            effective_leverage=None,
+        ),
+        rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_observed={"BTC": _NOW_NS},
+        last_fills={"BTC": 2},
+    )
+    first = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
+    )
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=first.seen
+    )
+
+    tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
+    assert tier_1 == [(DivergenceField.NET_CASH, None), (DivergenceField.SIGNED_SIZE, "BTC")]
+    assert findings.heals == ()
+    assert findings.cash is None
+    assert (findings.deferred, findings.unpriced) == (0, 2)
+
+
 _Book = tuple[VenueAccountState, LedgerReading]
 
 
@@ -1100,7 +1159,7 @@ def _ledger_size_off_by_a_tenth(book: _Book) -> _Book:
 # the isolation tests' own rosters, so a row deleted there is a member with
 # no producer here.
 _PRODUCED_BY: dict[DivergenceField, Callable[[_Book], _Book]] = {
-    DivergenceField.CASH: _ledger_cash_off_by_one,
+    DivergenceField.NET_CASH: _ledger_cash_off_by_one,
     DivergenceField.SIGNED_SIZE: _ledger_size_off_by_a_tenth,
     **{f: _venue_position_off_by_one(a) for f, a in _VENUE_POSITION_FIGURES.items()},
     **{f: _venue_account_off_by_one(a) for f, a in _VENUE_ACCOUNT_FIGURES.items()},

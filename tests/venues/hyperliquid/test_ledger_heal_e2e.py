@@ -176,7 +176,8 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
     has no position to carry.
 
     What this asserts past the double-driven suite is **provenance**. ``0.002``
-    and ``64809`` are strings in the recorded body above, and the cash line the
+    is a string in the recorded body above. ``64809`` is the adapter's true
+    entry, from the body's ``positionValue`` and ``unrealizedPnl`` (#582). The cash line the
     heal lands on is not in it at all — it is ``accountValue − Σ unrealizedPnl``,
     the identity ADR-0040 §7 reads backwards, computed by the adapter from two
     venue fields. A test that handed the cycle a ``VenueAccountState`` would have
@@ -203,7 +204,16 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
         divergences = asyncio.run(cycle.reconcile_account())
 
     assert [(d.tier, d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
-        (DivergenceTier.TIER_1, DivergenceField.CASH, None, Decimal("25.9264"), Decimal("25.9604")),
+        (
+            DivergenceTier.TIER_1,
+            DivergenceField.NET_CASH,
+            None,
+            # Net cash (#582). The venue's is accountValue − positionValue, the
+            # measured totalRawUsd. The ledger takes the venue's cost basis of
+            # 129.618 for BTC, which has a size finding.
+            Decimal("-103.6916"),
+            Decimal("-103.6576"),
+        ),
         (
             DivergenceTier.TIER_1,
             DivergenceField.SIGNED_SIZE,
@@ -255,7 +265,7 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
         (log["field"], log["symbol"], log["event_id"])
         for log in logs
         if log["event"] == NamedEvent.ACCOUNT_HEALED.value
-    ] == [("signed_size", "BTC", "reconcile:BTC:7"), ("cash", None, "reconcile:cash:7")]
+    ] == [("signed_size", "BTC", "reconcile:BTC:7"), ("net_cash", None, "reconcile:cash:7")]
     assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
         (None, "BTC", Decimal("0.002"))
     ]

@@ -411,6 +411,7 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
         ("BTC", "0.003", "0"),  # a fill the ledger missed
         ("DOGE", "100", "0"),  # agrees
         ("SOL", "10", "0"),  # flow the engine never placed
+        entry={"DOGE": "0.4"},  # agrees on cost basis too, so net cash agrees (#582)
     )  # ETH: held by the ledger, flat at the venue
     cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
@@ -544,6 +545,10 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     behind it is 99800 against the ledger's 100000: a real 200 gap, and one the
     un-subtracted comparison would have reported as 300.
 
+    The finding carries net cash (#582). Both sides hold 0.002 at 64809, a cost
+    basis of 129.618, so the pair is 99870.382 against 99670.382. The gap is
+    still 200.
+
     The position sizes agree, so the cycle's only finding is the account-grain
     line — cash carries no symbol, because the account has one collateral pool
     and nothing to attribute it to.
@@ -560,10 +565,10 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     assert divergences == (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field=DivergenceField.CASH,
+            field=DivergenceField.NET_CASH,
             symbol=None,
-            ledger=Decimal("100000"),
-            venue=Decimal("99800"),
+            ledger=Decimal("99870.382"),
+            venue=Decimal("99670.382"),
         ),
     )
 
@@ -650,6 +655,173 @@ def test_a_cash_gap_of_one_venue_unit_still_heals() -> None:
     asyncio.run(cycle.reconcile_account())
 
     assert keeper.portfolio.account().cash == Decimal("100000.000001")
+
+
+def test_a_partial_close_the_venue_truncated_does_not_heal_cash_while_the_position_is_open() -> (
+    None
+):
+    """Hyperliquid cuts a position's cost basis to 6 decimals on each partial
+    close fill. Its cash line moves with that cut, and its net cash does not
+    (#582). These are the fills from the testnet check on #582.
+
+    Two buys give a cost basis of 242.219. Two sell fills close 0.001 of 0.003.
+    The venue then holds a cost basis of 161.479332, measured. The exact one is
+    161.4793333…, so the two cash lines differ by 1.33 micro-USDC. Net cash is
+    1000 − 242.219 + 80734 × 0.00011 + 80730 × 0.00089 = 838.51144 on both sides.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="1000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.001", price="80739", seq=1)
+    _book_fill(projection, quantity="0.002", price="80740", seq=2)
+    _book_fill(projection, quantity="0.00011", price="80734", seq=3, side=Side.SELL)
+    _book_fill(projection, quantity="0.00089", price="80730", seq=4, side=Side.SELL)
+    ledger_cash = projection.account().cash
+    venue = _held("999.990772", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+    assert projection.account().cash == ledger_cash
+
+
+def test_closing_the_rest_of_a_truncated_position_to_flat_does_not_heal_cash() -> None:
+    """At flat the venue's truncation is gone, and its cash line is exact again
+    (#582, testnet step 6). So the ledger must not have healed while the
+    position was open, or it would now be off by that heal and heal it back.
+
+    The open book is the case above. A sell of the last 0.002 at 80750 adds
+    161.5, so both sides end at 838.51144 + 161.5 = 1000.01144.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="1000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.001", price="80739", seq=1)
+    _book_fill(projection, quantity="0.002", price="80740", seq=2)
+    _book_fill(projection, quantity="0.00011", price="80734", seq=3, side=Side.SELL)
+    _book_fill(projection, quantity="0.00089", price="80730", seq=4, side=Side.SELL)
+    venue = _AccountVenue(
+        _held("999.990772", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"}),
+        _held("999.990772", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"}),
+        _held("1000.01144"),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    passes = []
+    for ts_ns in (8, 9):  # two passes while open, so a finding there could heal
+        clock.advance_to(ts_ns)
+        passes.append(asyncio.run(cycle.reconcile_account()))
+    _book_fill(projection, quantity="0.002", price="80750", seq=5, side=Side.SELL)
+    ledger_cash = projection.account().cash
+    for ts_ns in (10, 11):  # two passes at flat, for the same reason
+        clock.advance_to(ts_ns)
+        passes.append(asyncio.run(cycle.reconcile_account()))
+
+    for divergences in passes:
+        assert divergences is not None
+        assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+    assert projection.account().cash == ledger_cash
+    assert ledger_cash.quantize(Decimal("0.000001")) == Decimal("1000.01144")
+
+
+def test_a_net_cash_gap_of_one_unit_heals_while_a_truncated_position_is_open() -> None:
+    """Comparing net cash must not hide a real gap (#582). The book is the
+    truncated one above, and the venue holds one more micro-USDC.
+
+    The heal sets net cash to the venue's 838.511441, then adds the ledger's
+    own cost basis of 161.4793333…. So cash lands on 999.9907743…. Copying the
+    venue's cash line, 999.990773, would bring in its truncation. The next pass
+    would then find the same gap again.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="1000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.001", price="80739", seq=1)
+    _book_fill(projection, quantity="0.002", price="80740", seq=2)
+    _book_fill(projection, quantity="0.00011", price="80734", seq=3, side=Side.SELL)
+    _book_fill(projection, quantity="0.00089", price="80730", seq=4, side=Side.SELL)
+    venue = _held("999.990773", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert projection.account().cash.quantize(Decimal("0.000001")) == Decimal("999.990774")
+    clock.advance_to(9)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+
+
+def test_a_size_heal_and_a_cash_heal_in_one_pass_leave_net_cash_equal_to_the_venue() -> None:
+    """The size heal books at the venue's entry, and the ledger's own entry
+    stays on its own partition. So the two cost bases differ after the pass
+    (#582). The cash heal must land net cash on the venue's anyway.
+
+    The ledger holds 0.002 at 64809, a cost basis of 129.618. The venue holds
+    0.003 at 65000, a cost basis of 195, and its net cash is 100010 − 195 =
+    99815. The heal buys 0.001 at 65000, so the ledger's cost basis becomes
+    194.618 and its cash 99815 + 194.618 = 100009.618.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100010", ("BTC", "0.003", "0"), entry={"BTC": "65000"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert projection.account_net() == {"BTC": Decimal("0.003")}
+    assert projection.account().cash == Decimal("100009.618")
+    clock.advance_to(9)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+
+
+def test_a_cash_heal_waits_while_a_size_finding_in_the_same_pass_does_not_heal() -> None:
+    """The cash heal adds the ledger's cost basis after the size fills (#582).
+    A size finding that does not heal leaves that cost basis at the old size.
+    Healed then, cash would be wrong by the missed fill's cost basis, and the
+    next pass would find a new gap.
+
+    The book is the case above. The first pass sees only the cash gap of 10.
+    On the second the venue also holds 0.001 more BTC. That size finding is
+    new, so it does not heal, and the cash heal must wait for it.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100010", ("BTC", "0.002", "0")),
+        _held("100010", ("BTC", "0.003", "0"), entry={"BTC": "65000"}),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert projection.account().cash == Decimal("100000")
+    clock.advance_to(9)  # the size finding is confirmed now, so both heal
+    asyncio.run(cycle.reconcile_account())
+    assert projection.account_net() == {"BTC": Decimal("0.003")}
+    assert projection.account().cash == Decimal("100009.618")
+    clock.advance_to(10)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
 
 
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
@@ -840,10 +1012,13 @@ def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under(
     names its symbol and the cash correction carries none — the account has one
     collateral pool (ADR-0041 §2). One stamp is behind both keys, which is the
     cycle's own, so the pair reads as one retryable unit.
+
+    The cash pair is net cash (#582). SOL has a size finding, so both sides take
+    the venue's cost basis of 10 × 150 = 1500: 98500 against 99000.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
-    venue = _AccountVenue(_held("100500", ("SOL", "10", "0")))
+    venue = _AccountVenue(_held("100500", ("SOL", "10", "0"), entry={"SOL": "150"}))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
     _seen(cycle)
 
@@ -856,7 +1031,7 @@ def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under(
         if log["event"] == NamedEvent.ACCOUNT_HEALED.value
     ] == [
         ("signed_size", "SOL", "0", "10", "reconcile:SOL:7"),
-        ("cash", None, "100000", "100500", "reconcile:cash:7"),
+        ("net_cash", None, "98500", "99000", "reconcile:cash:7"),
     ]
 
 
@@ -1709,7 +1884,8 @@ def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding
     divergences = asyncio.run(cycle.reconcile_account())
 
     assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
-        (DivergenceField.CASH, Decimal("100000"), Decimal("99900")),
+        # Net cash (#582): both cash lines less the cost basis of 129.618.
+        (DivergenceField.NET_CASH, Decimal("99870.382"), Decimal("99770.382")),
         # The cash gap restated: free margin is ``cash − Σ buckets``, so the 100
         # the cash line is out by lands here too. Equity is the one that would
         # have to be re-derived to disagree, and it is the assertion.
@@ -1972,7 +2148,7 @@ def test_a_cash_finding_on_a_pass_where_a_fill_landed_inside_the_read_is_not_hea
         divergences = asyncio.run(cycle.reconcile_account())
 
     assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
-        (DivergenceField.CASH, None, Decimal("99995"), Decimal("100000")),
+        (DivergenceField.NET_CASH, None, Decimal("99995"), Decimal("100000")),
         (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.001"), Decimal("0")),
     ]
     assert ledger.account().cash == Decimal("99995")
@@ -2003,7 +2179,7 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
         divergences = asyncio.run(cycle.reconcile_account())
 
     assert [d.field for d in divergences or ()] == [
-        DivergenceField.CASH,
+        DivergenceField.NET_CASH,
         DivergenceField.SIGNED_SIZE,
     ]
     assert venue.mode_reads == 0
@@ -3769,7 +3945,7 @@ def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain
 
     assert divergences is not None
     assert [(divergence.tier, divergence.field) for divergence in divergences] == [
-        (DivergenceTier.TIER_1, DivergenceField.CASH),
+        (DivergenceTier.TIER_1, DivergenceField.NET_CASH),
         (DivergenceTier.TIER_2, DivergenceField.EQUITY),
         (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN),
         (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN),

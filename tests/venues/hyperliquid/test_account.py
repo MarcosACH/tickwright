@@ -466,6 +466,21 @@ def test_a_cross_position_normalizes_to_the_measured_row_and_holds_no_collateral
     assert position.isolated_collateral is None
 
 
+def test_a_position_reports_the_true_entry_not_the_displayed_entry_px() -> None:
+    """A size heal copies this entry into the ledger's cost basis. The venue
+    displays ``entryPx`` truncated, so copying it would book that truncation.
+
+    Recorded HYPE short: ``(−108342.0 − 5929.91487) / −2000 = 57.135957435``,
+    against a displayed ``57.1359``. Over 2000 HYPE that gap is 0.11 USDC
+    (issue #582).
+    """
+    state = _fetch_state(MIXED_SNAPSHOT)
+
+    assert state is not None
+    entries = {position.symbol: position.entry_price for position in state.positions}
+    assert entries["HYPE"] == Decimal("57.135957435")
+
+
 def test_an_isolated_long_recovers_positive_collateral_from_a_negative_raw_usd_leg() -> None:
     """The trap the second measurement round closed.
 
@@ -628,20 +643,16 @@ def test_an_absent_liquidation_price_stays_absent() -> None:
     assert position.liquidation_price is None
 
 
-def test_a_position_with_no_entry_price_still_normalizes() -> None:
-    """``entryPx`` is the one position field the venue types **optional**, and
-    the freeze has to be reserved for responses we cannot read.
-
-    Freezing on a legal response would be the worse failure of the two: it would
-    stop *all* healing over a field no comparison depends on — the divergence
-    checks read notional, unrealized PnL and margin, each of which is its own
-    field. So the absence rides through as ``None`` and the state is still whole.
+def test_a_position_with_no_entry_px_still_has_its_entry() -> None:
+    """The venue types ``entryPx`` optional, so its absence is a legal response.
+    The entry comes from required fields (issue #582), so the absence changes
+    nothing. The recorded BTC long's entry stays 64809.
     """
     state = _fetch_state(_position_without(CROSS_SNAPSHOT, "entryPx"))
 
     assert state is not None
     (position,) = state.positions
-    assert position.entry_price is None
+    assert position.entry_price == Decimal("64809")
     assert position.notional == Decimal("129.584")
 
 
@@ -763,6 +774,9 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
             "an account figure the venue re-typed as a number",
             _with_summary_figure(CROSS_SNAPSHOT, "marginSummary", "accountValue", 25.9264),
         ),
+        # The entry is the cost basis over the size (#582), so a zero size has
+        # no entry. The venue omits a flat coin, so a zero row is not its contract.
+        ("a zero position size", _with_position_figure(CROSS_SNAPSHOT, "szi", "0.0")),
     ],
 )
 def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(

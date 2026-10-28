@@ -617,9 +617,13 @@ class CashCorrection:
 
     Account grain, so there is no symbol on it: the account has one collateral
     pool, and open PnL is not attributable to it (ADR-0041 §2).
+
+    The target is the venue's **net cash**, not its cash line (#582). A venue
+    may round its cost basis, and its cash line carries that rounding. The heal
+    adds the ledger's own cost basis back, so the rounding never enters.
     """
 
-    target: Decimal
+    net_cash: Decimal
     ts_ns: int
 
     @property
