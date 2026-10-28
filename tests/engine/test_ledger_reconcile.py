@@ -754,6 +754,36 @@ def test_a_net_cash_gap_of_one_unit_heals_while_a_truncated_position_is_open() -
     assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
 
 
+def test_a_size_heal_and_a_cash_heal_in_one_pass_leave_net_cash_equal_to_the_venue() -> None:
+    """The size heal books at the venue's entry, and the ledger's own entry
+    stays on its own partition. So the two cost bases differ after the pass
+    (#582). The cash heal must land net cash on the venue's anyway.
+
+    The ledger holds 0.002 at 64809, a cost basis of 129.618. The venue holds
+    0.003 at 65000, a cost basis of 195, and its net cash is 100010 − 195 =
+    99815. The heal buys 0.001 at 65000, so the ledger's cost basis becomes
+    194.618 and its cash 99815 + 194.618 = 100009.618.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100010", ("BTC", "0.003", "0"), entry={"BTC": "65000"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert projection.account_net() == {"BTC": Decimal("0.003")}
+    assert projection.account().cash == Decimal("100009.618")
+    clock.advance_to(9)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+
+
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
     """The heal above is the one thing a mid-run mode switch must not be allowed
     to perform (ADR-0046 §4).
