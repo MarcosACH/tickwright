@@ -130,7 +130,9 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   test run (#572). Bump PR backed by #578.
 - **v0.7.0** (2026-10-28). Fixes for ledger cash heals found in the testnet soak. MINOR, because
   the `Exchange` seam changed. `VenueAccountState` has a new required `cash_quantum` field, so an
-  exchange adapter must now set it (#580). No `TICKWRIGHT_*` variable or CLI behavior changed.
+  exchange adapter must now set it (#580). The cash check now reads each position's cost basis as
+  signed `notional` minus `unrealized_pnl`. So an adapter must report both exactly as the venue
+  does (#582). No `TICKWRIGHT_*` variable or CLI behavior changed.
   The reconcile no longer heals cash over a gap smaller than one USDC unit (#580). It compares
   net cash, so it no longer heals after a partial close on Hyperliquid (#582). msgpack is bumped
   so the dependency audit passes (#583). Bump PR backed by #587.
