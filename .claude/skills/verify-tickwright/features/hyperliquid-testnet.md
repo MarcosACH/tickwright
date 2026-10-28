@@ -3,7 +3,8 @@
 Real orders on the testnet exchange with the operator's funded testnet key. One round trip
 proves the signing path, the venue fill report, the venue-reported fee, the ledger that opens
 from the venue's balance, the 60 second account reconcile cadence, and that the key never reaches
-a log. Testnet only. Mainnet placement is out of scope for this skill.
+a log. A second life closes half a position first, so a reconcile runs while the rest is still
+open. Testnet only. Mainnet placement is out of scope for this skill.
 
 ## Sub-features
 
@@ -16,6 +17,8 @@ a log. Testnet only. Mainnet placement is out of scope for this skill.
   `account.healed` must not fire.
 - `tn-redaction` the signing key appears nowhere in the evidence.
 - `tn-divergence` a clean round trip raises no `valuation.divergence`.
+- `tn-partial` buy 0.002 BTC, sell 0.001, then sell the rest. At least one reconcile runs while
+  half the position is open, and the cash still needs no heal (#582).
 
 ## How to get to it (user POV)
 
@@ -28,7 +31,7 @@ Preconditions:
 
 - `$V doctor` says the repo `.env` has a signing key. The key is a funded testnet API wallet.
 - The testnet account holds no BTC position, or holds one whose leverage you are not changing.
-- Run id `testnet` is unused. Budget about eight minutes.
+- Run id `testnet` is unused. Budget about thirteen minutes.
 
 - **Run.** Run `$V init testnet --feature hyperliquid-testnet` and
   `$V start testnet rt --preset testnet --forward-key --strategy round_trip_then_flat --param QUANTITY=0.001 --param HOLD_TICKS=3 --param WAIT_SECONDS=10`.
@@ -42,11 +45,9 @@ Preconditions:
 - **Venue fees.** Run `FEES=$($V venue-fills testnet rt)`. It writes `rt.venue-fills.json` and
   prints the fee sum over every fill whose oid is a `venue_oid` in the `orders` rows. Not the
   cloid: every run places the same cloids, so a cloid cut would adopt the last run's fills.
-- **Key scan.** Run `$V secrets-check testnet > .agents/verify/testnet/evidence/secrets.txt`.
-  It runs after `venue-fills` so the scan covers every evidence file. The file holds
-  `no signing key in evidence` or nothing. A hit goes to stderr as file paths, never the key.
-  With a suffixed run id, change the path too.
-- **Check.** Run `$V check testnet rt tn-materialise --event account.materialised --expect 1`,
+- **Check the round trip.** Run these before the `pc` life starts, because `check --sql` reads
+  the store named in the run's current `.env`, and the `pc` life replaces it.
+  Run `$V check testnet rt tn-materialise --event account.materialised --expect 1`,
   `$V check testnet rt tn-round-trip --sql "select count(*) from orders where state='filled'" --expect 2`,
   `$V check testnet rt tn-round-trip --sql "select signed_size from positions" --expect 0.000`,
   `$V check testnet rt tn-round-trip --exit --expect 0`,
@@ -54,10 +55,32 @@ Preconditions:
   `$V check testnet rt tn-reconcile --event account.reconciled --expect 1`,
   `$V check testnet rt tn-cash --event account.healed --expect 0`,
   `$V check testnet rt tn-round-trip --event verify.flat --expect 1` (the run reached the end),
-  `$V check testnet rt tn-redaction --file secrets.txt --expect "no signing key in evidence"`,
   `$V check testnet rt tn-divergence --event valuation.divergence --expect 0`,
   `$V check testnet rt tn-round-trip --sql "select isolated_collateral from positions" --expect 0`
   (a closed position holds a known 0, not NULL, #524).
+- **Partial close.** Run
+  `$V start testnet pc --preset testnet --forward-key --env TICKWRIGHT_SQLITE__PATH=pc.db --env 'TICKWRIGHT_STRATEGIES=[{"strategy": "partial_close:PartialClose", "strategy_id": "partial", "symbols": ["BTC"], "settings": {"quantity": "0.001", "wait_seconds": 10, "hold_seconds": 75}}]'`.
+  Its own store, so its ledger opens fresh at the venue's cash. Then run
+  `$V await testnet pc --event verify.flat --timeout 300`, `$V signal testnet pc TERM`,
+  `$V await testnet pc --exit`, `$V dump testnet pc`, and `PC_FEES=$($V venue-fills testnet pc)`.
+- **Half-open reconcile.** Run
+  `jq -r 'select(.event == "verify.fill" or .event == "verify.flat" or .event == "account.reconciled") | .phase // "reconciled"' .agents/verify/testnet/evidence/pc.stderr.jsonl | awk '$0 == "held_half" {h = 1; next} $0 == "flat" {h = 0} h && $0 == "reconciled" {n++} END {print (n ? "yes" : "no")}' > .agents/verify/testnet/evidence/pc.half-reconciled.txt`.
+  It writes `yes` when a reconcile ran between the partial close and the final close.
+  With a suffixed run id, change both paths.
+- **Check the partial close.** Run
+  `$V check testnet pc tn-partial --sql "select count(*) from orders where state='filled'" --expect 3`,
+  `$V check testnet pc tn-partial --sql "select signed_size from positions" --expect 0.000`,
+  `$V check testnet pc tn-partial --exit --expect 0`,
+  `$V check testnet pc tn-partial --event verify.flat --expect 1`,
+  `$V check testnet pc tn-partial --file pc.half-reconciled.txt --expect yes`,
+  `$V check testnet pc tn-fee --sql "select fees from positions" --expect $PC_FEES`,
+  `$V check testnet pc tn-cash --event account.healed --expect 0`,
+  `$V check testnet pc tn-divergence --event valuation.divergence --expect 0`.
+- **Key scan.** Run `$V secrets-check testnet > .agents/verify/testnet/evidence/secrets.txt`.
+  It runs after both `venue-fills` so the scan covers every evidence file. The file holds
+  `no signing key in evidence` or nothing. A hit goes to stderr as file paths, never the key.
+  With a suffixed run id, change the path too. Then run
+  `$V check testnet rt tn-redaction --file secrets.txt --expect "no signing key in evidence"`.
 - **Report.** Run `$V report testnet`. Expected verdict: `PASS`. A FAIL that matches a Gotcha
   below is known. Any other FAIL is new, and `$V issue-draft testnet` drafts it.
 - **Cleanup.** Run `$V cleanup testnet`.
@@ -93,13 +116,16 @@ Preconditions:
   `--event exchange.leverage_unchanged --expect 0`. The event only fires for a symbol the account
   already holds at the same leverage (`venues/hyperliquid/preflight.py`). On a flat account the
   push writes silently, so the check needs a held position to mean anything.
+- **`tn-partial` needs each hold to outlast the 60 second cadence.** `hold_seconds` is wall
+  time from the fill, and the next step waits for a tick after it. At 75 seconds, every hold
+  holds at least one reconcile. Below 60, `pc.half-reconciled.txt` can read `no` on a correct
+  engine. The partial close often fills in several pieces. Hyperliquid rounds the cost basis on
+  each one, which is the path #582 fixed.
 - `HOLD_TICKS` counts real testnet trades. On a quiet market three ticks can take a minute.
 - A `verify.flat` read of `account.equity` can be `null` when no mark has arrived since the
   fill. That is the documented "unknown, not zero" rule, not a failure.
 - **`tn-divergence` only tests the isolated margin when a reconcile lands mid-hold (#402).**
   Before #402, a reconcile while the position was open raised a false `valuation.divergence` on
-  `margin_used` and `free_margin`. A round trip that closes within 60 seconds of
-  `account.materialised` never runs that path, so its PASS says nothing about it. To test it,
-  raise `HOLD_TICKS` until the hold outlasts 60 seconds. Then confirm that `account.reconciled`
-  comes before `position.closed` in `rt.stderr.jsonl`. If the close comes more than 120 seconds
-  after `account.materialised`, a second reconcile lands, so `tn-reconcile` then fails by design.
+  `margin_used` and `free_margin`. The `rt` life closes within 60 seconds of
+  `account.materialised`, so its `tn-divergence` PASS says nothing about that path. The `pc`
+  life holds past the cadence twice, so its `tn-divergence` check covers it on every run.
