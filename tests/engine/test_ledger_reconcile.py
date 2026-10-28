@@ -365,6 +365,7 @@ def _held(
             CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
         ),
         as_of_ts_ns=recorded_state.as_of_ts_ns,
+        cash_quantum=recorded_state.cash_quantum,
         positions=tuple(
             margined(
                 replace(
@@ -601,6 +602,54 @@ def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None
     assert restored is not None
     assert restored.cash == Decimal("100500")
     assert restored.genesis_collateral == Decimal("100000")
+
+
+def test_a_cash_gap_below_half_the_venue_unit_is_not_a_divergence() -> None:
+    """ADR-0034 Tier 1 is exact once both sides are rounded to the venue's
+    unit. A gap far below one unit is arithmetic, not a missed fill (#580).
+
+    Two buys at different prices give an average entry that does not divide
+    evenly. The close then realizes PnL with a remainder in the 25th decimal.
+    By hand: 297.766845 + 3460.1 × 0.51 − (3456.7 × 0.47 + 3457.3 × 0.04)
+    is 299.476845, which is the venue's figure.
+
+    Two passes, because a finding heals only when the pass before found it too.
+    The cycle runs unbanded, so the same remainder still shows as Tier-2 equity
+    and free margin. Those only alert, and a real band covers them.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="297.766845")
+    projection = keeper.portfolio
+    _book_fill(projection, symbol="ETH", quantity="0.47", price="3456.7", seq=1)
+    _book_fill(projection, symbol="ETH", quantity="0.04", price="3457.3", seq=2)
+    _book_fill(projection, symbol="ETH", quantity="0.51", price="3460.1", seq=3, side=Side.SELL)
+    ledger_cash = projection.account().cash
+    assert ledger_cash != Decimal("299.476845")  # the remainder this case is about
+    cycle = LedgerReconciliation(exchange=_AccountVenue(_held("299.476845")), checkpointer=keeper)
+    _seen(cycle)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+    assert projection.account().cash == ledger_cash
+
+
+def test_a_cash_gap_of_one_venue_unit_still_heals() -> None:
+    """Rounding to the venue's unit must not hide a real gap (#580). One unit
+    is the smallest gap the venue can report, so it is a real divergence and
+    heals like any other Tier-1 finding.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(_held("100000.000001")), checkpointer=keeper
+    )
+    _seen(cycle)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert keeper.portfolio.account().cash == Decimal("100000.000001")
 
 
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:

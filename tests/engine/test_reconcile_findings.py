@@ -17,6 +17,7 @@ from decimal import Decimal
 
 import pytest
 from closed_sets import assert_covers_exactly
+from venue_doubles import USDC_QUANTUM
 
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
@@ -52,6 +53,7 @@ def _venue(
         free_margin=Decimal(free_margin),
         cross_maintenance_margin=Decimal("0"),
         as_of_ts_ns=0,
+        cash_quantum=USDC_QUANTUM,
         positions=positions,
     )
 

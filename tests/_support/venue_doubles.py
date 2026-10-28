@@ -187,6 +187,10 @@ ones that do not.
 A case whose subject *is* the bucket posts a real one with ``_isolated``."""
 
 
+USDC_QUANTUM = Decimal("0.000001")
+"""The cash unit the recorded venue reports in: USDC to 6 decimals (#580)."""
+
+
 CROSSLESS_MAINTENANCE = Decimal("0")
 """``crossMaintenanceMarginUsed`` on a book holding no cross position.
 
@@ -249,6 +253,7 @@ def account_state(
             CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
         ),
         as_of_ts_ns=as_of_ts_ns,
+        cash_quantum=USDC_QUANTUM,
         positions=tuple(
             margined(
                 VenuePositionState(

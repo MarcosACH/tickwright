@@ -408,6 +408,19 @@ def test_the_state_carries_the_venues_own_instant_in_ns() -> None:
     assert state.as_of_ts_ns == 1_730_000_000_000 * 1_000_000
 
 
+def test_the_state_carries_the_cash_unit_the_venue_reports_in() -> None:
+    """Hyperliquid reports account figures in USDC to 6 decimals. The reconcile
+    rounds both cash lines to this unit before it compares them (#580).
+
+    Without it, a gap of 1e-25 from an unrounded average entry healed the
+    ledger and marked a soak day not clean.
+    """
+    state = _fetch_state(CROSS_SNAPSHOT)
+
+    assert state is not None
+    assert state.cash_quantum == Decimal("0.000001")
+
+
 def test_free_margin_ignores_withdrawable_once_an_order_is_resting() -> None:
     """The one snapshot where the two answers part company — and the state of a
     running engine, not a corner of one.
