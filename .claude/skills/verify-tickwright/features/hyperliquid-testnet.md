@@ -126,8 +126,6 @@ Preconditions:
   fill. That is the documented "unknown, not zero" rule, not a failure.
 - **`tn-divergence` only tests the isolated margin when a reconcile lands mid-hold (#402).**
   Before #402, a reconcile while the position was open raised a false `valuation.divergence` on
-  `margin_used` and `free_margin`. A round trip that closes within 60 seconds of
-  `account.materialised` never runs that path, so its PASS says nothing about it. To test it,
-  raise `HOLD_TICKS` until the hold outlasts 60 seconds. Then confirm that `account.reconciled`
-  comes before `position.closed` in `rt.stderr.jsonl`. If the close comes more than 120 seconds
-  after `account.materialised`, a second reconcile lands, so `tn-reconcile` then fails by design.
+  `margin_used` and `free_margin`. The `rt` life closes within 60 seconds of
+  `account.materialised`, so its `tn-divergence` PASS says nothing about that path. The `pc`
+  life holds past the cadence twice, so its `tn-divergence` check covers it on every run.
