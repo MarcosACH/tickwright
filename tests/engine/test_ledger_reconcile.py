@@ -545,6 +545,10 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     behind it is 99800 against the ledger's 100000: a real 200 gap, and one the
     un-subtracted comparison would have reported as 300.
 
+    The finding carries net cash (#582). Both sides hold 0.002 at 64809, a cost
+    basis of 129.618, so the pair is 99870.382 against 99670.382. The gap is
+    still 200.
+
     The position sizes agree, so the cycle's only finding is the account-grain
     line — cash carries no symbol, because the account has one collateral pool
     and nothing to attribute it to.
@@ -561,10 +565,10 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     assert divergences == (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field=DivergenceField.CASH,
+            field=DivergenceField.NET_CASH,
             symbol=None,
-            ledger=Decimal("100000"),
-            venue=Decimal("99800"),
+            ledger=Decimal("99870.382"),
+            venue=Decimal("99670.382"),
         ),
     )
 
@@ -1008,10 +1012,13 @@ def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under(
     names its symbol and the cash correction carries none — the account has one
     collateral pool (ADR-0041 §2). One stamp is behind both keys, which is the
     cycle's own, so the pair reads as one retryable unit.
+
+    The cash pair is net cash (#582). SOL has a size finding, so both sides take
+    the venue's cost basis of 10 × 150 = 1500: 98500 against 99000.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
-    venue = _AccountVenue(_held("100500", ("SOL", "10", "0")))
+    venue = _AccountVenue(_held("100500", ("SOL", "10", "0"), entry={"SOL": "150"}))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
     _seen(cycle)
 
@@ -1024,7 +1031,7 @@ def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under(
         if log["event"] == NamedEvent.ACCOUNT_HEALED.value
     ] == [
         ("signed_size", "SOL", "0", "10", "reconcile:SOL:7"),
-        ("cash", None, "100000", "100500", "reconcile:cash:7"),
+        ("net_cash", None, "98500", "99000", "reconcile:cash:7"),
     ]
 
 
@@ -1877,7 +1884,8 @@ def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding
     divergences = asyncio.run(cycle.reconcile_account())
 
     assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
-        (DivergenceField.CASH, Decimal("100000"), Decimal("99900")),
+        # Net cash (#582): both cash lines less the cost basis of 129.618.
+        (DivergenceField.NET_CASH, Decimal("99870.382"), Decimal("99770.382")),
         # The cash gap restated: free margin is ``cash − Σ buckets``, so the 100
         # the cash line is out by lands here too. Equity is the one that would
         # have to be re-derived to disagree, and it is the assertion.
@@ -2140,7 +2148,7 @@ def test_a_cash_finding_on_a_pass_where_a_fill_landed_inside_the_read_is_not_hea
         divergences = asyncio.run(cycle.reconcile_account())
 
     assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
-        (DivergenceField.CASH, None, Decimal("99995"), Decimal("100000")),
+        (DivergenceField.NET_CASH, None, Decimal("99995"), Decimal("100000")),
         (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.001"), Decimal("0")),
     ]
     assert ledger.account().cash == Decimal("99995")
@@ -2171,7 +2179,7 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
         divergences = asyncio.run(cycle.reconcile_account())
 
     assert [d.field for d in divergences or ()] == [
-        DivergenceField.CASH,
+        DivergenceField.NET_CASH,
         DivergenceField.SIGNED_SIZE,
     ]
     assert venue.mode_reads == 0
@@ -3937,7 +3945,7 @@ def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain
 
     assert divergences is not None
     assert [(divergence.tier, divergence.field) for divergence in divergences] == [
-        (DivergenceTier.TIER_1, DivergenceField.CASH),
+        (DivergenceTier.TIER_1, DivergenceField.NET_CASH),
         (DivergenceTier.TIER_2, DivergenceField.EQUITY),
         (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN),
         (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN),

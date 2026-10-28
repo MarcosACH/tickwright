@@ -950,7 +950,7 @@ def test_a_pass_with_a_fill_inside_the_read_reports_both_tier_1_findings_and_hea
     )
 
     tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
-    assert tier_1 == [(DivergenceField.CASH, None), (DivergenceField.SIGNED_SIZE, "BTC")]
+    assert tier_1 == [(DivergenceField.NET_CASH, None), (DivergenceField.SIGNED_SIZE, "BTC")]
     assert findings.heals == ()
     assert findings.cash is None
     assert findings.deferred == 2
@@ -1000,6 +1000,9 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
     finding it closes, and both carry the one
     instant the classification was made at, so a retried pass mints the same
     keys for both halves.
+
+    The cash finding carries net cash on both sides. BTC has a size finding, so
+    the ledger side takes the venue's cost basis of 50,000 too: 99,990 − 50,000.
     """
     state = _missed_opening_fill()
     reading = _fee_taken_reading(net="0.4", last_fills={"BTC": 2})
@@ -1030,11 +1033,12 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
     assert findings.cash is not None
     assert findings.cash.divergence == Divergence(
         tier=DivergenceTier.TIER_1,
-        field=DivergenceField.CASH,
+        field=DivergenceField.NET_CASH,
         symbol=None,
-        ledger=Decimal("99990"),
-        venue=Decimal("100000"),
+        ledger=Decimal("49990"),
+        venue=Decimal("50000"),
     )
+    assert findings.cash.divergence.field.value == "net_cash"
     assert findings.cash.correction == CashCorrection(net_cash=Decimal("50000"), ts_ns=_NOW_NS)
     assert (findings.deferred, findings.unpriced) == (0, 0)
 
@@ -1118,7 +1122,7 @@ def _ledger_size_off_by_a_tenth(book: _Book) -> _Book:
 # the isolation tests' own rosters, so a row deleted there is a member with
 # no producer here.
 _PRODUCED_BY: dict[DivergenceField, Callable[[_Book], _Book]] = {
-    DivergenceField.CASH: _ledger_cash_off_by_one,
+    DivergenceField.NET_CASH: _ledger_cash_off_by_one,
     DivergenceField.SIGNED_SIZE: _ledger_size_off_by_a_tenth,
     **{f: _venue_position_off_by_one(a) for f, a in _VENUE_POSITION_FIGURES.items()},
     **{f: _venue_account_off_by_one(a) for f, a in _VENUE_ACCOUNT_FIGURES.items()},

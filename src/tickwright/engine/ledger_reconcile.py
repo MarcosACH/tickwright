@@ -27,7 +27,6 @@ from tickwright.domain import (
     VenueAccountState,
     VenuePositionState,
     duration_ns,
-    venue_cash,
     venue_net_cash,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -88,7 +87,7 @@ class DivergenceField(Enum):
     (``Divergence.symbol``), which is the other half of what a consumer keys on.
     """
 
-    CASH = "cash"
+    NET_CASH = "net_cash"
     SIGNED_SIZE = "signed_size"
     EQUITY = "equity"
     FREE_MARGIN = "free_margin"
@@ -517,21 +516,19 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     return _sum(reading.rows[symbol].notional for symbol in terms)
 
 
-def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
-    """Tier-1: the accumulated cash line against the one the snapshot implies.
+def _net_cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Tier-1: the ledger's net cash against the venue's (#582).
 
-    The venue publishes no cash line, so the comparison is against
-    ``venue_cash(state)`` — ADR-0040 §7's ``equity = cash + Σ uPnL`` read
-    backwards, and the *same* function the genesis was ingested through, so
-    the line an account opened at and the line it is checked against can
-    never be two derivations.
+    Net cash is the cash line minus the cost basis of every open position. The
+    venue side is ``venue_net_cash(state)``. It is built on ``venue_cash``, the
+    function the genesis was ingested through, so the two are one derivation.
 
     Account grain, so the record carries no symbol: the account has one
     collateral pool and open PnL is not attributable to it. Ahead of the
     per-symbol findings because that is the order the two are read in — the
     pool first, then what it is backing.
     """
-    venue = venue_cash(state)
+    venue = venue_net_cash(state)
     # Net cash and not the cash line. A venue may round its cost basis on a
     # partial close, which moves its cash line and leaves net cash alone (#582).
     # A symbol with a size finding takes the venue's cost basis on both sides.
@@ -555,16 +552,14 @@ def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence,
     # unit that no venue figure can hold (#580). The finding keeps both raw
     # figures, so the record shows the gap the venue unit absorbed.
     unit = state.cash_quantum
-    if ledger_net.quantize(unit, ROUND_HALF_EVEN) == venue_net_cash(state).quantize(
-        unit, ROUND_HALF_EVEN
-    ):
+    if ledger_net.quantize(unit, ROUND_HALF_EVEN) == venue.quantize(unit, ROUND_HALF_EVEN):
         return ()
     return (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field=DivergenceField.CASH,
+            field=DivergenceField.NET_CASH,
             symbol=None,
-            ledger=reading.account.cash,
+            ledger=ledger_net,
             venue=venue,
         ),
     )
@@ -995,7 +990,7 @@ class ReconcileFindings:
         range over entries the venue never returned, and it cannot disagree
         with the margin figure it sits next to.
         """
-        divergences = _cash(state, reading) + _sizes(state, reading)
+        divergences = _net_cash(state, reading) + _sizes(state, reading)
         for account_figure in _ACCOUNT_GRAIN:
             divergences += _account_grain(state, reading, account_figure)
         for compared in _PER_SYMBOL:
@@ -1043,7 +1038,7 @@ class ReconcileFindings:
         for divergence in divergences:
             if divergence.tier is not DivergenceTier.TIER_1:
                 continue
-            if divergence.field is DivergenceField.CASH:
+            if divergence.field is DivergenceField.NET_CASH:
                 cash_findings.append(divergence)
                 continue
             if divergence.symbol in moved:
@@ -1095,7 +1090,7 @@ class ReconcileFindings:
             1
             for divergence in divergences
             if divergence.tier is DivergenceTier.TIER_1
-            and divergence.field is not DivergenceField.CASH
+            and divergence.field is not DivergenceField.NET_CASH
         )
         if cash_findings and moved:
             deferred += len(cash_findings)
@@ -1107,16 +1102,16 @@ class ReconcileFindings:
         elif cash_findings:
             # At most one, since the account has one collateral pool (ADR-0041
             # §2), and the unpack says so rather than assuming it: a second
-            # would mean ``_cash`` had grown a grain, and healing to whichever
-            # came first is the failure a ``next`` hides. Deliberately not an
-            # ``InvariantViolation``, on ``exchange.py``'s adjudicator idiom: no
-            # input through this seam reaches it, and the two fault the run
-            # the same way. The target is the venue's net cash, the figure
-            # ``_cash`` classified against (#582).
+            # would mean ``_net_cash`` had grown a grain, and healing to
+            # whichever came first is the failure a ``next`` hides. Deliberately
+            # not an ``InvariantViolation``, on ``exchange.py``'s adjudicator
+            # idiom: no input through this seam reaches it, and the two fault
+            # the run the same way. The target is the finding's own venue side,
+            # so the figure healed to is the figure classified against.
             (cash_finding,) = cash_findings
             cash = _CashHeal(
                 divergence=cash_finding,
-                correction=CashCorrection(net_cash=venue_net_cash(state), ts_ns=now_ns),
+                correction=CashCorrection(net_cash=cash_finding.venue, ts_ns=now_ns),
             )
             forget.add(_finding(cash_finding))
         # A planned heal the cycle then drops, at the mode gate or the store,
