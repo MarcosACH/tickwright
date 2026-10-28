@@ -516,12 +516,18 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     return _sum(reading.rows[symbol].notional for symbol in terms)
 
 
-def _net_cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+def _net_cash(
+    state: VenueAccountState, reading: LedgerReading, size_findings: tuple[Divergence, ...]
+) -> tuple[Divergence, ...]:
     """Tier-1: the ledger's net cash against the venue's (#582).
 
     Net cash is the cash line minus the cost basis of every open position. The
     venue side is ``venue_net_cash(state)``. It is built on ``venue_cash``, the
     function the genesis was ingested through, so the two are one derivation.
+
+    ``size_findings`` is this pass's ``_sizes``, taken as an input and not
+    worked out again. The cash heal waits on those same findings, so the check
+    and the heal cannot disagree on which symbols diverged.
 
     Account grain, so the record carries no symbol: the account has one
     collateral pool and open PnL is not attributable to it. Ahead of the
@@ -535,7 +541,8 @@ def _net_cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Diverge
     # Its gap is the size finding's to report, and counted here too it would
     # read as a cash gap the size of the missed fill.
     venue_basis = {position.symbol: position.cost_basis for position in state.positions}
-    diverged = {symbol for symbol, _, _ in _net_diff(reading.net, _venue_net(state))}
+    # A size finding always carries its symbol. The filter only narrows the type.
+    diverged = {finding.symbol for finding in size_findings if finding.symbol is not None}
     ledger_net = reading.account.cash - sum(
         (
             venue_basis.get(symbol, Decimal(0)) if symbol in diverged else row.cost_basis
@@ -607,6 +614,7 @@ def _sizes(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence
     reads: the grain that decides a symbol is flat and the grain that decides
     it is unheld cannot be looking at two folds.
     """
+    venue = {position.symbol: position.signed_size for position in state.positions}
     return tuple(
         Divergence(
             tier=DivergenceTier.TIER_1,
@@ -615,13 +623,8 @@ def _sizes(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence
             ledger=held,
             venue=seen,
         )
-        for symbol, held, seen in _net_diff(reading.net, _venue_net(state))
+        for symbol, held, seen in _net_diff(reading.net, venue)
     )
-
-
-def _venue_net(state: VenueAccountState) -> dict[str, Decimal]:
-    """The venue's signed size per symbol, the size check's right-hand side."""
-    return {position.symbol: position.signed_size for position in state.positions}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -990,7 +993,8 @@ class ReconcileFindings:
         range over entries the venue never returned, and it cannot disagree
         with the margin figure it sits next to.
         """
-        divergences = _net_cash(state, reading) + _sizes(state, reading)
+        size_findings = _sizes(state, reading)
+        divergences = _net_cash(state, reading, size_findings) + size_findings
         for account_figure in _ACCOUNT_GRAIN:
             divergences += _account_grain(state, reading, account_figure)
         for compared in _PER_SYMBOL:
@@ -1086,18 +1090,12 @@ class ReconcileFindings:
         # (#582). A size finding held back leaves that cost basis at the old
         # size, so the cash heal waits for it. Unlike a moved symbol, the gap
         # it compared is sound, so it stays seen and heals with the size.
-        sizes = sum(
-            1
-            for divergence in divergences
-            if divergence.tier is DivergenceTier.TIER_1
-            and divergence.field is not DivergenceField.NET_CASH
-        )
         if cash_findings and moved:
             deferred += len(cash_findings)
             forget.update(_finding(finding) for finding in cash_findings)
         elif any(_finding(finding) not in previous for finding in cash_findings):
             unconfirmed += len(cash_findings)
-        elif cash_findings and len(heals) < sizes:
+        elif cash_findings and len(heals) < len(size_findings):
             deferred += len(cash_findings)
         elif cash_findings:
             # At most one, since the account has one collateral pool (ADR-0041
