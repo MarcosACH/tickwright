@@ -1083,6 +1083,43 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
     assert (findings.deferred, findings.unpriced) == (0, 1)
 
 
+def test_a_cash_heal_held_behind_an_unpriced_size_is_counted_unpriced() -> None:
+    """The book above, plus the cash the venue's close realized (#582).
+
+    The cash heal waits while a size finding does not heal. Here that size
+    finding is unpriced, so the wait lasts as long as it does. A deferral
+    clears on the next pass, so the held cash finding is counted as
+    ``unpriced`` with the size that holds it.
+    """
+    state = _venue(equity="100000", free_margin="100000", positions=())
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("99990"),
+            equity=Decimal("99990"),
+            total_margin_used=Decimal("40000"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("59990"),
+            effective_leverage=None,
+        ),
+        rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_observed={"BTC": _NOW_NS},
+        last_fills={"BTC": 2},
+    )
+    first = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=frozenset()
+    )
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2, previous=first.seen
+    )
+
+    tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
+    assert tier_1 == [(DivergenceField.NET_CASH, None), (DivergenceField.SIGNED_SIZE, "BTC")]
+    assert findings.heals == ()
+    assert findings.cash is None
+    assert (findings.deferred, findings.unpriced) == (0, 2)
+
+
 _Book = tuple[VenueAccountState, LedgerReading]
 
 

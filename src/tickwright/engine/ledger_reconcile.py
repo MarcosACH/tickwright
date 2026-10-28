@@ -927,11 +927,12 @@ class ReconcileFindings:
     """The Tier-1 cash finding this pass heals, with the correction that closes it."""
     deferred: int
     """Tier-1 findings a fill inside the read held back. Clears on the next pass.
-    Also a cash finding held back while a size finding does not heal (#582)."""
+    Also a cash finding held back while an unconfirmed size finding waits (#582)."""
     unconfirmed: int
     """Tier-1 findings not in ``previous``. Heals on the next pass if the same gap is there."""
     unpriced: int
-    """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
+    """Tier-1 size findings the venue posts no entry price for. Persists while it does not.
+    Also a cash finding held back while such a size finding waits (#582)."""
     seen: frozenset[_Finding]
     """The Tier-1 findings this pass neither healed nor deferred for a fill. The next
     pass's ``previous``."""
@@ -1096,7 +1097,12 @@ class ReconcileFindings:
         elif any(_finding(finding) not in previous for finding in cash_findings):
             unconfirmed += len(cash_findings)
         elif cash_findings and len(heals) < len(size_findings):
-            deferred += len(cash_findings)
+            # Counted with what holds it. An unpriced size does not clear on
+            # its own, so neither does this wait.
+            if unpriced:
+                unpriced += len(cash_findings)
+            else:
+                deferred += len(cash_findings)
         elif cash_findings:
             # At most one, since the account has one collateral pool (ADR-0041
             # §2), and the unpack says so rather than assuming it: a second
