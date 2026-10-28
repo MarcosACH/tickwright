@@ -784,6 +784,42 @@ def test_a_size_heal_and_a_cash_heal_in_one_pass_leave_net_cash_equal_to_the_ven
     assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
 
 
+def test_a_cash_heal_waits_while_a_size_finding_in_the_same_pass_does_not_heal() -> None:
+    """The cash heal adds the ledger's cost basis after the size fills (#582).
+    A size finding that does not heal leaves that cost basis at the old size.
+    Healed then, cash would be wrong by the missed fill's cost basis, and the
+    next pass would find a new gap.
+
+    The book is the case above. The first pass sees only the cash gap of 10.
+    On the second the venue also holds 0.001 more BTC. That size finding is
+    new, so it does not heal, and the cash heal must wait for it.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _AccountVenue(
+        _held("100010", ("BTC", "0.002", "0")),
+        _held("100010", ("BTC", "0.003", "0"), entry={"BTC": "65000"}),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert projection.account().cash == Decimal("100000")
+    clock.advance_to(9)  # the size finding is confirmed now, so both heal
+    asyncio.run(cycle.reconcile_account())
+    assert projection.account_net() == {"BTC": Decimal("0.003")}
+    assert projection.account().cash == Decimal("100009.618")
+    clock.advance_to(10)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+
+
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
     """The heal above is the one thing a mid-run mode switch must not be allowed
     to perform (ADR-0046 §4).

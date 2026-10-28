@@ -928,13 +928,15 @@ class ReconcileFindings:
     cash: _CashHeal | None
     """The Tier-1 cash finding this pass heals, with the correction that closes it."""
     deferred: int
-    """Tier-1 findings a fill inside the read held back. Clears on the next pass."""
+    """Tier-1 findings a fill inside the read held back. Clears on the next pass.
+    Also a cash finding held back while a size finding does not heal (#582)."""
     unconfirmed: int
     """Tier-1 findings not in ``previous``. Heals on the next pass if the same gap is there."""
     unpriced: int
     """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
     seen: frozenset[_Finding]
-    """The Tier-1 findings this pass neither healed nor deferred. The next pass's ``previous``."""
+    """The Tier-1 findings this pass neither healed nor deferred for a fill. The next
+    pass's ``previous``."""
 
     # The two tier counts are derived and not stored, so they cannot disagree
     # with ``divergences``. They live here with the other four counts so the
@@ -1085,11 +1087,23 @@ class ReconcileFindings:
             )
             forget.add(_finding(divergence))
         cash: _CashHeal | None = None
+        # The cash heal adds the ledger's cost basis after the size fills
+        # (#582). A size finding held back leaves that cost basis at the old
+        # size, so the cash heal waits for it. Unlike a moved symbol, the gap
+        # it compared is sound, so it stays seen and heals with the size.
+        sizes = sum(
+            1
+            for divergence in divergences
+            if divergence.tier is DivergenceTier.TIER_1
+            and divergence.field is not DivergenceField.CASH
+        )
         if cash_findings and moved:
             deferred += len(cash_findings)
             forget.update(_finding(finding) for finding in cash_findings)
         elif any(_finding(finding) not in previous for finding in cash_findings):
             unconfirmed += len(cash_findings)
+        elif cash_findings and len(heals) < sizes:
+            deferred += len(cash_findings)
         elif cash_findings:
             # At most one, since the account has one collateral pool (ADR-0041
             # §2), and the unpack says so rather than assuming it: a second
