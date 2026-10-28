@@ -723,6 +723,37 @@ def test_closing_the_rest_of_a_truncated_position_to_flat_does_not_heal_cash() -
     assert ledger_cash.quantize(Decimal("0.000001")) == Decimal("1000.01144")
 
 
+def test_a_net_cash_gap_of_one_unit_heals_while_a_truncated_position_is_open() -> None:
+    """Comparing net cash must not hide a real gap (#582). The book is the
+    truncated one above, and the venue holds one more micro-USDC.
+
+    The heal sets net cash to the venue's 838.511441, then adds the ledger's
+    own cost basis of 161.4793333…. So cash lands on 999.9907743…. Copying the
+    venue's cash line, 999.990773, would bring in its truncation. The next pass
+    would then find the same gap again.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="1000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.001", price="80739", seq=1)
+    _book_fill(projection, quantity="0.002", price="80740", seq=2)
+    _book_fill(projection, quantity="0.00011", price="80734", seq=3, side=Side.SELL)
+    _book_fill(projection, quantity="0.00089", price="80730", seq=4, side=Side.SELL)
+    venue = _held("999.990773", ("BTC", "0.002", "0"), entry={"BTC": "80739.666"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert projection.account().cash.quantize(Decimal("0.000001")) == Decimal("999.990774")
+    clock.advance_to(9)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert divergences is not None
+    assert [found for found in divergences if found.tier is DivergenceTier.TIER_1] == []
+
+
 def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
     """The heal above is the one thing a mid-run mode switch must not be allowed
     to perform (ADR-0046 §4).

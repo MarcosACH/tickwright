@@ -602,9 +602,7 @@ def account_valuation(
         symbol = position.symbol
         upnl[symbol] = _total(upnl.get(symbol, _ZERO), _unrealized_pnl(position, marks.get(symbol)))
         buckets[symbol] = _total(buckets.get(symbol, _ZERO), position.isolated_collateral)
-        cost_basis[symbol] = (
-            cost_basis.get(symbol, _ZERO) + position.signed_size * position.entry_price
-        )
+        cost_basis[symbol] = cost_basis.get(symbol, _ZERO) + position.cost_basis
     rows: dict[str, SymbolValuation] = {}
     for symbol, size in account_net_size(held).items():
         symbol_leverage = leverage.for_symbol(symbol)

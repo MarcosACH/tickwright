@@ -488,6 +488,10 @@ class PortfolioProjection:
         divergence. Applied after, the target absorbs whatever the fills did
         (``Account.correct_cash``).
 
+        The correction carries the venue's net cash (#582). The cash line it
+        sets is that figure plus the ledger's cost basis after the fills. So the
+        venue's cost basis, which it may have rounded, never enters the line.
+
         **The locked collateral on ``snapshot`` is an ingest rather than a
         heal, and it rides here for the reason the cash correction does**
         (ADR-0043 §3). On live the locked
@@ -564,7 +568,15 @@ class PortfolioProjection:
         if not applied and cash is None and not ingested:
             return None
         if cash is not None:
-            self._account.correct_cash(cash.target, event_id=cash.event_id)
+            # A heal can open a partition that ``project`` files only later, so
+            # the folded positions count alongside the filed ones.
+            held = dict(self._positions)
+            held.update(
+                ((change.position.strategy_id, change.position.symbol), change.position)
+                for change in folded
+            )
+            basis = sum((position.cost_basis for position in held.values()), _ZERO)
+            self._account.correct_cash(cash.net_cash + basis, event_id=cash.event_id)
         return HealChange(
             account=self._account,
             fills=tuple(folded),

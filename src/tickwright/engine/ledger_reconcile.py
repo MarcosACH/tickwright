@@ -1097,12 +1097,12 @@ class ReconcileFindings:
             # came first is the failure a ``next`` hides. Deliberately not an
             # ``InvariantViolation``, on ``exchange.py``'s adjudicator idiom: no
             # input through this seam reaches it, and the two fault the run
-            # the same way. The target is the finding's own venue side, so the
-            # figure healed to is the figure classified against.
+            # the same way. The target is the venue's net cash, the figure
+            # ``_cash`` classified against (#582).
             (cash_finding,) = cash_findings
             cash = _CashHeal(
                 divergence=cash_finding,
-                correction=CashCorrection(target=cash_finding.venue, ts_ns=now_ns),
+                correction=CashCorrection(net_cash=venue_net_cash(state), ts_ns=now_ns),
             )
             forget.add(_finding(cash_finding))
         # A planned heal the cycle then drops, at the mode gate or the store,

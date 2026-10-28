@@ -995,8 +995,9 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
 
     The fill count stood at 2 before the read and BTC's last fill was the
     second, so nothing moved. The size heal buys the 0.1 the ledger is short,
-    at the venue's own entry price, and the cash correction assigns the venue's
-    100,000. Each rides next to the finding it closes, and both carry the one
+    at the venue's own entry price. The cash correction carries the venue's net
+    cash, 110,000 equity less 60,000 notional (#582). Each rides next to the
+    finding it closes, and both carry the one
     instant the classification was made at, so a retried pass mints the same
     keys for both halves.
     """
@@ -1034,7 +1035,7 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
         ledger=Decimal("99990"),
         venue=Decimal("100000"),
     )
-    assert findings.cash.correction == CashCorrection(target=Decimal("100000"), ts_ns=_NOW_NS)
+    assert findings.cash.correction == CashCorrection(net_cash=Decimal("50000"), ts_ns=_NOW_NS)
     assert (findings.deferred, findings.unpriced) == (0, 0)
 
 

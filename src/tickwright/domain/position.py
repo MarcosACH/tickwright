@@ -293,6 +293,11 @@ class Position:
         record: realized PnL, fees and funding are retained (P1 #119)."""
         return self.signed_size == _ZERO
 
+    @property
+    def cost_basis(self) -> Decimal:
+        """Signed size times entry price, what the open exposure cost (#582)."""
+        return self.signed_size * self.entry_price
+
     def unrealized_pnl(self, mark: Decimal) -> Decimal:
         """This partition's open exposure marked to ``mark`` (ADR-0045).
 
