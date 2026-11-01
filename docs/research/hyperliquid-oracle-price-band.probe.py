@@ -3,8 +3,8 @@
 Asks Hyperliquid testnet how far from the oracle a resting BTC order may sit.
 It places post-only (ALO) orders of about 12 USD at growing distances from the
 oracle. Sells go above it and buys below it, so none of them can fill. Each
-accepted order is canceled at once. The run ends by checking that the account
-has no open order left.
+accepted order is canceled at once. The run ends by checking that none of its
+own orders is left open. It never cancels an order it did not place.
 
 This places real testnet orders. It never talks to mainnet. Run it from the
 repo root with the testnet key in the environment:
@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,7 @@ from eth_account import Account
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
+from hyperliquid.utils.types import Cloid
 
 COIN = "BTC"
 DISTANCES = [0.01, 0.02, 0.03, 0.05, 0.08]
@@ -69,8 +71,14 @@ def venue_price(px: float, sz_decimals: int, is_buy: bool) -> float:
     return round(px, decimals)
 
 
+def is_open(info: Info, address: str, cloid: Cloid) -> bool:
+    """True when the venue still lists this order as open."""
+    resp = info.query_order_by_cloid(address, cloid)
+    return resp.get("status") == "order" and resp["order"]["status"] == "open"
+
+
 def place_and_cancel(
-    exchange: Exchange, info: Info, distance: float, is_buy: bool
+    exchange: Exchange, info: Info, distance: float, is_buy: bool, cloid: Cloid
 ) -> dict[str, Any]:
     snap = snapshot(info)
     oracle = snap["oracle"]
@@ -80,6 +88,7 @@ def place_and_cancel(
     sz = round(math.ceil(NOTIONAL_USD / px / step) * step, snap["sz_decimals"])
     row: dict[str, Any] = {
         "ts_ms": int(time.time() * 1000),
+        "cloid": str(cloid),
         "side": "buy" if is_buy else "sell",
         "distance_target": distance,
         "px": px,
@@ -94,7 +103,7 @@ def place_and_cancel(
     if crosses:
         row["skipped"] = "would cross the book"
         return row
-    resp = exchange.order(COIN, is_buy, sz, px, {"limit": {"tif": "Alo"}})
+    resp = exchange.order(COIN, is_buy, sz, px, {"limit": {"tif": "Alo"}}, cloid=cloid)
     row["response"] = resp
     # A batch-level error puts a plain string in "response", with no statuses.
     body = resp.get("response")
@@ -119,11 +128,14 @@ def main() -> None:
         sys.exit(f"{address} already has open orders. Refusing to start.")
     print(f"account {address} on {BASE_URL}")
 
+    sent: list[Cloid] = []
     try:
         with (work / "results.jsonl").open("a") as out:
             for distance in DISTANCES:
                 for is_buy in (False, True):
-                    row = place_and_cancel(exchange, info, distance, is_buy)
+                    cloid = Cloid.from_str("0x" + secrets.token_hex(16))
+                    sent.append(cloid)
+                    row = place_and_cancel(exchange, info, distance, is_buy, cloid)
                     out.write(json.dumps(row) + "\n")
                     status = row.get("skipped") or row["status"]
                     print(
@@ -132,12 +144,16 @@ def main() -> None:
                     )
                     time.sleep(1)
     finally:
-        left = info.open_orders(address)
-        for order in left:
-            exchange.cancel(order["coin"], order["oid"])
-        print(f"open orders left at the end: {len(left)}, canceled: {len(left)}")
-        if info.open_orders(address):
-            sys.exit("ORDERS STILL OPEN after cleanup. Cancel them by hand.")
+        # Look up by cloid, not by the account's open orders. An engine may share the account,
+        # and its orders are not ours to cancel. A cloid also finds an order whose place
+        # response was lost.
+        left = [c for c in sent if is_open(info, address, c)]
+        for cloid in left:
+            exchange.cancel_by_cloid(COIN, cloid)
+        still_open = [c for c in left if is_open(info, address, c)]
+        print(f"probe orders open at the end: {len(left)}, still open: {len(still_open)}")
+        if still_open:
+            sys.exit(f"PROBE ORDERS STILL OPEN: {still_open}. Cancel them by hand.")
 
 
 if __name__ == "__main__":
