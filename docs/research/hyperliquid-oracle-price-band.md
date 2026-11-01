@@ -1,6 +1,6 @@
 # Hyperliquid "Price too far from oracle" rule
 
-Captured 2026-10-31. SDK: `hyperliquid-python-sdk` 0.24.0.
+Captured 2026-10-31, with one probe run on 2026-11-01. SDK: `hyperliquid-python-sdk` 0.24.0.
 
 This note collects what the venue says about the `oracleRejected` status. It feeds issue #600. It is
 a reference, not a decision.
@@ -15,7 +15,7 @@ a reference, not a decision.
   `2fdb18f9`). `sdk:` below means
   `https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/0.24.0/hyperliquid/`.
 - API: read-only `POST /info` calls on mainnet and testnet. These were not signed. Only the probe
-  placed orders, on testnet. See "Probe, 2026-10-31".
+  placed orders, on testnet. See "Probe, 2026-10-31" and "Aggressive probe, 2026-11-01".
 
 ## 1. What triggers it
 
@@ -188,12 +188,13 @@ Tickwright's adapter starts from the last trade, not the mid. It caps the price 
   recorded)**
 - That fits badly with the SDK default, which prices market orders 5% from the mid. One possible
   reason: the check may look at the price the order would trade at, not its limit price. On
-  testnet every resting order sat near 79244. **(hypothesis, not documented)**
+  testnet every resting order sat near 79244. **(hypothesis, not documented)** The aggressive probe
+  supports it.
 
 ## Probe, 2026-10-31
 
-Script: [hyperliquid-oracle-price-band.probe.py](hyperliquid-oracle-price-band.probe.py). It placed
-post-only BTC orders of about 12 USD on testnet, account `0x049d…5F76`. That is not a soak account.
+Script: [hyperliquid-oracle-price-band.probe.py](hyperliquid-oracle-price-band.probe.py), `passive`
+mode. It placed post-only BTC orders of about 12 USD on testnet, account `0x049d…5F76`. That is not a soak account.
 Each order was canceled at once. No order filled, and none was left open.
 
 Run from 2026-10-31 20:44:11 to 20:44:48 UTC. During the run, the testnet oracle was 77619 to 77629.
@@ -222,6 +223,35 @@ What the probe cannot show:
 - So the venue may check the aggressive side only, or check the fill price. The probe cannot tell
   these apart.
 
+## Aggressive probe, 2026-11-01
+
+Same script, `aggressive` mode, same account. It sent an IOC buy priced 5% above the oracle, then an
+IOC sell priced 5% below it. Both crossed the book. Each was about 12 USD. The sell closed the buy.
+The account ended flat, with no open order.
+
+Run from 2026-11-01 00:17:18 to 00:17:21 UTC. The oracle was 77489 to 77492. The book sat 0.5% to
+0.9% below it.
+
+| Order | Limit vs oracle | Fill vs oracle | Venue status |
+| --- | --- | --- | --- |
+| IOC buy | +5.00% | -0.41% | filled |
+| IOC sell | -5.00% | -0.74% | filled |
+
+What the probe shows:
+
+- The venue accepted a limit 5% past the oracle on the aggressive side. Both sides filled near the
+  oracle.
+- So the venue does not reject on the limit price alone at 5%. Our MARKET bound is 5%.
+- The GTC buy at 79244 was priced at the touch. Its limit was also the price it would trade at. It
+  was rejected at about 2.5% above the mainnet price.
+- So the check most likely looks at the price the order would trade at. **(inference, the oracle
+  at 03:32 is not recorded)**
+
+What the probe cannot show:
+
+- It ran on testnet. Mainnet is assumed to run the same rule. The docs do not say so.
+- It does not give the band size for the trade price on the aggressive side.
+
 ## What this means for issue #600
 
 The issue asks two questions.
@@ -230,28 +260,24 @@ The issue asks two questions.
    above mainnet for over an hour. The testnet mark followed the book. So the mark cap did not pull
    the price back toward the oracle. Our 5% bound then put the IOC buys 7.6% to 7.9% above the
    mainnet price. That assumes the testnet oracle tracked mainnet then, as it did on 2026-10-31.
-2. **Can our bound fall outside the band on mainnet?** Not proven either way. In one sample the
-   mainnet mark sat within 0.005% of its oracle. The SDK prices market orders 5% from the mid, like
-   our bound. That suggests mainnet accepts a 5% bound, but it is an inference.
+2. **Can our bound fall outside the band on mainnet?** Not while the book sits near the oracle. The
+   aggressive probe filled IOC orders priced 5% past the oracle, on both sides. In one sample the
+   mainnet mark sat within 0.005% of its oracle.
 
-What keeps question 2 open:
+What is left for mainnet:
 
-- The GTC buy at 79244 was rejected about 2.5% above the mainnet price.
-- Suppose the venue checks the limit price of a buy above the oracle. Then the band is under 2.6%.
-  A mainnet MARKET buy at +5% would be rejected too.
-- Suppose instead it checks the price the order would trade at. Then mainnet is fine, because there
-  the book sits near the oracle.
-- The probe tested only the passive side. It cannot tell these two apart.
+- The rule was tested on testnet only. Mainnet is assumed to run the same rule.
+- If the mainnet book itself moves far from the oracle, an order that trades there can be rejected.
+  That is how testnet failed in issue #600. No bound on our side fixes it.
 
-A different bound would not fix testnet. Under both cases above, a buy that fills at a book 2.5%
-above the oracle is rejected, and a buy priced closer to the oracle does not reach the ask.
+A different bound would not fix testnet. When the book sits 2.5% above the oracle, a buy that trades
+there is rejected. A buy priced closer to the oracle does not reach the ask.
 
 Still open:
 
-- Whether the check looks at the limit price or at the price the order would trade at. This
-  decides question 2.
-- The band on the aggressive side, and whether it depends on asset or order type. The passive side
-  allows at least 8%.
+- Whether mainnet runs the same rule as testnet.
+- The band for the trade price on the aggressive side, and whether it depends on asset or order
+  type. The GTC buy suggests under 2.6%. The passive side allows at least 8%.
 - Whether reduce-only orders get any exemption. The issue #600 rejections suggest they do not.
 - The oracle value for the GTC buy at 79244. No way to read a past oracle value was found.
 - How the testnet oracle is produced. On 2026-10-31 it matched mainnet, but that is not documented.
