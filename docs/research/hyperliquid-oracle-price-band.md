@@ -14,7 +14,8 @@ a reference, not a decision.
   the local permission settings. So the SDK source below is the `0.24.0` git tag (commit
   `2fdb18f9`). `sdk:` below means
   `https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/0.24.0/hyperliquid/`.
-- API: read-only `POST /info` calls on mainnet and testnet. Nothing was signed or placed.
+- API: read-only `POST /info` calls on mainnet and testnet. These were not signed. Only the probe
+  placed orders, on testnet. See "Probe, 2026-10-31".
 
 ## 1. What triggers it
 
@@ -225,21 +226,35 @@ What the probe cannot show:
 
 The issue asks two questions.
 
-1. **Is this only a testnet effect?** The facts support part of it. On testnet the book can sit far
-   from the oracle. In the cycle 551 window it sat about 2.5% above mainnet for over an hour. The
-   testnet mark followed the book, so the mark cap did not pull the price back toward the oracle.
-2. **Can our bound fall outside the band on mainnet?** The facts do not answer this. The band size
-   is not documented. The bound uses last trade and mark. It never looks at `oraclePx`. On mainnet
-   today, mark and oracle differ by about 0.005% for BTC.
+1. **Is this a testnet effect?** Mostly yes. In the cycle 551 window the testnet book sat about 2.5%
+   above mainnet for over an hour. The testnet mark followed the book. So the mark cap did not pull
+   the price back toward the oracle. Our 5% bound then put the IOC buys 7.6% to 7.9% above the
+   mainnet price. That assumes the testnet oracle tracked mainnet then, as it did on 2026-10-31.
+2. **Can our bound fall outside the band on mainnet?** Not proven either way. In one sample the
+   mainnet mark sat within 0.005% of its oracle. The SDK prices market orders 5% from the mid, like
+   our bound. That suggests mainnet accepts a 5% bound, but it is an inference.
+
+What keeps question 2 open:
+
+- The GTC buy at 79244 was rejected about 2.5% above the mainnet price.
+- Suppose the venue checks the limit price of a buy above the oracle. Then the band is under 2.6%.
+  A mainnet MARKET buy at +5% would be rejected too.
+- Suppose instead it checks the price the order would trade at. Then mainnet is fine, because there
+  the book sits near the oracle.
+- The probe tested only the passive side. It cannot tell these two apart.
+
+A different bound would not fix testnet. Under both cases above, a buy that fills at a book 2.5%
+above the oracle is rejected, and a buy priced closer to the oracle does not reach the ask.
 
 Still open:
 
-- The band size, its symmetry, and whether it depends on side, asset, or order type.
+- Whether the check looks at the limit price or at the price the order would trade at. This
+  decides question 2.
+- The band on the aggressive side, and whether it depends on asset or order type. The passive side
+  allows at least 8%.
 - Whether reduce-only orders get any exemption. The issue #600 rejections suggest they do not.
-- The oracle value for the GTC buy at 79244. Its time is now known. No way to read a past oracle
-  value was found.
-- Whether the check looks at the limit price or at the price the order would trade at.
-- How the testnet oracle is produced. Today it matched mainnet, but that is not documented.
+- The oracle value for the GTC buy at 79244. No way to read a past oracle value was found.
+- How the testnet oracle is produced. On 2026-10-31 it matched mainnet, but that is not documented.
 
 ## Sources
 
