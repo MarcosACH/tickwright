@@ -1428,10 +1428,14 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
         await asyncio.wait_for(engine.stop(), timeout=5)
         return await asyncio.wait_for(run, timeout=5), engine
 
-    exit_code, engine = asyncio.run(main())
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(main())
 
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
+    names = [log["event"] for log in logs]
+    assert "engine.faulted" in names
+    assert "engine.stopped" not in names, "a stop that never finished must not read as clean"
 
 
 def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
@@ -2316,10 +2320,13 @@ def test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time(
         await asyncio.wait_for(engine.stop(), timeout=5)
         return await asyncio.wait_for(run, timeout=5), engine
 
-    exit_code, engine = asyncio.run(main())
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(main())
 
     assert exit_code != 0, "a teardown that breaks faults the run, graceful request or not"
     assert engine.state is ComponentState.FAULTED
+    # The store's close is the last step, so this is the latest a stop can break.
+    assert "engine.stopped" not in [log["event"] for log in logs]
     assert timeline.count("exchange.stop") == 2, "the release is driven once per teardown pass"
     assert timeline == [
         "exchange.start",
