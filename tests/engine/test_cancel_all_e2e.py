@@ -133,6 +133,8 @@ def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path:
     events = [log["event"] for log in logs]
     assert "engine.barrier_cleared" in events
     assert "engine.feed_started" not in events
+    # An exit run reports its end with exit.finished alone (ADR-0060).
+    assert "engine.stopped" not in events
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["job"] == "cancel_all"
     assert logs[-1]["outcome"] == "done"

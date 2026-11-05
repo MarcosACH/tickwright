@@ -344,9 +344,9 @@ class Engine:
         finally:
             self._remove_signal_handlers()
         self._state = ComponentState.STOPPED
-        named_event(NamedEvent.ENGINE_STOPPED)
         self._stopped.set()
         if self._exit_job is None:
+            named_event(NamedEvent.ENGINE_STOPPED)
             return 0
         # Only a final venue read that found nothing left makes it done. A signal
         # stops the job before it reports, so there is no outcome (ADR-0060).
