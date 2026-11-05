@@ -28,6 +28,11 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `outcome: stopped` and `left: none`, and `flatten.gave_up` names the symbol with `size: 0`.
   `left` still comes from the final venue read, so `none` there means only that the venue is
   flat. The next boot resumes the open saga.**)**
+
+  **(Corrected by [#605](https://github.com/MarcosACH/tickwright/issues/605):** `outcome: done`
+  appears only beside code 0. A teardown can break after the job reported done. That is a fault, so
+  the run exits 1 with `outcome: stopped`. `left` still comes from the job's final read, as above.
+  The engine derives `outcome` from the code, so the two can never disagree.**)**
 - **Code 1 covers every run that started and did not finish.** That is flatten giving up, a failed
   read, cancel all leaving orders, a fault, and a stop by signal. Under ADR-0024, SIGINT (Ctrl-C)
   and SIGTERM give 0. Here both give 1, because the job is not done.

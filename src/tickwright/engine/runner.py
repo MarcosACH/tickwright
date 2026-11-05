@@ -474,7 +474,9 @@ class Engine:
         named_event(
             NamedEvent.EXIT_FINISHED,
             job=self._exit_job.name,
-            outcome=outcome.status.value if outcome is not None else ExitStatus.STOPPED.value,
+            # The code decides the word. A teardown can break after the job said
+            # done, and this line must not then say done beside a code of 1.
+            outcome=(ExitStatus.DONE if exit_code == 0 else ExitStatus.STOPPED).value,
             exit_code=exit_code,
             # Only the engine knows the job never returned (ADR-0060).
             left=outcome.left if outcome is not None else "unread",
