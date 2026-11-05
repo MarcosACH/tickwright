@@ -247,6 +247,19 @@ def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> N
         reopened.close()
 
 
+def test_a_graceful_stop_ends_the_log_with_engine_stopped(tmp_path: Path) -> None:
+    """An operator tells a clean stop from a crash by this line (#605). So it comes
+    last, after the store closed, and it carries the run id of the run it ends."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+
+    with capture_events() as logs:
+        exit_code, _, _ = asyncio.run(_run_to_fill_then_stop(ticks, tmp_path / "saga.db"))
+
+    assert exit_code == 0
+    assert logs[-1]["event"] == "engine.stopped"
+    assert logs[-1]["run_id"] == logs[0]["run_id"]
+
+
 def test_a_restart_on_a_changed_genesis_refuses_before_a_tick_is_ever_replayed(
     tmp_path: Path,
 ) -> None:

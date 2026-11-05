@@ -344,6 +344,7 @@ class Engine:
         finally:
             self._remove_signal_handlers()
         self._state = ComponentState.STOPPED
+        named_event(NamedEvent.ENGINE_STOPPED)
         self._stopped.set()
         if self._exit_job is None:
             return 0

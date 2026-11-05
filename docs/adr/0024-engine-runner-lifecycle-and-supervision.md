@@ -289,6 +289,11 @@ which.**)**
   A future flatten-on-exit or cancel-on-stop policy would shrink that race; nothing else depends on
   it, and ADR-0044 accepts the race regardless.**)**
 
+**(Extended by [#605](https://github.com/MarcosACH/tickwright/issues/605):** a normal run that
+finishes the graceful teardown logs `engine.stopped` as its last event. The event comes after the
+teardown because only a finished teardown proves the stop was clean. A teardown that breaks or hangs
+logs `engine.faulted` instead. A log that ends with neither ended in a crash or a kill.**)**
+
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 
 `asyncio.run(engine.run())`; `run()` performs the startup above, then supervises the long-running

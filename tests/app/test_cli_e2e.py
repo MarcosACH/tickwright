@@ -181,6 +181,9 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
 
         assert _terminate(process) == 0
 
+    # The log says the stop was clean, so an operator can tell it from a crash (#605).
+    assert "engine.stopped" in first_log.read_text().splitlines()[-1]
+
     # The graceful stop left the resting LIVE order checkpointed, untouched.
     reader = SQLiteStore(db)
     try:

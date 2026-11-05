@@ -57,6 +57,10 @@ class NamedEvent(StrEnum):
     ENGINE_FEED_STARTED = "engine.feed_started"
     ENGINE_FAULTED = "engine.faulted"
     ENGINE_STOP_HOOK_FAILED = "engine.stop_hook_failed"
+    # The last event of a normal run that stopped cleanly. It comes after the
+    # teardown because only a finished teardown proves the stop was clean. A log
+    # that ends without it ended in a crash, a kill or a fault (#605).
+    ENGINE_STOPPED = "engine.stopped"
 
     # Operator exit runs (``Engine`` with an ``ExitJob``, ADR-0060).
     # ``exit.finished`` is the last event of every exit run that booted.
@@ -286,6 +290,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ENGINE_FEED_STARTED: frozenset(),
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
     NamedEvent.ENGINE_STOP_HOOK_FAILED: frozenset({"hook", "error"}),
+    NamedEvent.ENGINE_STOPPED: frozenset(),
     NamedEvent.EXIT_REFUSED: frozenset({"reason", "store", "holder"}),
     NamedEvent.EXIT_NEW_STORE: frozenset({"store", "warning"}),
     NamedEvent.EXIT_FINISHED: frozenset({"job", "outcome", "exit_code", "left"}),

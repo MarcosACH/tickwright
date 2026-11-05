@@ -1228,6 +1228,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
+    NamedEvent.ENGINE_STOPPED: _drive_engine_lifecycle,
     NamedEvent.EXIT_REFUSED: _drive_exit_refused,
     NamedEvent.EXIT_NEW_STORE: _drive_exit_new_store,
     NamedEvent.EXIT_FINISHED: _drive_exit_finished,
