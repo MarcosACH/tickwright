@@ -260,6 +260,33 @@ def test_a_graceful_stop_ends_the_log_with_engine_stopped(tmp_path: Path) -> Non
     assert logs[-1]["run_id"] == logs[0]["run_id"]
 
 
+def test_a_run_that_faults_before_boot_still_logs_its_run_id(tmp_path: Path) -> None:
+    """A held lock is the only line such a run leaves (ADR-0052). It needs the run
+    id as much as any other line, or it cannot be traced to its run (ADR-0020)."""
+    db = tmp_path / "saga.db"
+    holder = SQLiteStore(db)
+    assert holder.lock() is None
+    timeline: list[str] = []
+    engine = Engine(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        store=SQLiteStore(db),
+        exchange=_LifecycleRecordingVenue(timeline),
+        feed=_TimelineFeed(timeline),
+        config=EngineConfig(run_id="run-before-boot"),
+    )
+
+    try:
+        with capture_events() as logs:
+            exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+    finally:
+        holder.close()
+
+    assert exit_code == 1
+    assert [log["event"] for log in logs] == ["engine.faulted"]
+    assert logs[0]["run_id"] == "run-before-boot"
+
+
 def test_a_restart_on_a_changed_genesis_refuses_before_a_tick_is_ever_replayed(
     tmp_path: Path,
 ) -> None:

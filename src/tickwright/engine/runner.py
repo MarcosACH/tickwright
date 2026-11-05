@@ -285,6 +285,10 @@ class Engine:
         read confirmed the job done. 1 means it stopped partway. 2 means it
         never booted.
         """
+        # Bind the run correlation first. Every record from here on, the engine's
+        # and every component's, traces to this run. That includes a run that
+        # never boots, whose only line may be the refusal below (ADR-0020).
+        bind_run_id(self._config.run_id or f"run-{uuid.uuid4().hex[:12]}")
         # The store lock comes before anything that writes, ``recover()`` first
         # among them (ADR-0052). A refusal also skips the teardown, because its
         # ``host.stop`` snapshots strategies and this store is another engine's.
@@ -547,11 +551,7 @@ class Engine:
         self._guard.trip_kill_switch("SIGUSR1: operator kill switch")
 
     async def _start_sequence(self) -> None:
-        """ADR-0024 steps 1–6: everything before the feed, in order."""
-        # Bind the per-process run correlation first: every record from here on
-        # — the engine's and every component's — is traceable to this run.
-        run_id = self._config.run_id or f"run-{uuid.uuid4().hex[:12]}"
-        bind_run_id(run_id)
+        """ADR-0024 steps 2–6: everything before the feed, in order."""
         # Restore both read-models from the durable record, ledger first — the
         # ordering is ADR-0043 §6/§10's and belongs to the ``Checkpointer``,
         # which is why the rule is stated there rather than reproduced here.

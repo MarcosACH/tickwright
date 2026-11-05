@@ -177,6 +177,7 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
     assert logs[0]["reason"] == "lock_held"
     assert logs[0]["store"] == str(db)
     assert f"Process {os.getpid()} holds" in logs[0]["holder"]
+    assert logs[0]["run_id"], "the run's only line must trace to the run (ADR-0020)"
     try:
         assert holder.load_account() is None
     finally:

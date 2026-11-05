@@ -9,6 +9,9 @@ those components.
 `Engine.start()`:
 
 1. Bind the `run_id` correlation, init observability, open the `Store`, build the `Cache`.
+   **(Placed by [#605](https://github.com/MarcosACH/tickwright/issues/605):** the bind is the first
+   line of `run()`. It comes before the store lock (ADR-0052), so a run that faults or is refused
+   before boot still logs its run id.**)**
 2. **Recover**: rebuild the `Cache` from the `Store` (write-through projection, ADR-0009).
    **(Extended by ADR-0043 §6/§10:** the accounting ledger recovers here too, and it goes **first**
    — `Engine._start_sequence` calls `PortfolioProjection.recover()`, which checks the store's
