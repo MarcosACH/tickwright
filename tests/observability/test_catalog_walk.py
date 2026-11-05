@@ -764,7 +764,7 @@ def _drive_engine_stop_hook_failed() -> None:
 
 
 def _drive_engine_lifecycle() -> None:
-    """One supervised startup-and-stop: barrier cleared, feed started (ADR-0024)."""
+    """One supervised startup-and-stop: barrier cleared, feed started, stopped (ADR-0024)."""
 
     async def go() -> None:
         bus = InMemoryBus()
@@ -1228,6 +1228,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
+    NamedEvent.ENGINE_STOPPED: _drive_engine_lifecycle,
     NamedEvent.EXIT_REFUSED: _drive_exit_refused,
     NamedEvent.EXIT_NEW_STORE: _drive_exit_new_store,
     NamedEvent.EXIT_FINISHED: _drive_exit_finished,

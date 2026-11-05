@@ -133,6 +133,8 @@ def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path:
     events = [log["event"] for log in logs]
     assert "engine.barrier_cleared" in events
     assert "engine.feed_started" not in events
+    # An exit run reports its end with exit.finished alone (ADR-0060).
+    assert "engine.stopped" not in events
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["job"] == "cancel_all"
     assert logs[-1]["outcome"] == "done"
@@ -175,6 +177,7 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
     assert logs[0]["reason"] == "lock_held"
     assert logs[0]["store"] == str(db)
     assert f"Process {os.getpid()} holds" in logs[0]["holder"]
+    assert logs[0]["run_id"], "the run's only line must trace to the run (ADR-0020)"
     try:
         assert holder.load_account() is None
     finally:
@@ -362,6 +365,49 @@ def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> No
     # Nothing booted, so nothing at the venue moved (ADR-0060).
     assert exit_code == 2
     assert [log["event"] for log in logs] == ["engine.faulted"]
+
+
+class _StoreThatBreaksOnClose(SQLiteStore):
+    """The last teardown step, breaking after the job already reported."""
+
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("the store would not close")
+
+
+def test_a_teardown_that_breaks_after_a_done_job_is_not_reported_as_done(tmp_path: Path) -> None:
+    """The fault gives code 1, so the same line must not say done (ADR-0060). The
+    job's own read still says what the venue held."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = _StoreThatBreaksOnClose(tmp_path / "saga.db")
+    checkpointer(store, clock=clock).recover()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+            resting_orders=list,
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    assert exit_code == 1
+    assert engine.state is ComponentState.FAULTED
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["exit_code"] == 1
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "none"
 
 
 class _ReadThatNeverAnswers(VenueLink):

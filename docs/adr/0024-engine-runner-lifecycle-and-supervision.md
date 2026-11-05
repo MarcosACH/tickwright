@@ -9,6 +9,9 @@ those components.
 `Engine.start()`:
 
 1. Bind the `run_id` correlation, init observability, open the `Store`, build the `Cache`.
+   **(Placed by [#605](https://github.com/MarcosACH/tickwright/issues/605):** the bind is the first
+   line of `run()`. It comes before the store lock (ADR-0052), so a run that faults or is refused
+   before boot still logs its run id.**)**
 2. **Recover**: rebuild the `Cache` from the `Store` (write-through projection, ADR-0009).
    **(Extended by ADR-0043 §6/§10:** the accounting ledger recovers here too, and it goes **first**
    — `Engine._start_sequence` calls `PortfolioProjection.recover()`, which checks the store's
@@ -288,6 +291,12 @@ which.**)**
   step 4 and can fill mid-window, so "the feed starts last" bounds new **sends**, never **fills**.
   A future flatten-on-exit or cancel-on-stop policy would shrink that race; nothing else depends on
   it, and ADR-0044 accepts the race regardless.**)**
+
+**(Extended by [#605](https://github.com/MarcosACH/tickwright/issues/605):** a normal run that
+finishes the graceful teardown logs `engine.stopped` as its last event. The event comes after the
+teardown because only a finished teardown proves the stop was clean. A teardown that breaks or hangs
+logs `engine.faulted` instead. A log that holds neither ended in a crash or a kill. An exit run
+logs no `engine.stopped`, because `exit.finished` is its last event (ADR-0060).**)**
 
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 

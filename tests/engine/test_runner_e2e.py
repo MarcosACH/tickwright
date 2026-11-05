@@ -247,6 +247,46 @@ def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> N
         reopened.close()
 
 
+def test_a_graceful_stop_ends_the_log_with_engine_stopped(tmp_path: Path) -> None:
+    """An operator tells a clean stop from a crash by this line (#605). So it comes
+    last, after the store closed, and it carries the run id of the run it ends."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+
+    with capture_events() as logs:
+        exit_code, _, _ = asyncio.run(_run_to_fill_then_stop(ticks, tmp_path / "saga.db"))
+
+    assert exit_code == 0
+    assert logs[-1]["event"] == "engine.stopped"
+    assert logs[-1]["run_id"] == logs[0]["run_id"]
+
+
+def test_a_run_that_faults_before_boot_still_logs_its_run_id(tmp_path: Path) -> None:
+    """A held lock is the only line such a run leaves (ADR-0052). It needs the run
+    id as much as any other line, or it cannot be traced to its run (ADR-0020)."""
+    db = tmp_path / "saga.db"
+    holder = SQLiteStore(db)
+    assert holder.lock() is None
+    timeline: list[str] = []
+    engine = Engine(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        store=SQLiteStore(db),
+        exchange=_LifecycleRecordingVenue(timeline),
+        feed=_TimelineFeed(timeline),
+        config=EngineConfig(run_id="run-before-boot"),
+    )
+
+    try:
+        with capture_events() as logs:
+            exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+    finally:
+        holder.close()
+
+    assert exit_code == 1
+    assert [log["event"] for log in logs] == ["engine.faulted"]
+    assert logs[0]["run_id"] == "run-before-boot"
+
+
 def test_a_restart_on_a_changed_genesis_refuses_before_a_tick_is_ever_replayed(
     tmp_path: Path,
 ) -> None:
@@ -1415,10 +1455,14 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
         await asyncio.wait_for(engine.stop(), timeout=5)
         return await asyncio.wait_for(run, timeout=5), engine
 
-    exit_code, engine = asyncio.run(main())
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(main())
 
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
+    names = [log["event"] for log in logs]
+    assert "engine.faulted" in names
+    assert "engine.stopped" not in names, "a stop that never finished must not read as clean"
 
 
 def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
@@ -2303,10 +2347,13 @@ def test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time(
         await asyncio.wait_for(engine.stop(), timeout=5)
         return await asyncio.wait_for(run, timeout=5), engine
 
-    exit_code, engine = asyncio.run(main())
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(main())
 
     assert exit_code != 0, "a teardown that breaks faults the run, graceful request or not"
     assert engine.state is ComponentState.FAULTED
+    # The store's close is the last step, so this is the latest a stop can break.
+    assert "engine.stopped" not in [log["event"] for log in logs]
     assert timeline.count("exchange.stop") == 2, "the release is driven once per teardown pass"
     assert timeline == [
         "exchange.start",
