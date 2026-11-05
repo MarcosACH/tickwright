@@ -764,7 +764,7 @@ def _drive_engine_stop_hook_failed() -> None:
 
 
 def _drive_engine_lifecycle() -> None:
-    """One supervised startup-and-stop: barrier cleared, feed started (ADR-0024)."""
+    """One supervised startup-and-stop: barrier cleared, feed started, stopped (ADR-0024)."""
 
     async def go() -> None:
         bus = InMemoryBus()
