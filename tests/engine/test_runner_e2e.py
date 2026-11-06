@@ -1431,6 +1431,49 @@ class _BlockingFeed:
         return None
 
 
+class _SigtermWhileFeedConnects(_BlockingFeed):
+    """The operator sends SIGTERM during a connect that does not return."""
+
+    async def start(self) -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.Event().wait()
+
+
+def test_sigterm_during_the_feed_connect_stops_without_waiting_for_it() -> None:
+    """The connect is the last boot step, and a slow one must not hold up a stop.
+    Its loop never starts, so no tick can reach a strategy (#604)."""
+    feed = _SigtermWhileFeedConnects()
+
+    async def main() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+                applied_fills=lambda cloid: (),
+                resting_orders=list,
+            ),
+            feed=feed,
+        )
+        return await asyncio.wait_for(engine.run(), timeout=1)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(main())
+
+    assert exit_code == 0
+    assert not feed.started.is_set()
+    events = [record["event"] for record in logs]
+    assert "engine.feed_started" not in events
+    assert events[-1] == "engine.stopped"
+
+
 def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Path) -> None:
     """``PortfolioProjection.recover()`` runs immediately after the run-id bind
     and **before** ``cache.rebuild()`` (ADR-0043 §6/§10).

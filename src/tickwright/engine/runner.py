@@ -206,6 +206,7 @@ class Engine:
         # old record and fault the boot.
         self._account_open = asyncio.Event()
         self._feed_handle: FeedHandle | None = None
+        self._feed_start_task: asyncio.Task[None] | None = None
         self._exchange_task: asyncio.Task[None] | None = None
         self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
@@ -329,7 +330,7 @@ class Engine:
                         self._schedule_cadences(tg)
                     self._start_exchange_loop(tg)
                     if self._exit_job is None:
-                        await self._start_feed(self._feed_handle)
+                        self._feed_start_task = tg.create_task(self._start_feed(self._feed_handle))
                     else:
                         self._exit_task = tg.create_task(
                             self._run_exit_job(self._exit_job, self._feed_handle)
@@ -432,8 +433,9 @@ class Engine:
         # possible after the barrier cleared, so nothing places before
         # reconciliation completes. Replay end-of-file ends the task but
         # not the run — like the CLI, the engine stops only when told to.
-        # The connect is inline and the loop is supervised, for the
-        # reasons ADR-0024 step 7's amendment states in full.
+        # The connect and the loop are both supervised, so a refused connect
+        # faults the boot and a stop can cancel a slow one. ADR-0024 step 7's
+        # amendments state why.
         await feed.start()
 
     async def _run_exit_job(self, job: ExitJob, feed: FeedHandle) -> None:
@@ -756,6 +758,11 @@ class Engine:
 
     async def _stop_feed(self) -> None:
         """Release the feed, then end the long-lived half this runner supervises."""
+        # A connect still in flight ends first, or its loop could start behind
+        # this step. A connect that already finished makes this a no-op.
+        if self._feed_start_task is not None:
+            self._feed_start_task.cancel()
+            await asyncio.gather(self._feed_start_task, return_exceptions=True)
         # No handle means the run faulted before its task group opened.
         task = None if self._feed_handle is None else self._feed_handle.task
         await self._stop_supervised(self._feed.stop, task)

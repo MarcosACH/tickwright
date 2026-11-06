@@ -178,6 +178,21 @@ therefore unchanged; it is now enforced across two calls instead of one. An adap
 reach returns at once from `start()` and that is a legitimate implementation, not an omission:
 `ReplayFeed` has no venue, exactly as `HyperliquidExchange` has no loop to supervise in `run()`.**)**
 
+**(Amended by [#604](https://github.com/MarcosACH/tickwright/issues/604): a stop during boot
+starts nothing, and the feed connect is no longer inline.** A signal sets the stop request at any
+point in the boot. Boot does not check it between steps 2 and 6, so those steps still finish. Once
+the barrier clears, a run told to stop skips the strategies, the cadences, the venue loop and the
+feed. It then takes the clean ending and exits 0.
+
+The runner now runs `feed.start()` as a task in the `TaskGroup`, beside the stop watcher. Awaited
+inline, a slow connect blocked the watcher, and strategy wake-ups kept firing after the signal.
+The teardown's `feed.stop` entry cancels a connect still in flight before it releases the feed. A
+refused connect still faults the boot, because a task that raises aborts the group as an inline
+`await` did.
+
+A stop during a venue outage still waits for `Exchange.start()` and the barrier. Cancelling them
+could leave a Kafka drain waiting on a handler that waits for the account row.**)**
+
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
 we proceed; a sustained outage trips the timeout → `FAULTED` → the process exits non-zero → the
