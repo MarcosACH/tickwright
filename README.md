@@ -211,6 +211,15 @@ durable too. A halt outlives a crash and is cleared only by an explicit reset.
 | `SIGUSR1` | Trip the kill switch. New orders are denied. Resting orders stay. |
 | `SIGUSR2` | Reset the kill switch. |
 
+A stop during boot starts no strategy and no feed. The boot steps already running finish first, so
+a stop during a venue outage can take as long as the boot does.
+
+The engine has no handlers while Python imports it, which is the first seconds of a start. A
+`SIGTERM` in that window ends the process with exit `143`. Nothing had started, so nothing is lost.
+A `SIGUSR1` in that window also ends the process, with exit `138`, and does not trip the kill
+switch. The image runs `tini` as PID 1 to make this work, because the kernel drops such a signal
+when the engine itself is PID 1.
+
 Exit `1` means the engine faulted. That is the restart signal for your supervisor. Exit `2` means
 the engine refused to start: a config that does not validate, a strategy entry it cannot load, a
 store bound to another account, or an account mode the venue reported and the engine refuses. A

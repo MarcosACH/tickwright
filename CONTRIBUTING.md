@@ -54,8 +54,9 @@ Two markers reach real infrastructure. Both skip themselves when it is not confi
   `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`. CI runs it weekly, never on a PR.
 
 The container image has its own check. `.github/scripts/image-smoke.sh IMAGE` runs
-`compose.example.yaml` with that image and expects a fill and exit `0`. It needs Docker but no key.
-It refuses to run while `.env.secrets` exists, because the compose would load it. The `image`
+`compose.example.yaml` with that image and expects a fill, a kill switch trip on `USR1`, and exit
+`0`. It then stops a second boot at once and expects no Docker kill. It needs Docker but no key. It
+refuses to run while `.env.secrets` exists, because the compose would load it. The `image`
 workflow runs it on every PR, for `amd64` and `arm64`, before anything is published.
 
 To try the real Kafka bus, run the app rather than the tests: `docker compose up -d kafka`, then

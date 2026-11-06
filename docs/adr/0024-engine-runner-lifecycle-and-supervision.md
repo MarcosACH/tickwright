@@ -191,7 +191,14 @@ refused connect still faults the boot, because a task that raises aborts the gro
 `await` did.
 
 A stop during a venue outage still waits for `Exchange.start()` and the barrier. Cancelling them
-could leave a Kafka drain waiting on a handler that waits for the account row.**)**
+could leave a Kafka drain waiting on a handler that waits for the account row.
+
+The handlers exist only once `run()` reaches them, so the image runs `tini` as PID 1. Before this,
+the engine was PID 1, and the kernel drops a signal sent to a PID 1 with no handler. Docker then
+waited out the grace period and killed the engine with exit 137. With `tini`, a `SIGTERM` in that
+window ends the process with exit 143. That is outside the 0, 1, 2 contract and is accepted,
+because nothing has started by then. A `SIGUSR1` in that window ends the process with exit 138 and
+trips nothing.**)**
 
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
