@@ -62,6 +62,7 @@ from tickwright.domain import (
     Portfolio,
     Side,
     Signal,
+    Strategy,
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
@@ -1208,7 +1209,20 @@ class _WaitRecordingClock(ManualClock):
         await super().sleep_until(deadline_ns)
 
 
-def _stop_during_boot(ticks: Path, db: Path) -> tuple[int, Engine, list[object], list[int]]:
+def _market_strategy(engine: Engine) -> Strategy:
+    return SingleShotMarketStrategy(
+        emitter=engine.emitter_for("trivial"),
+        portfolio=engine.portfolio_for("trivial"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        ),
+    )
+
+
+def _stop_during_boot(
+    ticks: Path, db: Path, strategy: Callable[[Engine], Strategy] = _market_strategy
+) -> tuple[int, Engine, list[object], list[int]]:
     """Boot a strategy on a real replay, with SIGTERM landing before the barrier."""
 
     async def main() -> tuple[int, Engine, list[object], list[int]]:
@@ -1230,17 +1244,7 @@ def _stop_during_boot(ticks: Path, db: Path) -> tuple[int, Engine, list[object],
             exchange=_SigtermWhileBooting(exchange),
             feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
         )
-        engine.register(
-            SingleShotMarketStrategy(
-                emitter=engine.emitter_for("trivial"),
-                portfolio=engine.portfolio_for("trivial"),
-                settings=SingleShotMarketStrategy.Settings(
-                    side=Side.BUY,
-                    quantity=Decimal("0.5"),
-                ),
-            ),
-            symbols={"BTC"},
-        )
+        engine.register(strategy(engine), symbols={"BTC"})
         orders: list[object] = []
 
         async def on_order_event(event: OrderEvent) -> None:
@@ -1267,6 +1271,47 @@ def test_sigterm_during_boot_exits_zero_and_starts_nothing(tmp_path: Path) -> No
     events = [record["event"] for record in logs]
     assert "engine.feed_started" not in events
     assert events[-1] == "engine.stopped"
+
+
+class _RestoreRecordingStrategy(NeverWakes):
+    """Records what it restored, and holds a state unlike the saved snapshot."""
+
+    strategy_id = "recording"
+
+    def __init__(self) -> None:
+        self.restored: list[bytes] = []
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        return None
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        return None
+
+    def snapshot(self) -> bytes:
+        return b"blank"
+
+    def restore(self, data: bytes) -> None:
+        self.restored.append(data)
+
+
+def test_sigterm_during_boot_keeps_the_previous_strategy_snapshot(tmp_path: Path) -> None:
+    """A strategy that never started holds only its blank state. The next boot
+    must still resume from what the last normal run saved (#604)."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+    db = tmp_path / "saga.db"
+    previous_life = SQLiteStore(db)
+    previous_life.save_strategy_snapshot("recording", b"previous", ts_ns=1)
+    previous_life.close()
+    strategy = _RestoreRecordingStrategy()
+
+    exit_code, _, _, _ = _stop_during_boot(ticks, db, lambda engine: strategy)
+
+    assert exit_code == 0
+    assert strategy.restored == []
+    assert SQLiteStore(db).load_strategy_snapshot("recording") == b"previous"
 
 
 def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> None:
