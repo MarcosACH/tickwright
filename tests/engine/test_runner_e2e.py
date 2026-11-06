@@ -28,6 +28,7 @@ from venue_doubles import (
     LIVE_ACCOUNT_ID,
     LiveVenueDouble,
     VenueDouble,
+    VenueLink,
     account_state,
     answerable,
 )
@@ -1182,6 +1183,90 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert engine.state is ComponentState.STOPPED
+
+
+class _SigtermWhileBooting(VenueLink):
+    """The operator sends SIGTERM while the run is still booting."""
+
+    async def start(self) -> None:
+        await super().start()
+        os.kill(os.getpid(), signal.SIGTERM)
+        # The loop runs the engine's handler a few turns later. A real wait lets
+        # it run before boot goes on, however many turns that takes.
+        await asyncio.sleep(0.01)
+
+
+class _WaitRecordingClock(ManualClock):
+    """Records every timed wait. Each cadence and wake-up paces on one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waits: list[int] = []
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.waits.append(deadline_ns)
+        await super().sleep_until(deadline_ns)
+
+
+def _stop_during_boot(ticks: Path, db: Path) -> tuple[int, Engine, list[object], list[int]]:
+    """Boot a strategy on a real replay, with SIGTERM landing before the barrier."""
+
+    async def main() -> tuple[int, Engine, list[object], list[int]]:
+        bus = InMemoryBus()
+        clock = _WaitRecordingClock()
+        exchange = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+            resting_orders=list,
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=_SigtermWhileBooting(exchange),
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        )
+        engine.register(
+            SingleShotMarketStrategy(
+                emitter=engine.emitter_for("trivial"),
+                portfolio=engine.portfolio_for("trivial"),
+                settings=SingleShotMarketStrategy.Settings(
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                ),
+            ),
+            symbols={"BTC"},
+        )
+        orders: list[object] = []
+
+        async def on_order_event(event: OrderEvent) -> None:
+            orders.append(event)
+
+        bus.subscribe(OrderEvent, on_order_event)
+        return await asyncio.wait_for(engine.run(), timeout=5), engine, orders, clock.waits
+
+    return asyncio.run(main())
+
+
+def test_sigterm_during_boot_exits_zero_and_starts_nothing(tmp_path: Path) -> None:
+    """A stop during boot means the operator changed their mind (#604). So no
+    strategy, feed or cadence starts, and the run takes the clean ending."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+
+    with capture_events() as logs:
+        exit_code, engine, orders, waits = _stop_during_boot(ticks, tmp_path / "saga.db")
+
+    assert exit_code == 0
+    assert engine.state is ComponentState.STOPPED
+    assert orders == []
+    assert waits == []
+    events = [record["event"] for record in logs]
+    assert "engine.feed_started" not in events
+    assert events[-1] == "engine.stopped"
 
 
 def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> None:

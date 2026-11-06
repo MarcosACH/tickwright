@@ -322,15 +322,18 @@ class Engine:
                 # runs every reconcile pass itself, so two never overlap
                 # (ADR-0052). The venue's own long-lived half runs either way.
                 self._feed_handle = FeedHandle(self._feed, tg)
-                if self._exit_job is None:
-                    self._schedule_cadences(tg)
-                self._start_exchange_loop(tg)
-                if self._exit_job is None:
-                    await self._start_feed(self._feed_handle)
-                else:
-                    self._exit_task = tg.create_task(
-                        self._run_exit_job(self._exit_job, self._feed_handle)
-                    )
+                # A signal during boot means the operator changed their mind.
+                # Nothing long-lived starts, and the run takes the clean ending.
+                if not self._stop_requested.is_set():
+                    if self._exit_job is None:
+                        self._schedule_cadences(tg)
+                    self._start_exchange_loop(tg)
+                    if self._exit_job is None:
+                        await self._start_feed(self._feed_handle)
+                    else:
+                        self._exit_task = tg.create_task(
+                            self._run_exit_job(self._exit_job, self._feed_handle)
+                        )
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -435,8 +438,8 @@ class Engine:
 
     async def _run_exit_job(self, job: ExitJob, feed: FeedHandle) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
-        # A signal during boot means the operator changed their mind. The job
-        # never starts, so nothing reaches the venue after it (ADR-0060).
+        # A signal can land after ``run`` made this task and before its first
+        # turn. The job then never starts, so nothing reaches the venue (ADR-0060).
         if self._stop_requested.is_set():
             return
         # Built and seeded as the host does it for a strategy, so the operator's
@@ -622,7 +625,8 @@ class Engine:
         self._execution.barrier_has_cleared()
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         # An exit run starts none, so nothing but its job can place or cancel.
-        if self._exit_job is None:
+        # A run told to stop starts none either (#604).
+        if self._exit_job is None and not self._stop_requested.is_set():
             self._host.start()
         self._state = ComponentState.RUNNING
 

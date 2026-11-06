@@ -762,10 +762,9 @@ class _SigtermWhileConnecting(VenueLink):
     async def start(self) -> None:
         await super().start()
         os.kill(os.getpid(), signal.SIGTERM)
-        # The loop runs the engine's handler on a later turn. Two turns let it
-        # run before boot goes on.
-        for _ in range(2):
-            await asyncio.sleep(0)
+        # The loop runs the engine's handler a few turns later. A real wait lets
+        # it run before boot goes on, however many turns that takes.
+        await asyncio.sleep(0.01)
 
     async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         self.cancels_sent += len(refs)
