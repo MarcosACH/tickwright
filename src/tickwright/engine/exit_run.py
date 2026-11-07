@@ -241,6 +241,9 @@ DRY_WAIT_SECONDS = 2.0
 RATE_LIMIT_WAIT_SECONDS = 10.0
 """The wait after the venue refused a close or a read for a rate limit (ADR-0056, ADR-0060)."""
 
+PRICE_BAND_CAP_SECONDS = 300.0
+"""How long oracle rejects are waited out before they count as dry (ADR-0056, #603)."""
+
 _RATE_LIMITS = {OrderRefusal.RATE_LIMITED_ADDRESS: "address", OrderRefusal.RATE_LIMITED_IP: "ip"}
 """The ``limit`` field ``flatten.rate_limited`` names for each rate limit (ADR-0060)."""
 
@@ -352,13 +355,16 @@ class _DryAttempts:
 
     Most steps count as one dry attempt in a row, then wait 2 seconds. A rate
     limit waits 10 seconds and does not count, because waiting it out makes
-    progress. This is the one place that tells the two apart.
+    progress. An oracle reject waits 2 seconds and does not count, until its
+    5 minute cap has passed. This is the one place that tells them apart.
     """
 
     def __init__(self, symbol: str, clock: Clock) -> None:
         self._symbol = symbol
         self._clock = clock
         self._count = 0
+        # When the first oracle reject of the current wait came, on the engine clock.
+        self._price_band_since: int | None = None
 
     def reset(self) -> None:
         self._count = 0
@@ -374,7 +380,7 @@ class _DryAttempts:
         ``size`` is the last size the venue reported. After failed reads it can be
         from before the last close, so the final read says what is left (ADR-0060).
         """
-        if reason == "price_band":
+        if reason == "price_band" and self._within_price_band_cap():
             # The book can stay far from the oracle for minutes. Counting each
             # reject would give up in about 6 seconds with the position open (#603).
             named_event(NamedEvent.FLATTEN_PRICE_REFUSED, symbol=self._symbol)
@@ -389,6 +395,13 @@ class _DryAttempts:
             return True
         await self._clock.sleep(DRY_WAIT_SECONDS)
         return False
+
+    def _within_price_band_cap(self) -> bool:
+        """Start the cap at the first oracle reject, and say whether it still runs."""
+        now = self._clock.timestamp_ns()
+        if self._price_band_since is None:
+            self._price_band_since = now
+        return now - self._price_band_since < PRICE_BAND_CAP_SECONDS * 1_000_000_000
 
     async def read_failed(self, size: Decimal, *, rate_limited: bool) -> bool:
         """Count a failed venue read as dry, unless the IP limit refused it.

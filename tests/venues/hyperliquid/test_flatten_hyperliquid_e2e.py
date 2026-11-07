@@ -324,6 +324,47 @@ def test_a_close_rejected_against_the_oracle_is_no_dry_attempt_and_is_tried_agai
     assert logs[-1]["outcome"] == "done"
 
 
+class _RejectsAgainstTheOracle(HeldShort):
+    """Rejects every close against its oracle, so the short stays open."""
+
+    def order(self, payload: dict) -> object:
+        return ORACLE_REJECT
+
+
+def _order_nonces(post: FakeExchangeApi) -> list[int]:
+    """The nonce of every close sent. It is the clock's ms at the send."""
+    return [
+        payload["nonce"] for url, payload in post.requests if request_type(url, payload) == "order"
+    ]
+
+
+def test_oracle_rejects_past_5_minutes_count_as_dry_and_flatten_gives_up(
+    tmp_path: Path,
+) -> None:
+    # A gap that outlasts 100 oracle updates is not closing soon (ADR-0056, #603).
+    # Waiting longer would be a retry forever, so the give-up rule takes over.
+    venue = _RejectsAgainstTheOracle()
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [
+        ("HYPE", 1, "price_band"),
+        ("HYPE", 2, "price_band"),
+        ("HYPE", 3, "price_band"),
+    ]
+    assert [log["event"] for log in logs if log["event"].startswith("flatten.")][-1] == (
+        "flatten.gave_up"
+    )
+    nonces = _order_nonces(post)
+    # The 3 dry closes are the last 3. Every close before them was inside the cap.
+    assert nonces[-3] - nonces[0] >= 300_000
+    assert nonces[-4] - nonces[0] < 300_000
+    assert venue.held
+    assert "HYPE" in logs[-1]["left"]
+
+
 def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:
     # Hyperliquid caps a market order by the mark. With no mark, the close
     # cannot be priced, so each attempt is dry and no order goes out (#467).
