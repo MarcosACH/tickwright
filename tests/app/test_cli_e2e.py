@@ -1,6 +1,6 @@
 """The CLI E2E (issue #19 acceptance): a real process, run from ``.env``.
 
-``python -m tickwright.app`` in a scratch directory: replays the configured
+``python -m tickwright`` in a scratch directory: replays the configured
 file, trades on the paper venue, and exits 0 on SIGTERM. The resting LIVE
 order is still checkpointed afterwards — a graceful stop never cancels it —
 and the next start reconciles it against venue truth. The new paper venue
@@ -116,7 +116,7 @@ def _spawn(cwd: Path, log: Path, *args: str) -> subprocess.Popen[bytes]:
     # the parent holding it open buys nothing and leaks a handle per life.
     with log.open("wb") as sink:
         return subprocess.Popen(
-            [sys.executable, "-m", "tickwright.app", *args],
+            [sys.executable, "-m", "tickwright", *args],
             cwd=cwd,
             env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
             stdout=subprocess.DEVNULL,
@@ -555,6 +555,169 @@ def test_flatten_on_an_empty_paper_account_trips_the_kill_switch_and_exits_zero(
     assert events[-1]["event"] == "exit.finished"
     assert events[-1]["job"] == "flatten"
     assert events[-1]["left"] == "none"
+
+
+def _signal_while_booting(
+    cwd: Path, *signals: signal.Signals, name: str = "SingleShotMarketStrategy"
+) -> None:
+    """Run the shooter from a module that signals its own process on import.
+
+    The engine imports a strategy while it builds, before it installs its
+    handlers. So these signals land inside the boot window on every run,
+    with no race against the test's own timing (issue #615). A ``name`` the
+    module does not define makes the boot refuse after the signals are sent.
+    """
+    sends = "".join(f"os.kill(os.getpid(), signal.{sig.name})\n" for sig in signals)
+    (cwd / "early_signal.py").write_text(
+        "import os\nimport signal\n\n"
+        "from tickwright.strategies.single_shot import SingleShotMarketStrategy\n\n"
+        f"{sends}\n__all__ = ['SingleShotMarketStrategy']\n"
+    )
+    entry = {**_STRATEGIES[0], "strategy": f"early_signal:{name}"}
+    with (cwd / ".env").open("a") as env:
+        env.write(f"TICKWRIGHT_STRATEGIES={json.dumps([entry])}\n")
+
+
+def _kill_switch_tripped(db: Path) -> bool:
+    with SQLiteStore(db) as reader:
+        state = reader.load_kill_switch()
+    return state is not None and state.tripped
+
+
+def test_a_sigusr1_sent_while_the_engine_boots_trips_the_kill_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1)
+    log = tmp_path / "engine.log"
+
+    with _spawn(tmp_path, log) as process:
+        try:
+            # The shooter's market order is the proof that the trip came first.
+            _await_event(log, "order.denied")
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"exit {process.wait()}; stderr:\n{log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    # Once, because the waiting signal is used up rather than delivered again.
+    assert [event["event"] for event in _events(log)].count("guard.kill_switch_tripped") == 1
+    assert _kill_switch_tripped(tmp_path / "saga.db")
+
+
+def test_a_sigusr2_sent_while_the_engine_boots_resets_a_tripped_kill_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR2)
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        store.save_kill_switch(tripped=True, reason="an earlier operator trip", ts_ns=1)
+    log = tmp_path / "engine.log"
+
+    with _spawn(tmp_path, log) as process:
+        try:
+            # The shooter only fills if the reset came before its order.
+            _await_states(tmp_path / "saga.db", {_FILLED_CLOID: OrderState.FILLED})
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"exit {process.wait()}; stderr:\n{log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    assert [event["event"] for event in _events(log)].count("guard.kill_switch_reset") == 1
+    assert not _kill_switch_tripped(tmp_path / "saga.db")
+
+
+def test_a_trip_and_a_reset_both_sent_while_the_engine_boots_leave_it_tripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two waiting signals keep no order, so the engine cannot know which came
+    # last. It picks the trip, because a wrong trip loses no money.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1, signal.SIGUSR2)
+    log = tmp_path / "engine.log"
+
+    with _spawn(tmp_path, log) as process:
+        try:
+            _await_event(log, "order.denied")
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"exit {process.wait()}; stderr:\n{log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    assert "guard.kill_switch_reset" not in [event["event"] for event in _events(log)]
+    assert _kill_switch_tripped(tmp_path / "saga.db")
+
+
+def test_a_boot_that_refuses_after_a_sigusr1_says_the_kill_switch_did_not_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The run never reaches the store, so it has nowhere to write the trip.
+    # The operator must hear that, or they would think the next start is safe.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1, name="NoSuchStrategy")
+    log = tmp_path / "engine.log"
+
+    assert _run_to_exit(tmp_path, log) == 2, log.read_text()
+
+    assert "SIGUSR1" in log.read_text().splitlines()[-1]
+    assert "kill switch is not tripped" in log.read_text().splitlines()[-1]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory")
+def test_a_sigusr1_whose_trip_cannot_be_written_faults_and_says_it_did_not_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The strategy is built after the store opens and before ``run()``. It makes
+    # the directory read-only there, so SQLite cannot write its journal and the
+    # trip is the first write that fails. The signal must outlive that failure,
+    # or no one hears of it.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1, name="ReadOnlyStoreStrategy")
+    with (tmp_path / "early_signal.py").open("a") as module:
+        module.write(
+            "\n\nclass ReadOnlyStoreStrategy(SingleShotMarketStrategy):\n"
+            "    def __init__(self, **kwargs):\n"
+            "        super().__init__(**kwargs)\n"
+            "        os.chmod(os.getcwd(), 0o555)\n"
+        )
+    # Files the run opens for writing, made while the directory still allows it.
+    log = tmp_path / "engine.log"
+    log.touch()
+    (tmp_path / "saga.db.lock").touch()
+    try:
+        assert _run_to_exit(tmp_path, log) == 1, log.read_text()
+    finally:
+        tmp_path.chmod(0o755)
+
+    assert "engine.faulted" in [event["event"] for event in _events(log)]
+    assert "kill switch is not tripped" in log.read_text().splitlines()[-1]
+
+
+def test_the_app_package_does_not_start_an_engine_that_skips_the_signal_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only ``tickwright/__main__.py`` holds kill switch signals sent during boot.
+    # A second way to start would lose them, so it must not exist (issue #615).
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "tickwright.app"],
+        cwd=tmp_path,
+        env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert "cannot be directly executed" in result.stderr
+    assert not (tmp_path / "saga.db").exists()
 
 
 def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(

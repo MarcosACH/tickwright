@@ -1,4 +1,8 @@
-"""The CLI entry: ``tickwright`` (or ``python -m tickwright.app``).
+"""The CLI: ``tickwright`` (or ``python -m tickwright``) calls ``main`` here.
+
+``tickwright/__main__.py`` runs first, so kill switch signals sent during boot
+are held (issue #615). This module has no ``__main__`` block, and the package
+has no ``__main__.py``, so no other start can skip that.
 
 Reads ``AppSettings`` from the environment and ``.env``, wires logging, builds
 the engine through the composition root, and runs the supervised lifecycle.
@@ -71,7 +75,3 @@ def _run_exit_job(command: Literal["cancel-all", "flatten"], *, new_store: bool)
         print(f"tickwright {command}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     return asyncio.run(engine.run())
-
-
-if __name__ == "__main__":
-    sys.exit(main())

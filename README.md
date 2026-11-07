@@ -216,9 +216,16 @@ a stop during a venue outage can take as long as the boot does.
 
 The engine has no handlers while Python imports it, which is the first seconds of a start. A
 `SIGTERM` in that window ends the process with exit `143`. Nothing had started, so nothing is lost.
-A `SIGUSR1` in that window also ends the process, with exit `138`, and does not trip the kill
-switch. The image runs `tini` as PID 1 to make this work, because the kernel drops such a signal
-when the engine itself is PID 1.
+
+A `SIGUSR1` or `SIGUSR2` in that window is held until the engine opens its store. Then it trips or
+resets the kill switch before any order. If both arrive, the trip wins. A start that fails before
+the store opens prints `The kill switch is not tripped.` on stderr. So does a start whose trip
+write fails, and that start exits `1`. In the first tens of
+milliseconds, before Python runs any engine code, a `SIGUSR1` still ends the process with exit
+`138`.
+
+The image runs `tini` as PID 1, because the kernel drops a signal with no handler when the engine
+itself is PID 1.
 
 Exit `1` means the engine faulted. That is the restart signal for your supervisor. Exit `2` means
 the engine refused to start: a config that does not validate, a strategy entry it cannot load, a

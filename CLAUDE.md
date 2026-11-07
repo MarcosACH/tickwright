@@ -184,7 +184,7 @@ follow the citation.
 
 `config.py` holds two classes and the split is load-bearing (issue #71). `AppConfig` is a pure
 `BaseModel` that reads nothing ambient. It is what `build_engine` takes and what tests build.
-`AppSettings` adds the env and `.env` skin on top, and `__main__.py` is its only legitimate builder.
+`AppSettings` adds the env and `.env` skin on top, and `app/cli.py` is its only legitimate builder.
 Reading ambient config anywhere else, including in a test, lets a developer `.env` or an exported
 variable outrank the class defaults. That can silently wire a live venue into a paper path.
 `AppSettings` stays out of `app`'s `__all__`. Do not export it.
