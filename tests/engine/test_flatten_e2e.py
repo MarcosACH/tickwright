@@ -1047,6 +1047,122 @@ def test_a_stop_during_the_wait_for_a_first_price_leaves_no_task_behind(
     assert left == set()
 
 
+class _StillPlaying(ReplayFeed):
+    """A replay with rows still to play after the ones in its file.
+
+    ``played`` is set once the file is out. The loop then waits, as a long
+    recording does between rows, until the runner cancels it.
+    """
+
+    def __init__(self, *, path: Path, bus: EventBus, clock: ManualClock) -> None:
+        super().__init__(path=path, bus=bus, clock=clock)
+        self.played = asyncio.Event()
+
+    async def run(self) -> None:
+        await super().run()
+        self.played.set()
+        await asyncio.Event().wait()
+
+
+def test_a_stop_while_the_replay_still_plays_sends_no_close(tmp_path: Path) -> None:
+    # A replay flatten waits for the file to end before it closes anything. A
+    # stop ends the feed too, and the job must not read that as the file ending.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = SQLiteStore(tmp_path / "saga.db")
+    feed = _StillPlaying(path=_ticks(tmp_path / "ticks.jsonl", ("BTC",)), bus=bus, clock=clock)
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=paper_on(store, bus=bus, clock=clock, specs=_SPECS),
+        feed=feed,
+        guard=RealGuard(specs=_SPECS, store=store, clock=clock),
+        exit_job=Flatten(feed_ends=True),
+    )
+
+    async def go() -> int:
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.played.wait(), timeout=5)
+        await engine.stop()
+        return await asyncio.wait_for(run, timeout=5)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(go())
+
+    assert exit_code == 1
+    assert not [log for log in logs if str(log.get("signal_id", "")).startswith(OPERATOR)]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["left"] == "unread"
+    with SQLiteStore(tmp_path / "saga.db") as reopened:
+        assert reopened.get_order(derive_cloid(f"{OPERATOR}:BTC:1")) is None
+
+
+class _ConnectEndsOnStop:
+    """A live feed whose connect is still open when the stop arrives.
+
+    ``connecting`` is set once the connect starts. The connect returns only
+    when ``stop()`` closes the socket under it. Its loop runs until cancelled,
+    which the seam allows (ADR-0024).
+    """
+
+    def __init__(self) -> None:
+        self.connecting = asyncio.Event()
+        self._closed = asyncio.Event()
+        self.looped = False
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
+    async def start(self) -> None:
+        self.connecting.set()
+        await self._closed.wait()
+
+    async def run(self) -> None:
+        self.looped = True
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        self._closed.set()
+        # A real close waits on the socket, so the connect gets a turn here.
+        await asyncio.sleep(0)
+
+
+def test_a_stop_during_a_live_flatten_connect_ends_the_run(tmp_path: Path) -> None:
+    # The connect runs inside the job. If the feed stopped before the job, the
+    # connect could finish and start a loop that nothing cancels, and the run
+    # would never end.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = SQLiteStore(tmp_path / "saga.db")
+    feed = _ConnectEndsOnStop()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=paper_on(store, bus=bus, clock=clock, specs=_SPECS),
+        feed=feed,
+        guard=RealGuard(specs=_SPECS, store=store, clock=clock),
+        exit_job=Flatten(feed_ends=False),
+    )
+
+    async def go() -> int:
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.connecting.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(go())
+
+    assert exit_code == 1
+    assert not feed.looped
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["left"] == "unread"
+
+
 class _ReadsPositionsOnce(VenueLink):
     """Only the first positions read answers. Every later one fails."""
 

@@ -178,6 +178,35 @@ therefore unchanged; it is now enforced across two calls instead of one. An adap
 reach returns at once from `start()` and that is a legitimate implementation, not an omission:
 `ReplayFeed` has no venue, exactly as `HyperliquidExchange` has no loop to supervise in `run()`.**)**
 
+**(Amended by [#604](https://github.com/MarcosACH/tickwright/issues/604): a stop during boot
+starts nothing, and the feed connect is no longer inline.** A signal sets the stop request at any
+point in the boot. Boot does not check it between steps 2 and 6, so those steps still finish. Once
+the barrier clears, a run told to stop skips the strategies, the cadences, the venue loop and the
+feed. It then takes the clean ending and exits 0.
+
+That run calls `stopped_during_boot()` instead of `barrier_has_cleared()`, so orders stay closed.
+Its strategies never start, but a Kafka bus can still deliver an old `PlaceSignal` during the
+teardown. The saga denies it as it would before the barrier. The `DENIED` row is durable, so a
+later life never places it either. Its reason names the stop, so an operator can tell it from a
+boot backlog. Placing it would send an order after the operator asked to stop, and `Exchange.stop()`
+leaves `place` answerable through the drain.
+
+The runner now runs `feed.start()` as a task in the `TaskGroup`, beside the stop watcher. Awaited
+inline, a slow connect blocked the watcher, and strategy wake-ups kept firing after the signal.
+The teardown's `feed.stop` entry cancels a connect still in flight before it releases the feed. A
+refused connect still faults the boot, because a task that raises aborts the group as an inline
+`await` did.
+
+A stop during a venue outage still waits for `Exchange.start()` and the barrier. Cancelling them
+could leave a Kafka drain waiting on a handler that waits for the account row.
+
+The handlers exist only once `run()` reaches them, so the image runs `tini` as PID 1. Before this,
+the engine was PID 1, and the kernel drops a signal sent to a PID 1 with no handler. Docker then
+waited out the grace period and killed the engine with exit 137. With `tini`, a `SIGTERM` in that
+window ends the process with exit 143. That is outside the 0, 1, 2 contract and is accepted,
+because nothing has started by then. A `SIGUSR1` in that window ends the process with exit 138 and
+trips nothing.**)**
+
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
 we proceed; a sustained outage trips the timeout → `FAULTED` → the process exits non-zero → the
@@ -297,6 +326,14 @@ finishes the graceful teardown logs `engine.stopped` as its last event. The even
 teardown because only a finished teardown proves the stop was clean. A teardown that breaks or hangs
 logs `engine.faulted` instead. A log that holds neither ended in a crash or a kill. An exit run
 logs no `engine.stopped`, because `exit.finished` is its last event (ADR-0060).**)**
+
+**(Amended by [#604](https://github.com/MarcosACH/tickwright/issues/604): an exit job ends before
+the feed.** `exit_job.stop` is now the first teardown entry, ahead of `feed.stop`. A replay flatten
+waits for the feed to end before it closes anything. With the feed stopped first, the job read the
+stop as the end of the file and sent a close after the stop. A job still inside the feed connect
+could also finish it during `feed.stop` and start a loop that no entry cancelled, so the run never
+ended. The job still ends ahead of `exchange.stop`, so the venue it reads stays up until it is
+done.**)**
 
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 

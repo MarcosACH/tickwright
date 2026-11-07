@@ -89,11 +89,12 @@ config. The exchange's ``startup_timeout_seconds`` is a *retry budget spent acro
 boot guards* (ADR-0044 §6), which is a different thing from a ceiling on one call;
 conflating them would give this a knob whose value nothing could reason about.
 
-It matters most where the reconnect loop is *not* underneath it. ``MarketFeed.start()``
-and ``Exchange.start()`` are awaited inline during the boot (ADR-0024 steps 4 and 7),
-neither is retried nor bounded by the runner, and the task that watches SIGINT is not
-created until after the last of them — so a handshake that never completes wedges a
-boot with SIGKILL as the only way out.
+It matters most where the reconnect loop is *not* underneath it. ``Exchange.start()``
+is awaited inline during the boot (ADR-0024 step 4), and ``MarketFeed.start()`` runs at
+step 7. Neither is retried nor bounded by the runner. The task that watches SIGINT is
+created only after ``Exchange.start()`` returns, so a handshake there that never
+completes wedges a boot with SIGKILL as the only way out. A feed handshake that never
+completes leaves the engine running with no data until someone stops it (#604).
 
 The timeout surfaces as ``TimeoutError``, which is an ``OSError`` only because Python
 3.11 aliased it — the same load-bearing coincidence ``post_json``'s translation rests

@@ -673,6 +673,9 @@ class _IdleFeed:
     """A feed with nothing to say — the lifecycle walk needs the ordered
     startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
 
+    def __init__(self) -> None:
+        self.running = asyncio.Event()
+
     def add_symbols(self, symbols: Iterable[str]) -> None:
         return None
 
@@ -680,7 +683,7 @@ class _IdleFeed:
         return None
 
     async def run(self) -> None:
-        return None
+        self.running.set()
 
     async def stop(self) -> None:
         return None
@@ -769,6 +772,7 @@ def _drive_engine_lifecycle() -> None:
     async def go() -> None:
         bus = InMemoryBus()
         clock = ManualClock()
+        feed = _IdleFeed()
         engine = Engine(
             bus=bus,
             clock=clock,
@@ -782,9 +786,11 @@ def _drive_engine_lifecycle() -> None:
                 applied_fills=lambda cloid: (),
                 resting_orders=list,
             ),
-            feed=_IdleFeed(),
+            feed=feed,
         )
         run = asyncio.create_task(engine.run())
+        # A stop during boot starts no feed, so this waits for the feed (#604).
+        await asyncio.wait_for(feed.running.wait(), timeout=5)
         await engine.stop()
         assert await run == 0
 

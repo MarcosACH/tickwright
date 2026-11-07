@@ -206,6 +206,7 @@ class Engine:
         # old record and fault the boot.
         self._account_open = asyncio.Event()
         self._feed_handle: FeedHandle | None = None
+        self._feed_start_task: asyncio.Task[None] | None = None
         self._exchange_task: asyncio.Task[None] | None = None
         self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
@@ -316,21 +317,24 @@ class Engine:
             )
         self._install_signal_handlers()
         try:
-            await self._start_sequence()
+            stopping = await self._start_sequence()
             async with asyncio.TaskGroup() as tg:
                 # An exit run schedules no cadence and starts no feed. Its job
                 # runs every reconcile pass itself, so two never overlap
                 # (ADR-0052). The venue's own long-lived half runs either way.
                 self._feed_handle = FeedHandle(self._feed, tg)
-                if self._exit_job is None:
-                    self._schedule_cadences(tg)
-                self._start_exchange_loop(tg)
-                if self._exit_job is None:
-                    await self._start_feed(self._feed_handle)
-                else:
-                    self._exit_task = tg.create_task(
-                        self._run_exit_job(self._exit_job, self._feed_handle)
-                    )
+                # A signal during boot means the operator changed their mind.
+                # Nothing long-lived starts, and the run takes the clean ending.
+                if not stopping:
+                    if self._exit_job is None:
+                        self._schedule_cadences(tg)
+                    self._start_exchange_loop(tg)
+                    if self._exit_job is None:
+                        self._feed_start_task = tg.create_task(self._start_feed(self._feed_handle))
+                    else:
+                        self._exit_task = tg.create_task(
+                            self._run_exit_job(self._exit_job, self._feed_handle)
+                        )
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -429,14 +433,15 @@ class Engine:
         # possible after the barrier cleared, so nothing places before
         # reconciliation completes. Replay end-of-file ends the task but
         # not the run — like the CLI, the engine stops only when told to.
-        # The connect is inline and the loop is supervised, for the
-        # reasons ADR-0024 step 7's amendment states in full.
+        # The connect and the loop are both supervised, so a refused connect
+        # faults the boot and a stop can cancel a slow one. ADR-0024 step 7's
+        # amendments state why.
         await feed.start()
 
     async def _run_exit_job(self, job: ExitJob, feed: FeedHandle) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
-        # A signal during boot means the operator changed their mind. The job
-        # never starts, so nothing reaches the venue after it (ADR-0060).
+        # A signal can land after ``run`` made this task and before its first
+        # turn. The job then never starts, so nothing reaches the venue (ADR-0060).
         if self._stop_requested.is_set():
             return
         # Built and seeded as the host does it for a strategy, so the operator's
@@ -550,8 +555,11 @@ class Engine:
     def _trip_kill_switch(self) -> None:
         self._guard.trip_kill_switch("SIGUSR1: operator kill switch")
 
-    async def _start_sequence(self) -> None:
-        """ADR-0024 steps 2–6: everything before the feed, in order."""
+    async def _start_sequence(self) -> bool:
+        """ADR-0024 steps 2–6: everything before the feed, in order.
+
+        Returns True when a stop arrived during boot, so nothing long-lived starts.
+        """
         # Restore both read-models from the durable record, ledger first — the
         # ordering is ADR-0043 §6/§10's and belongs to the ``Checkpointer``,
         # which is why the rule is stated there rather than reproduced here.
@@ -619,12 +627,23 @@ class Engine:
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
-        self._execution.barrier_has_cleared()
+        # Read once, so every step after the barrier makes the same choice. Two
+        # reads could disagree if a stop landed between them (#604).
+        stopping = self._stop_requested.is_set()
+        # A run told to stop keeps orders closed. Its strategies never start,
+        # so only a Kafka backlog can still bring it a signal. That signal is
+        # denied, and no order follows the stop.
+        if stopping:
+            self._execution.stopped_during_boot()
+        else:
+            self._execution.barrier_has_cleared()
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         # An exit run starts none, so nothing but its job can place or cancel.
-        if self._exit_job is None:
+        # A run told to stop starts none either.
+        if self._exit_job is None and not stopping:
             self._host.start()
         self._state = ComponentState.RUNNING
+        return stopping
 
     async def _materialise_account(self) -> bool:
         """The barrier's first step, which also opens the account-row gate."""
@@ -698,6 +717,11 @@ class Engine:
         snapshots, so a late ``Signal`` can still reach the venue: the seam
         answers for that (``Exchange.stop``), not the order.
 
+        An exit job ends first, ahead of the feed (#604). A replay flatten waits
+        for the feed to end before it closes, so a feed stopped first would let
+        the job send a close after the stop. A job still inside the feed connect
+        would also start a loop that no step cancels.
+
         One membership walked twice is the cost of one membership: the faulted
         pass restarts at the top, so a graceful step that raises drives every
         step *ahead* of the break a second time. No entry here may treat a
@@ -711,18 +735,15 @@ class Engine:
         entries that are both — ``feed.stop`` and ``exchange.stop`` wrap a seam
         call *and* a task cancellation — inherit the property from each half.
         """
-        # An exit run never started its strategies. Their snapshot would overwrite
-        # the one the last normal run saved, so it takes none.
-        host_stop: tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...] = (
-            (("host.stop", self._host.stop),) if self._exit_job is None else ()
-        )
+        # An exit run never starts its strategies, so ``host.stop`` takes no
+        # snapshot there. That rule is the host's, not this list's.
         return (
+            ("exit_job.stop", self._stop_exit_job),
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
-            ("exit_job.stop", self._stop_exit_job),
             ("exchange.stop", self._stop_exchange),
             ("bus.drain", self._bus.drain),
-            *host_stop,
+            ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
             ("store.close", self._store.close),
         )
@@ -737,8 +758,9 @@ class Engine:
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
 
     async def _stop_exit_job(self) -> None:
-        """End an exit job a signal interrupted, before the venue it reads is
-        released. A job that already returned is done, so this is a no-op. A
+        """End an exit job a signal interrupted, before the feed it waits on
+        and the venue it reads are released. A job that already returned is
+        done, so this is a no-op. A
         cancel it was sending may or may not land. Its saga mark is already
         durable, so restart reconciliation reads the truth either way."""
         if self._exit_task is None:
@@ -752,6 +774,11 @@ class Engine:
 
     async def _stop_feed(self) -> None:
         """Release the feed, then end the long-lived half this runner supervises."""
+        # A connect still in flight ends first, or its loop could start behind
+        # this step. A connect that already finished makes this a no-op.
+        if self._feed_start_task is not None:
+            self._feed_start_task.cancel()
+            await asyncio.gather(self._feed_start_task, return_exceptions=True)
         # No handle means the run faulted before its task group opened.
         task = None if self._feed_handle is None else self._feed_handle.task
         await self._stop_supervised(self._feed.stop, task)

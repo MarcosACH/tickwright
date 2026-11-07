@@ -157,8 +157,8 @@ class MarketFeed(Protocol):
     async def start(self) -> None:
         """Reach the venue and return — never the producing loop itself.
 
-        The runner awaits this inline at ADR-0024 step 7, immediately ahead of
-        creating ``run()``'s task, so it **must return**: it is the one instant
+        The runner runs this as a task at ADR-0024 step 7 and creates ``run()``'s
+        task only once it returns, so it **must return**: it is the one instant
         at which an unreachable feed can fail the boot. A ``start()`` that was
         the loop folded a refused first connect into an infinite backoff inside
         the supervised task, and the engine reached ``RUNNING`` with a feed that
@@ -168,6 +168,10 @@ class MarketFeed(Protocol):
         omission, and ``ReplayFeed`` is it: a file has nothing to reach. Put a
         timeout on any blocking venue call made here — the runner neither
         retries nor bounds this call.
+
+        A stop during the connect cancels it (#604). It must let that
+        cancellation through. Otherwise the teardown waits on it until
+        ``shutdown_timeout`` faults the run.
         """
         ...
 

@@ -59,8 +59,8 @@ class ReplayFeed:
         same thing on every adapter — align, produce, release — and a replay
         simply has nothing to align, exactly as ``HyperliquidExchange`` has
         nothing to supervise in ``run()``. Draining the file here instead would
-        make the runner's inline ``await`` at ADR-0024 step 7 replay the whole
-        recording before the supervised task was ever created.
+        make the connect at ADR-0024 step 7 replay the whole recording before
+        the supervised loop was ever created.
         """
 
     async def run(self) -> None:

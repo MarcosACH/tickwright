@@ -182,9 +182,11 @@ class ExecutionManager:
         barrier_cleared: bool = True,
     ) -> None:
         self._bus = bus
-        # False until the runner's startup barrier clears. Open by default
+        # Why orders are closed, or None when they are open. Open by default
         # because the runner is the one builder that runs a barrier.
-        self._barrier_cleared = barrier_cleared
+        self._closed_reason: str | None = (
+            None if barrier_cleared else "the startup barrier has not cleared"
+        )
         # An exit run hosts no strategy, but a Kafka bus can still replay a
         # strategy signal a crashed life never handled. Placed, it could open
         # new exposure while the operator is getting out (issue #476).
@@ -214,7 +216,15 @@ class ExecutionManager:
 
     def barrier_has_cleared(self) -> None:
         """Let orders place. Before this, every order is denied (ADR-0024 step 5)."""
-        self._barrier_cleared = True
+        self._closed_reason = None
+
+    def stopped_during_boot(self) -> None:
+        """Keep orders closed for good, because the run was told to stop (#604).
+
+        The runner calls this instead of ``barrier_has_cleared``. A denied row
+        then names the stop, so an operator can tell it from a boot backlog.
+        """
+        self._closed_reason = "the engine was told to stop during boot"
 
     async def on_signal(self, signal: Signal) -> None:
         # Signal handling binds the ``signal_id`` for the span of the work
@@ -276,11 +286,12 @@ class ExecutionManager:
             return
 
         decision: GuardDecision
-        if not self._barrier_cleared:
+        if self._closed_reason is not None:
             # Only a Kafka backlog from an earlier life can arrive this early.
             # Denied rather than held: a held signal is lost if the process
-            # crashes after its offset commits (issue #563).
-            decision = Denied(reason="the startup barrier has not cleared")
+            # crashes after its offset commits (issue #563). A run told to stop
+            # during boot never opens orders, so its backlog lands here too.
+            decision = Denied(reason=self._closed_reason)
         elif signal.strategy_id == OPERATOR and not is_flatten(signal):
             # Every operator fill splits over the partitions, and the split is
             # right only for an order that closes the net. So an operator order

@@ -28,6 +28,7 @@ from venue_doubles import (
     LIVE_ACCOUNT_ID,
     LiveVenueDouble,
     VenueDouble,
+    VenueLink,
     account_state,
     answerable,
 )
@@ -61,6 +62,7 @@ from tickwright.domain import (
     Portfolio,
     Side,
     Signal,
+    Strategy,
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
@@ -1184,6 +1186,134 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
     assert engine.state is ComponentState.STOPPED
 
 
+class _SigtermWhileBooting(VenueLink):
+    """The operator sends SIGTERM while the run is still booting."""
+
+    async def start(self) -> None:
+        await super().start()
+        os.kill(os.getpid(), signal.SIGTERM)
+        # The loop runs the engine's handler a few turns later. A real wait lets
+        # it run before boot goes on, however many turns that takes.
+        await asyncio.sleep(0.01)
+
+
+class _WaitRecordingClock(ManualClock):
+    """Records every timed wait. Each cadence and wake-up paces on one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waits: list[int] = []
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.waits.append(deadline_ns)
+        await super().sleep_until(deadline_ns)
+
+
+def _market_strategy(engine: Engine) -> Strategy:
+    return SingleShotMarketStrategy(
+        emitter=engine.emitter_for("trivial"),
+        portfolio=engine.portfolio_for("trivial"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        ),
+    )
+
+
+def _stop_during_boot(
+    ticks: Path, db: Path, strategy: Callable[[Engine], Strategy] = _market_strategy
+) -> tuple[int, Engine, list[object], list[int]]:
+    """Boot a strategy on a real replay, with SIGTERM landing before the barrier."""
+
+    async def main() -> tuple[int, Engine, list[object], list[int]]:
+        bus = InMemoryBus()
+        clock = _WaitRecordingClock()
+        exchange = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+            resting_orders=list,
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=_SigtermWhileBooting(exchange),
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        )
+        engine.register(strategy(engine), symbols={"BTC"})
+        orders: list[object] = []
+
+        async def on_order_event(event: OrderEvent) -> None:
+            orders.append(event)
+
+        bus.subscribe(OrderEvent, on_order_event)
+        return await asyncio.wait_for(engine.run(), timeout=5), engine, orders, clock.waits
+
+    return asyncio.run(main())
+
+
+def test_sigterm_during_boot_exits_zero_and_starts_nothing(tmp_path: Path) -> None:
+    """A stop during boot means the operator changed their mind (#604). So no
+    strategy, feed or cadence starts, and the run takes the clean ending."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+
+    with capture_events() as logs:
+        exit_code, engine, orders, waits = _stop_during_boot(ticks, tmp_path / "saga.db")
+
+    assert exit_code == 0
+    assert engine.state is ComponentState.STOPPED
+    assert orders == []
+    assert waits == []
+    events = [record["event"] for record in logs]
+    assert "engine.feed_started" not in events
+    assert events[-1] == "engine.stopped"
+
+
+class _RestoreRecordingStrategy(NeverWakes):
+    """Records what it restored, and holds a state unlike the saved snapshot."""
+
+    strategy_id = "recording"
+
+    def __init__(self) -> None:
+        self.restored: list[bytes] = []
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        return None
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        return None
+
+    def snapshot(self) -> bytes:
+        return b"blank"
+
+    def restore(self, data: bytes) -> None:
+        self.restored.append(data)
+
+
+def test_sigterm_during_boot_keeps_the_previous_strategy_snapshot(tmp_path: Path) -> None:
+    """A strategy that never started holds only its blank state. The next boot
+    must still resume from what the last normal run saved (#604)."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+    db = tmp_path / "saga.db"
+    previous_life = SQLiteStore(db)
+    previous_life.save_strategy_snapshot("recording", b"previous", ts_ns=1)
+    previous_life.close()
+    strategy = _RestoreRecordingStrategy()
+
+    exit_code, _, _, _ = _stop_during_boot(ticks, db, lambda engine: strategy)
+
+    assert exit_code == 0
+    assert strategy.restored == []
+    assert SQLiteStore(db).load_strategy_snapshot("recording") == b"previous"
+
+
 def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> None:
     """The operator kill switch (ADR-0026): SIGUSR1 halts placements durably —
     subsequent ones are DENIED through the real guard — and SIGUSR2 re-enables."""
@@ -1299,6 +1429,49 @@ class _BlockingFeed:
 
     async def stop(self) -> None:
         return None
+
+
+class _SigtermWhileFeedConnects(_BlockingFeed):
+    """The operator sends SIGTERM during a connect that does not return."""
+
+    async def start(self) -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.Event().wait()
+
+
+def test_sigterm_during_the_feed_connect_stops_without_waiting_for_it() -> None:
+    """The connect is the last boot step, and a slow one must not hold up a stop.
+    Its loop never starts, so no tick can reach a strategy (#604)."""
+    feed = _SigtermWhileFeedConnects()
+
+    async def main() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+                applied_fills=lambda cloid: (),
+                resting_orders=list,
+            ),
+            feed=feed,
+        )
+        return await asyncio.wait_for(engine.run(), timeout=1)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(main())
+
+    assert exit_code == 0
+    assert not feed.started.is_set()
+    events = [record["event"] for record in logs]
+    assert "engine.feed_started" not in events
+    assert events[-1] == "engine.stopped"
 
 
 def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Path) -> None:

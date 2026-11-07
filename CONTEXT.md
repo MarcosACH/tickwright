@@ -619,7 +619,9 @@ and `on_start`/`on_stop` hooks. `DEGRADED` is deferred. That pair is the shared 
 the whole of any one lifecycle: a component running a loop of its own also has a **supervised
 long-lived half** the engine's `TaskGroup` holds, so a failure in it faults the run instead of
 killing a task nobody watches. Both `MarketFeed` and `Exchange` declare that half as a third
-verb, `run()`. The runner awaits `start()` inline for both, so `start()` must return. `stop()` is
+verb, `run()`. The runner creates neither `run()` until its `start()` returns, so `start()` must
+return. It awaits `Exchange.start()` inline. It runs `MarketFeed.start()` as a task, so a stop can
+cancel a slow connect (#604). `stop()` is
 a request, not a proof: the runner ends every supervised half the same way, by cancelling its
 task and waiting it out before the bus drains. A `run()` must let that cancellation through and
 publish nothing after it. See ADR-0014, ADR-0024.

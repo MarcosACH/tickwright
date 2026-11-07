@@ -1,7 +1,9 @@
 #!/bin/sh
 # Runs compose.example.yaml with a local image, the way an operator would, and checks it.
 # The strategy is a user strategy from a mounted directory, loaded by import path.
-# Its market order must fill, then TERM must stop the engine with exit 0.
+# Its market order must fill, USR1 must trip the kill switch, then TERM must stop
+# the engine with exit 0.
+# Then a second boot gets TERM at once, and Docker must not have to kill it.
 # A replay does not exit when its file ends, so this script sends the stop.
 # It needs no key and no external service. CI runs it before anything is published.
 #
@@ -66,6 +68,17 @@ until docker logs "$id" 2>&1 | grep -q '"event": "order.filled"'; do
   waited=$((waited + 1))
 done
 
+# The kill switch is a signal, so it must pass through the image's init.
+docker kill -s USR1 "$id" >/dev/null
+waited=0
+until docker logs "$id" 2>&1 | grep -q '"event": "guard.kill_switch_tripped"'; do
+  if [ "$waited" -ge 10 ]; then
+    fail "USR1 did not trip the kill switch"
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+
 # Uses the compose stop_grace_period, so that setting is checked too.
 if ! out=$(compose stop 2>&1); then
   fail "compose stop failed: $out"
@@ -74,4 +87,18 @@ code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
 if [ "$code" != 0 ]; then
   fail "TERM gave exit $code, want 0"
 fi
+
+# A TERM in the first seconds of a boot must still end the engine (#604). Before the
+# engine's handlers exist it gives 143, and after that 0. Exit 137 means Docker had to kill it.
+if ! out=$(compose up -d --pull never 2>&1); then
+  fail "compose up failed: $out"
+fi
+if ! out=$(compose stop 2>&1); then
+  fail "compose stop failed: $out"
+fi
+code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
+case "$code" in
+  0 | 143) ;;
+  *) fail "TERM during boot gave exit $code, want 0 or 143" ;;
+esac
 echo "smoke: ok ($image${platform:+ $platform})"
