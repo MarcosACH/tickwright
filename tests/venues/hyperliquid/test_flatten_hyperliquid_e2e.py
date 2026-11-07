@@ -365,6 +365,40 @@ def test_oracle_rejects_past_5_minutes_count_as_dry_and_flatten_gives_up(
     assert "HYPE" in logs[-1]["left"]
 
 
+class _RefusesOnceAmongOracleRejects(_RejectsAgainstTheOracle):
+    """Refuses the 20th close for a bad nonce, and rejects every other one against its oracle."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closes = 0
+
+    def order(self, payload: dict) -> object:
+        self.closes += 1
+        return REFUSED if self.closes == 20 else super().order(payload)
+
+
+def test_another_dry_attempt_does_not_restart_the_oracle_cap(tmp_path: Path) -> None:
+    # The cap starts at the first oracle reject and only a fill restarts it (ADR-0056).
+    # If any dry attempt restarted it, the wait could run far past 5 minutes.
+    venue = _RefusesOnceAmongOracleRejects()
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "refused"),
+        (2, "price_band"),
+        (3, "price_band"),
+    ]
+    nonces = _order_nonces(post)
+    # The refusal comes at least 30 seconds in. A restart there would end the run at least
+    # 5 minutes and 30 seconds in. Without one, the run ends just past 5 minutes.
+    assert nonces[19] - nonces[0] >= 30_000
+    assert nonces[-2] - nonces[0] >= 300_000
+    assert nonces[-1] - nonces[0] < 300_000 + 30_000
+
+
 def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:
     # Hyperliquid caps a market order by the mark. With no mark, the close
     # cannot be priced, so each attempt is dry and no order goes out (#467).
