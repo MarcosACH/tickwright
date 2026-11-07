@@ -84,6 +84,11 @@ _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 # Evidence: docs/research/hyperliquid-rate-limit-window-probe.md.
 _ADDRESS_LIMIT_PREFIX = "Too many cumulative requests"
 
+# How the venue words a per-order reject against its oracle, lower case. The docs say
+# "Order price too far from oracle". Testnet said "Price too far from oracle" (#600).
+# Evidence: docs/research/hyperliquid-oracle-price-band.md.
+_ORACLE_REJECT = "too far from oracle"
+
 
 class _MissingPrice(Exception):
     """A market order has no price to bound it, so it cannot be sent."""
@@ -378,6 +383,10 @@ class HyperliquidExchange:
                     ),
                     mark=None if bound_prices is None else _wire_decimal(bound_prices.mark),
                 )
+                # Flatten waits out an oracle reject instead of counting it (ADR-0056).
+                # The engine never reads venue text, so the kind goes in a report.
+                if _ORACLE_REJECT in reason.lower():
+                    await self._refused(order, OrderRefusal.PRICE_BAND)
                 await self._bus.publish(
                     self._status_report(
                         cloid=order.cloid,

@@ -126,6 +126,18 @@ def resting_response(oid: int) -> dict:
     }
 
 
+def error_response(message: str) -> dict:
+    """The venue's per-order placement refusal (still HTTP 200 / status ok)."""
+    return {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": message}]}},
+    }
+
+
+ORACLE_REJECT = error_response("Order price too far from oracle")
+"""A per-order reject against the venue's oracle, in the wording of its docs."""
+
+
 def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
     """The venue's placement response for an order that filled on arrival."""
     return {

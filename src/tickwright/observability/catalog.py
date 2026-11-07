@@ -73,6 +73,7 @@ class NamedEvent(StrEnum):
     FLATTEN_DRY_ATTEMPT = "flatten.dry_attempt"
     FLATTEN_GAVE_UP = "flatten.gave_up"
     FLATTEN_RATE_LIMITED = "flatten.rate_limited"
+    FLATTEN_PRICE_REFUSED = "flatten.price_refused"
 
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
@@ -305,6 +306,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.FLATTEN_DRY_ATTEMPT: frozenset({"symbol", "count", "reason"}),
     NamedEvent.FLATTEN_GAVE_UP: frozenset({"symbol", "size"}),
     NamedEvent.FLATTEN_RATE_LIMITED: frozenset({"symbol", "limit"}),
+    NamedEvent.FLATTEN_PRICE_REFUSED: frozenset({"symbol"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
     NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),
     NamedEvent.STRATEGY_ERROR: frozenset({"strategy_id", "event_id", "error"}),

@@ -374,6 +374,12 @@ class _DryAttempts:
         ``size`` is the last size the venue reported. After failed reads it can be
         from before the last close, so the final read says what is left (ADR-0060).
         """
+        if reason == "price_band":
+            # The book can stay far from the oracle for minutes. Counting each
+            # reject would give up in about 6 seconds with the position open (#603).
+            named_event(NamedEvent.FLATTEN_PRICE_REFUSED, symbol=self._symbol)
+            await self._clock.sleep(DRY_WAIT_SECONDS)
+            return False
         self._count += 1
         named_event(
             NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=self._symbol, count=self._count, reason=reason
@@ -462,6 +468,8 @@ async def _attempt(
         if _filled(cloid, context):
             # Before the read, so a failed read after a fill starts a new row.
             dry.reset()
+        elif refusal is OrderRefusal.PRICE_BAND:
+            reason = "price_band"
         elif limit is None:
             # A send that dies counts as refused too (ADR-0060).
             reason = "no_fill" if refusal is None else "refused"

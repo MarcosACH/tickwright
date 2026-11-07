@@ -23,6 +23,7 @@ from hyperliquid_fakes import (
     FakeExchangeApi,
     RecordingClock,
     answers_in_turn,
+    error_response,
     fill_entry,
     filled_response,
     idle_ws,
@@ -421,14 +422,6 @@ def test_a_resting_placement_reports_the_order_live() -> None:
     assert report.cloid == CLOID
     assert report.symbol == "BTC"
     assert report.venue_oid == "77"
-
-
-def error_response(message: str) -> dict:
-    """The venue's per-order placement refusal (still HTTP 200 / status ok)."""
-    return {
-        "status": "ok",
-        "response": {"type": "order", "data": {"statuses": [{"error": message}]}},
-    }
 
 
 def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() -> None:

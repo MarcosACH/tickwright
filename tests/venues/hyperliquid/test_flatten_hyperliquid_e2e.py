@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from hyperliquid_fakes import (
+    ORACLE_REJECT,
     FakeExchangeApi,
     FakeWsConnection,
     asset_ctx_frame,
@@ -301,6 +302,26 @@ def test_a_refused_or_dead_close_the_venue_never_took_is_a_refused_dry_attempt(
     assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
     dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
     assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [("HYPE", 1, "refused")]
+
+
+def test_a_close_rejected_against_the_oracle_is_no_dry_attempt_and_is_tried_again(
+    tmp_path: Path,
+) -> None:
+    # When the book leaves the oracle, every close is rejected for a while (ADR-0056, #603).
+    # Counting each as dry would give up in about 6 seconds with the position open.
+    venue = AnswersFirst(ORACLE_REJECT)
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    refused = [log for log in logs if log["event"] == "flatten.price_refused"]
+    assert [log["symbol"] for log in refused] == ["HYPE"]
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    first, second = [
+        payload["nonce"] for url, payload in post.requests if request_type(url, payload) == "order"
+    ]
+    assert second - first >= 2_000
+    assert logs[-1]["outcome"] == "done"
 
 
 def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:
