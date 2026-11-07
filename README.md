@@ -211,8 +211,8 @@ durable too. A halt outlives a crash and is cleared only by an explicit reset.
 | `SIGUSR1` | Trip the kill switch. New orders are denied. Resting orders stay. |
 | `SIGUSR2` | Reset the kill switch. |
 
-A stop during boot starts no strategy and no feed. The boot steps already running finish first, so
-a stop during a venue outage can take as long as the boot does.
+A stop during boot starts no strategy and no feed. It ends the boot at once, even while the engine
+waits on a venue outage. The next boot recovers from where it stopped, as it would after a crash.
 
 The engine has no handlers while Python imports it, which is the first seconds of a start. A
 `SIGTERM` in that window ends the process with exit `143`. Nothing had started, so nothing is lost.
