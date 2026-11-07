@@ -319,7 +319,8 @@ class Engine:
             # Inside the ``try``, because a boot signal's trip is a store write
             # and a failed one must fault like any other (ADR-0024).
             self._install_signal_handlers()
-            stopping = await self._start_sequence()
+            await self._boot_unless_stopped()
+            stopping = self._finish_boot()
             async with asyncio.TaskGroup() as tg:
                 # An exit run schedules no cadence and starts no feed. Its job
                 # runs every reconcile pass itself, so two never overlap
@@ -572,11 +573,28 @@ class Engine:
     def _trip_kill_switch(self) -> None:
         self._guard.trip_kill_switch("SIGUSR1: operator kill switch")
 
-    async def _start_sequence(self) -> bool:
-        """ADR-0024 steps 2–6: everything before the feed, in order.
+    async def _boot_unless_stopped(self) -> None:
+        """Run the boot, but end it when a stop arrives first (#614).
 
-        Returns True when a stop arrived during boot, so nothing long-lived starts.
+        A boot can wait on a dark venue for a whole startup budget per step.
+        Docker kills the engine 30 s after SIGTERM, so the stop cannot wait for
+        that. A boot that ends early is like a crash at that point, which every
+        boot step already survives. The next boot recovers from it.
         """
+        boot = asyncio.create_task(self._start_sequence())
+        stop = asyncio.create_task(self._stop_requested.wait())
+        try:
+            await asyncio.wait((boot, stop), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+            boot.cancel()
+            await asyncio.wait((boot,))
+        # A fault in the boot still faults the run, even beside a stop.
+        if not boot.cancelled():
+            boot.result()
+
+    async def _start_sequence(self) -> None:
+        """ADR-0024 steps 2–5: everything before the feed that waits, in order."""
         # Restore both read-models from the durable record, ledger first — the
         # ordering is ADR-0043 §6/§10's and belongs to the ``Checkpointer``,
         # which is why the rule is stated there rather than reproduced here.
@@ -644,8 +662,16 @@ class Engine:
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
-        # Read once, so every step after the barrier makes the same choice. Two
-        # reads could disagree if a stop landed between them (#604).
+
+    def _finish_boot(self) -> bool:
+        """ADR-0024 step 6, and the one place boot decides on a stop.
+
+        Returns True when a stop arrived during boot, so nothing long-lived starts.
+        A stop that ended the boot early lands here too, with the barrier never
+        cleared. Nothing here awaits, so no stop can land halfway through.
+        """
+        # Read once, so every step below makes the same choice. Two reads could
+        # disagree if a stop landed between them (#604).
         stopping = self._stop_requested.is_set()
         # A run told to stop keeps orders closed. Its strategies never start,
         # so only a Kafka backlog can still bring it a signal. That signal is
@@ -659,7 +685,9 @@ class Engine:
         # A run told to stop starts none either.
         if self._exit_job is None and not stopping:
             self._host.start()
-        self._state = ComponentState.RUNNING
+        # A run told to stop never ran, so it goes straight to STOPPED.
+        if not stopping:
+            self._state = ComponentState.RUNNING
         return stopping
 
     async def _materialise_account(self) -> bool:
