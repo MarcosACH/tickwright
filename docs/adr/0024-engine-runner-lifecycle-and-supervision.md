@@ -207,6 +207,19 @@ window ends the process with exit 143. That is outside the 0, 1, 2 contract and 
 because nothing has started by then. A `SIGUSR1` in that window ends the process with exit 138 and
 trips nothing.**)**
 
+**(Amended by [#615](https://github.com/MarcosACH/tickwright/issues/615): a kill switch signal
+during boot is held, not lost.** The `tickwright` command now starts in `tickwright/__main__.py`.
+That module blocks `SIGUSR1` and `SIGUSR2` before it imports the engine. A signal sent while the
+engine imports and builds waits in the kernel. `run()` reads it when it installs the handlers. The
+store lock is held by then, so a trip is written before `recover()` and before any order. If both
+signals wait, the trip wins. The kernel keeps no order between them, and a wrong trip loses no
+money. A run that exits before that point, such as a boot refusal or a held lock, cannot write the
+trip. It prints a stderr line saying the kill switch is not tripped. A lost `SIGUSR2` is not
+reported, because the switch stays as it was. The window that is left is interpreter startup,
+about 30 ms on a laptop. A `SIGUSR1` there still ends the process with exit 138. `SIGTERM` and
+`SIGINT` are not blocked, so the #604 behavior for them stands. `python -m tickwright.app` skips the
+new module and keeps the old window.**)**
+
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
 we proceed; a sustained outage trips the timeout → `FAULTED` → the process exits non-zero → the

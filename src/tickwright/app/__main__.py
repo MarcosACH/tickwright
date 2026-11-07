@@ -1,4 +1,7 @@
-"""The CLI entry: ``tickwright`` (or ``python -m tickwright.app``).
+"""The CLI entry: ``tickwright`` (or ``python -m tickwright``) calls ``main`` here.
+
+``tickwright/__main__.py`` runs first, so kill switch signals sent during boot
+are held (issue #615). ``python -m tickwright.app`` skips that and loses them.
 
 Reads ``AppSettings`` from the environment and ``.env``, wires logging, builds
 the engine through the composition root, and runs the supervised lifecycle.
