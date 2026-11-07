@@ -702,6 +702,7 @@ ALARM_EVENTS = (
     "leverage.divergence",
     "exchange.request_failed",
     "exchange.action_rejected",
+    "exchange.order_rejected",
 )
 
 
