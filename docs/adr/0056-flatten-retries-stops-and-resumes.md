@@ -146,8 +146,9 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   new cap. Why 5 minutes. The oracle updates about every 3 seconds, so a gap that is only oracle
   lag closes in seconds. On mainnet, a wider gap pays traders to close it. A gap that outlasts
   100 oracle updates is not closing soon. Waiting longer would then be the retry forever rejected
-  below. Each attempt also uses one request of the address budget, even when the venue rejects
-  it ([`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md)).
+  below. The venue judges each of these orders, so each uses one request of the address budget
+  ([`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md)).
+  Only a rate limit refusal is free, as the #452 block says.
   So the cap costs at most about 150 requests per symbol. A longer cap could use up a small
   account's budget. Then every close would wait 10 seconds, even after the gap closes. The 54
   minutes on testnet do not set the cap. Nobody trades testnet for profit, so nothing pulls its
