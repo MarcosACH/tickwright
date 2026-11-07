@@ -132,21 +132,34 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   its oracle. When the book moves far from the oracle, every close that could trade there is
   rejected. No bound on our side fixes that. On testnet this lasted 54 minutes. The book is most
   likely to leave the oracle in a fast market, which is when flatten matters most. So giving up
-  after about 6 seconds is the wrong answer. The adapter reports the reject as its own refusal
-  kind, `price_band`, without venue text. The saga still ends `REJECTED`. Flatten emits
-  `flatten.price_refused`, the count does not move, and the next attempt goes after 2 seconds.
-  The cap is 5 minutes on the engine clock. It starts at the first oracle reject after the loop
-  starts or after its last fill. A fill restarts it. Other dry attempts do not. Once the cap has
-  passed, an oracle reject counts as a dry attempt again. So flatten gives up at most 3 attempts
-  later, as above. The cap is a constant, not a setting, like the 2 and 10 second waits. Like the
-  count, it lives in memory, so a crash resets it. The rate limit rule above still applies to each
-  attempt. Paper never rejects against an oracle, so this never happens on paper. Two other
+  after about 6 seconds is the wrong answer. The adapter publishes an `OrderRefusedReport` with a
+  new kind, `price_band`, beside the `REJECTED` status report. It carries no venue text. This
+  widens the report from the #457 block. Until now it meant the outcome of the order was unknown.
+  Here the outcome is known, and the status report ends the saga. The refusal report still moves
+  no saga. Flatten emits `flatten.price_refused`, the count does not move, and the next attempt
+  goes after 2 seconds. The cap is 5 minutes on the engine clock. It starts at the first oracle
+  reject since the loop started or since its last fill. Other dry attempts do not move it. Once
+  the cap has passed, an oracle reject counts as a dry attempt again, with the reason
+  `price_band`. So flatten gives up at most 3 dry attempts later, as above. The cap is a
+  constant, not a setting, like the 2 and 10 second waits. Like the count, it lives in memory, so
+  a crash resets it. An operator who wants more time runs flatten again, and the new run gets a
+  new cap. Why 5 minutes. The oracle updates about every 3 seconds, so a gap that is only oracle
+  lag closes in seconds. On mainnet, a wider gap pays traders to close it. A gap that outlasts
+  100 oracle updates is not closing soon. Waiting longer would then be the retry forever rejected
+  below. Each attempt also uses one request of the address budget, even when the venue rejects
+  it ([`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md)).
+  So the cap costs at most about 150 requests per symbol. A longer cap could use up a small
+  account's budget. Then every close would wait 10 seconds, even after the gap closes. The 54
+  minutes on testnet do not set the cap. Nobody trades testnet for profit, so nothing pulls its
+  book back to the oracle (#600). How long a mainnet gap really lasts is not measured, because no
+  past oracle value could be read. The rate limit rule above still applies to each attempt.
+  Paper never rejects against an oracle, so this never happens on paper. Two other
   options were rejected. Accepting the give-up as a known limit leaves a position open when it is
   most at risk. A small mainnet probe would use real money, and this rule does not need it. The
   probes ran on testnet only, so it is still not proven that mainnet runs the same rule. If it
   does not, the wait never runs. Evidence:
-  [`hyperliquid-oracle-price-band.md`](../research/hyperliquid-oracle-price-band.md). Built in
-  [#619](https://github.com/MarcosACH/tickwright/issues/619).**)**
+  [`hyperliquid-oracle-price-band.md`](../research/hyperliquid-oracle-price-band.md). Not built
+  yet. The build is [#619](https://github.com/MarcosACH/tickwright/issues/619).**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
