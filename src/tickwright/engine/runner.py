@@ -787,11 +787,22 @@ class Engine:
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
             ("exchange.stop", self._stop_exchange),
-            ("bus.drain", self._bus.drain),
+            ("bus.drain", self._drain_bus),
             ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
             ("store.close", self._store.close),
         )
+
+    async def _drain_bus(self) -> None:
+        """Drain the bus, unless boot ended before the account row opened (#614).
+
+        Fill and funding handlers wait for that row. With it never open, they
+        never return, and the drain would wait out the whole shutdown timeout.
+        Skipping it loses nothing. Kafka commits a record only after its handler
+        returns, so the next boot handles every record this one left.
+        """
+        if self._account_open.is_set():
+            await self._bus.drain()
 
     async def _stop_cadences(self) -> None:
         """Cancel the continuous reconciliation loops and wait them out, so no

@@ -484,6 +484,69 @@ def test_an_old_funding_payment_survives_a_boot_that_faults_while_it_waits(
     assert account.cash == Decimal("98.5")
 
 
+def test_a_stop_while_the_venue_is_dark_ends_a_boot_with_a_kafka_backlog(
+    tmp_path: Path,
+) -> None:
+    # The backlog holds an intent and a payment that waits for the account row.
+    # The barrier's account read never comes back, and the operator stops the
+    # engine (#614). The run must end long before Docker's 30 s SIGKILL.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    intent = _old_intent()
+    _produce(broker, intent)
+    _produce(broker, _payment_after_the_venue_read())
+    post = _venue()
+    stopped: list[str] = []
+
+    async def dark_account_read(url: str, payload: dict) -> object:
+        if request_type(url, payload) == "clearinghouseState":
+            if not stopped:
+                stopped.append(url)
+                os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.Event().wait()
+        await asyncio.sleep(0)
+        return await post(url, payload)
+
+    async def life() -> int:
+        bus = _kafka_bus(broker)
+        clock = ManualClock(start_ns=START_MS * 1_000_000)
+        config = HyperliquidConfig(
+            testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=HyperliquidExchange(
+                config=config,
+                bus=bus,
+                clock=clock,
+                universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
+                post=dark_account_read,
+                connect=idle_ws,
+                startup_timeout_seconds=60.0,
+                shrink_wait_seconds=30.0,
+            ),
+            feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
+        )
+        # Far below the engine's own shutdown timeout, so a teardown that waits
+        # it out fails here.
+        return await asyncio.wait_for(engine.run(), timeout=2)
+
+    assert asyncio.run(life()) == 0
+
+    assert stopped
+    assert _sent_orders(post) == []
+    # The payment was never booked, so Kafka still holds it for the next life.
+    assert SQLiteStore(db).load_account() is None
+    next_venue = _venue()
+    _run_one_life(db, broker, next_venue, first_start=True)
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.cash == Decimal("98.5")
+    assert _sent_orders(next_venue) == []
+
+
 def _payment_after_the_venue_read() -> FundingAccrual:
     """A payment at a boundary just after the barrier's account read.
 
