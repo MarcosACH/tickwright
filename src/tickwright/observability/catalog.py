@@ -243,6 +243,12 @@ class NamedEvent(StrEnum):
     # the order's venue id where it has one. A hand-placed order has no cloid,
     # so ``oid`` is the only thing that names it.
     EXCHANGE_ACTION_REJECTED = "exchange.action_rejected"
+    # The venue judged one order and refused it (a per-order REJECTED). The
+    # engine's ``order.rejected`` carries only the reason. This line adds the
+    # price we sent and, for a MARKET, the trade and mark its bound used
+    # (ADR-0030, ADR-0059). Without them the log cannot say why a price was
+    # refused (#601). ``last_trade`` and ``mark`` are ``None`` for a LIMIT.
+    EXCHANGE_ORDER_REJECTED = "exchange.order_rejected"
     # The open-orders read listed a spot order, and the adapter left it out.
     # The engine trades perps only, so cancel all does not pull it. Named so an
     # operator sees what stays resting (``HyperliquidExchange``, #470).
@@ -327,6 +333,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     # ``cloid`` is ``None`` on the account-grain read, which has no order.
     NamedEvent.EXCHANGE_REQUEST_FAILED: frozenset({"request", "cloid", "error"}),
     NamedEvent.EXCHANGE_ACTION_REJECTED: frozenset({"request", "cloid", "oid", "reason"}),
+    NamedEvent.EXCHANGE_ORDER_REJECTED: frozenset(
+        {"cloid", "reason", "price", "last_trade", "mark"}
+    ),
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: frozenset({"coin", "oid"}),
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: frozenset({"symbol", "mode", "leverage"}),
 }

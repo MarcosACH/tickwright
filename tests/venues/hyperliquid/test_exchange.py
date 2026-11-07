@@ -10,9 +10,10 @@ sent. Venue quirk translation lives in the adapter, never the engine
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 import pytest
 from eth_account import Account
@@ -441,6 +442,35 @@ def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() ->
     assert report.status is OrderState.REJECTED
     assert report.reason == "Order must have minimum value of $10"
     assert report.cloid == CLOID
+
+
+def rejections(events: list[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
+    return [e for e in events if e["event"] == NamedEvent.EXCHANGE_ORDER_REJECTED]
+
+
+def test_a_rejected_market_order_logs_the_price_sent_and_the_prices_behind_it() -> None:
+    # In #600 the log showed only the venue's reason. It could not say why the
+    # venue judged the price too far away, because the price was not there.
+    post = FakeExchangeApi({"order": error_response("Price too far from oracle")})
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "44000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    (rejection,) = rejections(events)
+    # 43250.5 × 1.05 = 45413.025, and the mark's 46200 is looser, so the trade
+    # binds. A buy rounds down to five significant figures.
+    assert rejection["cloid"] == CLOID
+    assert rejection["reason"] == "Price too far from oracle"
+    assert rejection["price"] == "45413"
+    assert rejection["last_trade"] == "43250.5"
+    assert rejection["mark"] == "44000"
 
 
 def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:

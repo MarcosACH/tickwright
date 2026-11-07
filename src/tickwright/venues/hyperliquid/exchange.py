@@ -89,6 +89,16 @@ class _MissingPrice(Exception):
     """A market order has no price to bound it, so it cannot be sent."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Pricing:
+    """The price an order is sent at, with the trade and mark a MARKET's bound
+    used. A LIMIT has neither. A rejection logs all three (#601)."""
+
+    price: Decimal
+    last_trade: Decimal | None = None
+    mark: Decimal | None = None
+
+
 class HyperliquidExchange:
     """The live ``Exchange`` adapter for Hyperliquid perps."""
 
@@ -261,7 +271,7 @@ class HyperliquidExchange:
 
     async def place(self, order: PlaceOrder) -> None:
         try:
-            wire = self._order_wire(order)
+            pricing = self._pricing(order)
         except _MissingPrice as missing:
             # Nothing was sent, so the order provably never landed (ADR-0010).
             # A raise here would fault the whole engine for one order (#509).
@@ -276,7 +286,7 @@ class HyperliquidExchange:
             return
         action = {
             "type": "order",
-            "orders": [wire],
+            "orders": [self._order_wire(order, pricing.price)],
             "grouping": "na",
         }
         # The signed action goes through the same read as every query: ``read``
@@ -307,9 +317,11 @@ class HyperliquidExchange:
                 case unreachable:
                     assert_never(unreachable)
             return
-        await self._apply_placement(order, adjudication)
+        await self._apply_placement(order, adjudication, pricing)
 
-    async def _apply_placement(self, order: PlaceOrder, adjudication: "_Adjudication") -> None:
+    async def _apply_placement(
+        self, order: PlaceOrder, adjudication: "_Adjudication", pricing: _Pricing
+    ) -> None:
         """Carry out an adjudication that has already been read (ADR-0015): the
         raw venue facts onto the bus, and on a fill the follow-up fills read.
 
@@ -342,6 +354,16 @@ class HyperliquidExchange:
             case _Rejected(reason=reason):
                 # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
                 # the order was sent and judged, and the venue's reason rides along.
+                # The reason alone cannot say why a price was refused, so the
+                # prices go in the log beside it (#601).
+                named_event(
+                    NamedEvent.EXCHANGE_ORDER_REJECTED,
+                    cloid=order.cloid,
+                    reason=reason,
+                    price=_wire_decimal(pricing.price),
+                    last_trade=_logged(pricing.last_trade),
+                    mark=_logged(pricing.mark),
+                )
                 await self._bus.publish(
                     self._status_report(
                         cloid=order.cloid,
@@ -862,23 +884,23 @@ class HyperliquidExchange:
             reason=reason,
         )
 
-    def _order_wire(self, order: PlaceOrder) -> dict[str, Any]:
+    def _order_wire(self, order: PlaceOrder, price: Decimal) -> dict[str, Any]:
         # Field order matters: the venue re-encodes the JSON action with
         # msgpack to verify the signature, so the wire must serialize exactly
         # as it was hashed — a/b/p/s/r/t/c, matching the SDK's encoder.
         return {
             "a": self._universe.asset_indices[order.symbol],
             "b": order.side is Side.BUY,
-            "p": _wire_decimal(self._limit_price(order)),
+            "p": _wire_decimal(price),
             "s": _wire_decimal(order.quantity),
             "r": order.reduce_only,
             "t": {"limit": {"tif": self._wire_tif(order)}},
             "c": order.cloid,
         }
 
-    def _limit_price(self, order: PlaceOrder) -> Decimal:
+    def _pricing(self, order: PlaceOrder) -> _Pricing:
         if isinstance(order, LimitOrder):
-            return order.price
+            return _Pricing(price=order.price)
         # MARKET → aggressive IOC limit (ADR-0030): no native market type at
         # the venue, so the order is priced through the book with a bound. The
         # quantizer's passive rounding keeps the bound honest — a buy rounds
@@ -899,7 +921,11 @@ class HyperliquidExchange:
         # The tighter of the two: a buy pays no more, a sell takes no less.
         tighter = min if order.side is Side.BUY else max
         price = tighter(latest * bound, mark * bound)
-        return quantize_price(price, order.side, self._universe.specs[order.symbol])
+        return _Pricing(
+            price=quantize_price(price, order.side, self._universe.specs[order.symbol]),
+            last_trade=latest,
+            mark=mark,
+        )
 
     def _wire_tif(self, order: PlaceOrder) -> str:
         if isinstance(order, MarketOrder):
@@ -1276,6 +1302,10 @@ def _fee_settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     if token != "USDC":
         refuse_non_usdc(reported=f"fill fee settled in {token!r}, not USDC", row="fill")
     return figure(entry["fee"])
+
+
+def _logged(value: Decimal | None) -> str | None:
+    return None if value is None else _wire_decimal(value)
 
 
 def _wire_decimal(value: Decimal) -> str:
