@@ -20,6 +20,7 @@ from hyperliquid_fakes import (
     FakeExchangeApi,
     FakeWsConnection,
     asset_ctx_frame,
+    error_response,
     order_status_response,
     request_type,
     trade,
@@ -419,6 +420,19 @@ def test_a_fill_restarts_the_oracle_cap(tmp_path: Path) -> None:
     # The 3 dry closes are the last 3, so the first of them is past the new cap.
     assert nonces[-3] - venue.filled_ms >= 300_000
     assert logs[-1]["left"] == "HYPE=-1.0"
+
+
+def test_any_other_per_order_reject_is_still_a_dry_attempt(tmp_path: Path) -> None:
+    # Only an oracle reject is waited out (ADR-0056). Any other reject the venue
+    # judged will not pass by waiting, so the give-up rule must still count it.
+    venue = AnswersFirst(error_response("Order must have minimum value of $10"))
+
+    exit_code, logs, _, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [("HYPE", 1, "no_fill")]
+    assert not [log for log in logs if log["event"] == "flatten.price_refused"]
 
 
 def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:
