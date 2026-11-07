@@ -31,4 +31,5 @@ WORKDIR /data
 USER tickwright
 # tini is PID 1 and passes every signal to the engine. The kernel drops a signal sent to a
 # PID 1 with no handler, and the engine has none until it has imported and built (#604).
+# The `tickwright` command holds SIGUSR1 and SIGUSR2 until then, so keep it here (#615).
 ENTRYPOINT ["tini", "--", "tickwright"]

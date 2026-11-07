@@ -55,6 +55,11 @@ refusals come after construction, not two.** A missing `wake_interval_seconds` a
 the list. They also exit 2. The interval is read after construction because it may come from the
 settings. The method check also covers `on_wake`, since it reads the Protocol.**)**
 
+**(Amended by [#615](https://github.com/MarcosACH/tickwright/issues/615): the file that reads
+ambient config is `app/cli.py`.** It was `app/__main__.py`. The rename removed
+`python -m tickwright.app`, which skipped the kill switch signal hold (ADR-0024). The rule stands.
+One module reads ambient config.**)**
+
 ## Considered options
 
 - **The user writes the start script.** The user builds a node, adds strategies, and calls
