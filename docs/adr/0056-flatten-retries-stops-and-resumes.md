@@ -127,6 +127,26 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   left open by an earlier run also resets the count. Flatten waits for that close before its first
   attempt, and failed reads during the wait count. Only a fill during the wait counts as a fill. A
   fill booked before the crash does not.**)**
+  **(Extended in [#603](https://github.com/MarcosACH/tickwright/issues/603):** an oracle reject
+  is not a dry attempt, up to a time cap. Hyperliquid rejects an order whose price is too far from
+  its oracle. When the book moves far from the oracle, every close that could trade there is
+  rejected. No bound on our side fixes that. On testnet this lasted 54 minutes. The book is most
+  likely to leave the oracle in a fast market, which is when flatten matters most. So giving up
+  after about 6 seconds is the wrong answer. The adapter reports the reject as its own refusal
+  kind, `price_band`, without venue text. The saga still ends `REJECTED`. Flatten emits
+  `flatten.price_refused`, the count does not move, and the next attempt goes after 2 seconds.
+  The cap is 5 minutes on the engine clock. It starts at the first oracle reject after the loop
+  starts or after its last fill. A fill restarts it. Other dry attempts do not. Once the cap has
+  passed, an oracle reject counts as a dry attempt again. So flatten gives up at most 3 attempts
+  later, as above. The cap is a constant, not a setting, like the 2 and 10 second waits. Like the
+  count, it lives in memory, so a crash resets it. The rate limit rule above still applies to each
+  attempt. Paper never rejects against an oracle, so this never happens on paper. Two other
+  options were rejected. Accepting the give-up as a known limit leaves a position open when it is
+  most at risk. A small mainnet probe would use real money, and this rule does not need it. The
+  probes ran on testnet only, so it is still not proven that mainnet runs the same rule. If it
+  does not, the wait never runs. Evidence:
+  [`hyperliquid-oracle-price-band.md`](../research/hyperliquid-oracle-price-band.md). Built in
+  [#619](https://github.com/MarcosACH/tickwright/issues/619).**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
