@@ -557,12 +557,15 @@ def test_flatten_on_an_empty_paper_account_trips_the_kill_switch_and_exits_zero(
     assert events[-1]["left"] == "none"
 
 
-def _signal_while_booting(cwd: Path, *signals: signal.Signals) -> None:
+def _signal_while_booting(
+    cwd: Path, *signals: signal.Signals, name: str = "SingleShotMarketStrategy"
+) -> None:
     """Run the shooter from a module that signals its own process on import.
 
     The engine imports a strategy while it builds, before it installs its
     handlers. So these signals land inside the boot window on every run,
-    with no race against the test's own timing (issue #615).
+    with no race against the test's own timing (issue #615). A ``name`` the
+    module does not define makes the boot refuse after the signals are sent.
     """
     sends = "".join(f"os.kill(os.getpid(), signal.{sig.name})\n" for sig in signals)
     (cwd / "early_signal.py").write_text(
@@ -570,7 +573,7 @@ def _signal_while_booting(cwd: Path, *signals: signal.Signals) -> None:
         "from tickwright.strategies.single_shot import SingleShotMarketStrategy\n\n"
         f"{sends}\n__all__ = ['SingleShotMarketStrategy']\n"
     )
-    entry = {**_STRATEGIES[0], "strategy": "early_signal:SingleShotMarketStrategy"}
+    entry = {**_STRATEGIES[0], "strategy": f"early_signal:{name}"}
     with (cwd / ".env").open("a") as env:
         env.write(f"TICKWRIGHT_STRATEGIES={json.dumps([entry])}\n")
 
@@ -646,6 +649,22 @@ def test_a_trip_and_a_reset_both_sent_while_the_engine_boots_leave_it_tripped(
 
     assert "guard.kill_switch_reset" not in [event["event"] for event in _events(log)]
     assert _kill_switch_tripped(tmp_path / "saga.db")
+
+
+def test_a_boot_that_refuses_after_a_sigusr1_says_the_kill_switch_did_not_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The run never reaches the store, so it has nowhere to write the trip.
+    # The operator must hear that, or they would think the next start is safe.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1, name="NoSuchStrategy")
+    log = tmp_path / "engine.log"
+
+    assert _run_to_exit(tmp_path, log) == 2, log.read_text()
+
+    assert "SIGUSR1" in log.read_text().splitlines()[-1]
+    assert "kill switch is not tripped" in log.read_text().splitlines()[-1]
 
 
 def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(

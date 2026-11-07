@@ -18,7 +18,18 @@ def main() -> int:
     # Imported here, after the block, because this import is the slow part.
     from tickwright.app.__main__ import main as run
 
-    return run()
+    try:
+        return run()
+    finally:
+        # Still waiting means the run ended before it could write the trip, so
+        # the next start would trade. The operator has to hear that. A lost
+        # SIGUSR2 is not reported, because it leaves the switch as it was.
+        if signal.SIGUSR1 in signal.sigpending():
+            print(
+                "tickwright: a SIGUSR1 arrived before the engine could record it. "
+                "The kill switch is not tripped.",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
