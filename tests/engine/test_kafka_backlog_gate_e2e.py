@@ -259,8 +259,7 @@ class _BacklogArrivesInTheTeardown:
     """A feed whose stop waits while the bus hands an old intent to the engine.
 
     The run stops during boot, so it never starts this feed. Its ``stop()``
-    is a teardown step, so the intent lands after the barrier cleared and
-    after the stop.
+    is a teardown step, so the intent lands after the stop.
     """
 
     def __init__(self, broker: FakeKafkaBroker, intent: PlaceSignal) -> None:
@@ -281,10 +280,12 @@ class _BacklogArrivesInTheTeardown:
         await self._broker.all_committed()
 
 
-def test_a_stop_during_boot_denies_an_intent_that_arrives_after_the_barrier(
+def test_a_stop_during_boot_denies_an_intent_that_arrives_in_the_teardown(
     tmp_path: Path,
 ) -> None:
     # The operator asked to stop, so no order may reach the venue after it (#604).
+    # The stop ends the boot before the barrier clears (#614). The denial must
+    # still name the stop, not the barrier.
     db = tmp_path / "saga.db"
     broker = FakeKafkaBroker()
     intent = _old_intent()
@@ -346,7 +347,9 @@ def test_a_stop_during_boot_denies_an_intent_that_arrives_after_the_barrier(
     assert saga.state is OrderState.DENIED
     # A row that names its cause tells an operator this was a stop, not a backlog.
     assert saga.reason == "the engine was told to stop during boot"
-    assert logs[-1]["event"] == "engine.stopped"
+    events = [record["event"] for record in logs]
+    assert "engine.barrier_cleared" not in events
+    assert events[-1] == "engine.stopped"
 
 
 def test_an_old_cancel_in_the_kafka_backlog_still_reaches_the_venue(tmp_path: Path) -> None:
