@@ -540,10 +540,20 @@ class Engine:
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
+        # The ``tickwright`` entry point blocks the kill switch signals until
+        # here, so one sent during boot is still waiting (issue #615). Setting
+        # SIG_IGN discards it, so the handlers below do not see it a second time.
+        early = signal.sigpending() & {signal.SIGUSR1, signal.SIGUSR2}
+        for sig in early:
+            signal.signal(sig, signal.SIG_IGN)
         loop.add_signal_handler(signal.SIGINT, self._stop_requested.set)
         loop.add_signal_handler(signal.SIGTERM, self._stop_requested.set)
         loop.add_signal_handler(signal.SIGUSR1, self._trip_kill_switch)
         loop.add_signal_handler(signal.SIGUSR2, self._guard.reset_kill_switch)
+        # The store lock is held by now, so the trip is durable before boot goes on.
+        if signal.SIGUSR1 in early:
+            self._trip_kill_switch()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1, signal.SIGUSR2})
 
     def _remove_signal_handlers(self) -> None:
         """Restore default dispositions so a stopped engine never holds the

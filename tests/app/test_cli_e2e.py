@@ -1,6 +1,6 @@
 """The CLI E2E (issue #19 acceptance): a real process, run from ``.env``.
 
-``python -m tickwright.app`` in a scratch directory: replays the configured
+``python -m tickwright`` in a scratch directory: replays the configured
 file, trades on the paper venue, and exits 0 on SIGTERM. The resting LIVE
 order is still checkpointed afterwards — a graceful stop never cancels it —
 and the next start reconciles it against venue truth. The new paper venue
@@ -116,7 +116,7 @@ def _spawn(cwd: Path, log: Path, *args: str) -> subprocess.Popen[bytes]:
     # the parent holding it open buys nothing and leaks a handle per life.
     with log.open("wb") as sink:
         return subprocess.Popen(
-            [sys.executable, "-m", "tickwright.app", *args],
+            [sys.executable, "-m", "tickwright", *args],
             cwd=cwd,
             env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
             stdout=subprocess.DEVNULL,
@@ -555,6 +555,52 @@ def test_flatten_on_an_empty_paper_account_trips_the_kill_switch_and_exits_zero(
     assert events[-1]["event"] == "exit.finished"
     assert events[-1]["job"] == "flatten"
     assert events[-1]["left"] == "none"
+
+
+def _signal_while_booting(cwd: Path, *signals: signal.Signals) -> None:
+    """Run the shooter from a module that signals its own process on import.
+
+    The engine imports a strategy while it builds, before it installs its
+    handlers. So these signals land inside the boot window on every run,
+    with no race against the test's own timing (issue #615).
+    """
+    sends = "".join(f"os.kill(os.getpid(), signal.{sig.name})\n" for sig in signals)
+    (cwd / "early_signal.py").write_text(
+        "import os\nimport signal\n\n"
+        "from tickwright.strategies.single_shot import SingleShotMarketStrategy\n\n"
+        f"{sends}\n__all__ = ['SingleShotMarketStrategy']\n"
+    )
+    entry = {**_STRATEGIES[0], "strategy": "early_signal:SingleShotMarketStrategy"}
+    with (cwd / ".env").open("a") as env:
+        env.write(f"TICKWRIGHT_STRATEGIES={json.dumps([entry])}\n")
+
+
+def _kill_switch_tripped(db: Path) -> bool:
+    with SQLiteStore(db) as reader:
+        state = reader.load_kill_switch()
+    return state is not None and state.tripped
+
+
+def test_a_sigusr1_sent_while_the_engine_boots_trips_the_kill_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1)
+    log = tmp_path / "engine.log"
+
+    with _spawn(tmp_path, log) as process:
+        try:
+            # The shooter's market order is the proof that the trip came first.
+            _await_event(log, "order.denied")
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"exit {process.wait()}; stderr:\n{log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    # Once, because the waiting signal is used up rather than delivered again.
+    assert [event["event"] for event in _events(log)].count("guard.kill_switch_tripped") == 1
+    assert _kill_switch_tripped(tmp_path / "saga.db")
 
 
 def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(

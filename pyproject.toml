@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tickwright = "tickwright.app.__main__:main"
+tickwright = "tickwright.__main__:main"
 
 [dependency-groups]
 # Installed by `uv sync --dev` (and in CI). Not shipped to consumers.
