@@ -280,5 +280,7 @@ def run_flatten(
         config=engine_config,
         exit_job=Flatten(feed_ends=False),
     )
-    exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+    # The cap only catches a hung run. An oracle cap test walks up to 270 closes and takes
+    # 1.4 s idle but 27 s on a busy runner, so a tight cap failed slow runs (#623).
+    exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=60))
     return exit_code, post, socket
