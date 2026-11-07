@@ -498,7 +498,10 @@ reduce-only market order per symbol at a time, sized to the venue's position, on
 it. After each one, it reconciles and sends another until the venue is flat. It gives up after 3
 attempts in a row that fill nothing (ADR-0056). After an attempt that fills nothing, it waits 2
 seconds. A venue rate limit does not count as such an attempt. Flatten waits 10 seconds and tries
-again, with no cap. Any other refusal counts as an attempt that fills nothing. Before a refused or
+again, with no cap. On Hyperliquid, a close rejected as too far from the oracle does not count
+either, for up to 5 minutes. Flatten waits 2 seconds and tries again. A fill restarts the 5
+minutes. After them, the reject counts (ADR-0056, #619). Any other refusal counts as an attempt
+that fills nothing. Before a refused or
 dead attempt counts, flatten looks up its order by cloid. One read with no record is not proof, so
 the next attempt waits for the in-flight verdict (ADR-0011). That verdict and the wait start when
 the attempt ends and run at the same time. The next attempt goes when both are done, with a new
@@ -619,7 +622,9 @@ and `on_start`/`on_stop` hooks. `DEGRADED` is deferred. That pair is the shared 
 the whole of any one lifecycle: a component running a loop of its own also has a **supervised
 long-lived half** the engine's `TaskGroup` holds, so a failure in it faults the run instead of
 killing a task nobody watches. Both `MarketFeed` and `Exchange` declare that half as a third
-verb, `run()`. The runner awaits `start()` inline for both, so `start()` must return. `stop()` is
+verb, `run()`. The runner creates neither `run()` until its `start()` returns, so `start()` must
+return. It awaits `Exchange.start()` inline. It runs `MarketFeed.start()` as a task, so a stop can
+cancel a slow connect (#604). `stop()` is
 a request, not a proof: the runner ends every supervised half the same way, by cancelling its
 task and waiting it out before the bus drains. A `run()` must let that cancellation through and
 publish nothing after it. See ADR-0014, ADR-0024.

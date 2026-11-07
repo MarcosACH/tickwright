@@ -57,6 +57,10 @@ class NamedEvent(StrEnum):
     ENGINE_FEED_STARTED = "engine.feed_started"
     ENGINE_FAULTED = "engine.faulted"
     ENGINE_STOP_HOOK_FAILED = "engine.stop_hook_failed"
+    # The last event of a normal run that stopped cleanly. It comes after the
+    # teardown because only a finished teardown proves the stop was clean. A log
+    # that ends without it ended in a crash, a kill or a fault (#605).
+    ENGINE_STOPPED = "engine.stopped"
 
     # Operator exit runs (``Engine`` with an ``ExitJob``, ADR-0060).
     # ``exit.finished`` is the last event of every exit run that booted.
@@ -69,6 +73,7 @@ class NamedEvent(StrEnum):
     FLATTEN_DRY_ATTEMPT = "flatten.dry_attempt"
     FLATTEN_GAVE_UP = "flatten.gave_up"
     FLATTEN_RATE_LIMITED = "flatten.rate_limited"
+    FLATTEN_PRICE_REFUSED = "flatten.price_refused"
 
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
@@ -239,6 +244,12 @@ class NamedEvent(StrEnum):
     # the order's venue id where it has one. A hand-placed order has no cloid,
     # so ``oid`` is the only thing that names it.
     EXCHANGE_ACTION_REJECTED = "exchange.action_rejected"
+    # The venue judged one order and refused it (a per-order REJECTED). The
+    # engine's ``order.rejected`` carries only the reason. This line adds the
+    # price we sent and, for a MARKET, the trade and mark its bound used
+    # (ADR-0030, ADR-0059). Without them the log cannot say why a price was
+    # refused (#601). ``last_trade`` and ``mark`` are ``None`` for a LIMIT.
+    EXCHANGE_ORDER_REJECTED = "exchange.order_rejected"
     # The open-orders read listed a spot order, and the adapter left it out.
     # The engine trades perps only, so cancel all does not pull it. Named so an
     # operator sees what stays resting (``HyperliquidExchange``, #470).
@@ -286,6 +297,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ENGINE_FEED_STARTED: frozenset(),
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
     NamedEvent.ENGINE_STOP_HOOK_FAILED: frozenset({"hook", "error"}),
+    NamedEvent.ENGINE_STOPPED: frozenset(),
     NamedEvent.EXIT_REFUSED: frozenset({"reason", "store", "holder"}),
     NamedEvent.EXIT_NEW_STORE: frozenset({"store", "warning"}),
     NamedEvent.EXIT_FINISHED: frozenset({"job", "outcome", "exit_code", "left"}),
@@ -294,6 +306,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.FLATTEN_DRY_ATTEMPT: frozenset({"symbol", "count", "reason"}),
     NamedEvent.FLATTEN_GAVE_UP: frozenset({"symbol", "size"}),
     NamedEvent.FLATTEN_RATE_LIMITED: frozenset({"symbol", "limit"}),
+    NamedEvent.FLATTEN_PRICE_REFUSED: frozenset({"symbol"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
     NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),
     NamedEvent.STRATEGY_ERROR: frozenset({"strategy_id", "event_id", "error"}),
@@ -322,6 +335,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     # ``cloid`` is ``None`` on the account-grain read, which has no order.
     NamedEvent.EXCHANGE_REQUEST_FAILED: frozenset({"request", "cloid", "error"}),
     NamedEvent.EXCHANGE_ACTION_REJECTED: frozenset({"request", "cloid", "oid", "reason"}),
+    NamedEvent.EXCHANGE_ORDER_REJECTED: frozenset(
+        {"cloid", "reason", "price", "last_trade", "mark"}
+    ),
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: frozenset({"coin", "oid"}),
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: frozenset({"symbol", "mode", "leverage"}),
 }

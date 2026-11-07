@@ -102,9 +102,10 @@ def _first_leaf(exc: BaseException) -> BaseException:
     """The fault itself, out of the ``ExceptionGroup`` a ``TaskGroup`` wraps it in.
 
     A fault from the inline start sequence arrives raw. One from a supervised
-    task arrives wrapped. ``engine.faulted`` names the fault the same way in
-    both cases (#338). The group keeps only the first leaf: the first raw-handler
-    exception is what aborted the group, and its siblings were cancelled.
+    task arrives wrapped. So does one from step 6, which runs inside the group.
+    ``engine.faulted`` names the fault the same way in both cases (#338). The
+    group keeps only the first leaf: the first raw-handler exception is what
+    aborted the group, and its siblings were cancelled.
     """
     while isinstance(exc, BaseExceptionGroup):
         exc = exc.exceptions[0]
@@ -206,6 +207,7 @@ class Engine:
         # old record and fault the boot.
         self._account_open = asyncio.Event()
         self._feed_handle: FeedHandle | None = None
+        self._feed_start_task: asyncio.Task[None] | None = None
         self._exchange_task: asyncio.Task[None] | None = None
         self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
@@ -285,6 +287,10 @@ class Engine:
         read confirmed the job done. 1 means it stopped partway. 2 means it
         never booted.
         """
+        # Bind the run correlation first. Every record from here on, the engine's
+        # and every component's, traces to this run. That includes a run that
+        # never boots, whose only line may be the refusal below (ADR-0020).
+        bind_run_id(self._config.run_id or f"run-{uuid.uuid4().hex[:12]}")
         # The store lock comes before anything that writes, ``recover()`` first
         # among them (ADR-0052). A refusal also skips the teardown, because its
         # ``host.stop`` snapshots strategies and this store is another engine's.
@@ -310,23 +316,15 @@ class Engine:
             return self._refuse_exit_run(
                 refusal, reason="new_store", store=self._store.name, holder="none"
             )
-        self._install_signal_handlers()
         try:
-            await self._start_sequence()
+            # Inside the ``try``, because a boot signal's trip is a store write
+            # and a failed one must fault like any other (ADR-0024).
+            self._install_signal_handlers()
+            await self._boot_unless_stopped()
             async with asyncio.TaskGroup() as tg:
-                # An exit run schedules no cadence and starts no feed. Its job
-                # runs every reconcile pass itself, so two never overlap
-                # (ADR-0052). The venue's own long-lived half runs either way.
+                # Built on both paths, because the teardown reads it.
                 self._feed_handle = FeedHandle(self._feed, tg)
-                if self._exit_job is None:
-                    self._schedule_cadences(tg)
-                self._start_exchange_loop(tg)
-                if self._exit_job is None:
-                    await self._start_feed(self._feed_handle)
-                else:
-                    self._exit_task = tg.create_task(
-                        self._run_exit_job(self._exit_job, self._feed_handle)
-                    )
+                self._finish_boot(tg, self._feed_handle)
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -346,6 +344,7 @@ class Engine:
         self._state = ComponentState.STOPPED
         self._stopped.set()
         if self._exit_job is None:
+            named_event(NamedEvent.ENGINE_STOPPED)
             return 0
         # Only a final venue read that found nothing left makes it done. A signal
         # stops the job before it reports, so there is no outcome (ADR-0060).
@@ -424,14 +423,15 @@ class Engine:
         # possible after the barrier cleared, so nothing places before
         # reconciliation completes. Replay end-of-file ends the task but
         # not the run — like the CLI, the engine stops only when told to.
-        # The connect is inline and the loop is supervised, for the
-        # reasons ADR-0024 step 7's amendment states in full.
+        # The connect and the loop are both supervised, so a refused connect
+        # faults the boot and a stop can cancel a slow one. ADR-0024 step 7's
+        # amendments state why.
         await feed.start()
 
     async def _run_exit_job(self, job: ExitJob, feed: FeedHandle) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
-        # A signal during boot means the operator changed their mind. The job
-        # never starts, so nothing reaches the venue after it (ADR-0060).
+        # A signal can land after ``run`` made this task and before its first
+        # turn. The job then never starts, so nothing reaches the venue (ADR-0060).
         if self._stop_requested.is_set():
             return
         # Built and seeded as the host does it for a strategy, so the operator's
@@ -473,7 +473,9 @@ class Engine:
         named_event(
             NamedEvent.EXIT_FINISHED,
             job=self._exit_job.name,
-            outcome=outcome.status.value if outcome is not None else ExitStatus.STOPPED.value,
+            # The code decides the word. A teardown can break after the job said
+            # done, and this line must not then say done beside a code of 1.
+            outcome=(ExitStatus.DONE if exit_code == 0 else ExitStatus.STOPPED).value,
             exit_code=exit_code,
             # Only the engine knows the job never returned (ADR-0060).
             left=outcome.left if outcome is not None else "unread",
@@ -528,10 +530,25 @@ class Engine:
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
+        # The ``tickwright`` entry point blocks the kill switch signals until
+        # here, so one sent during boot is still waiting (issue #615). The store
+        # lock is held by now, so the trip is durable before boot goes on.
+        early = signal.sigpending() & {signal.SIGUSR1, signal.SIGUSR2}
+        # Written while the signal still waits. A failed write leaves it waiting,
+        # so the entry point can still say the kill switch did not trip.
+        if signal.SIGUSR1 in early:
+            self._trip_kill_switch()
+        elif signal.SIGUSR2 in early:
+            self._guard.reset_kill_switch()
+        # SIG_IGN discards a waiting signal, so the handlers below do not act on
+        # it a second time.
+        for sig in early:
+            signal.signal(sig, signal.SIG_IGN)
         loop.add_signal_handler(signal.SIGINT, self._stop_requested.set)
         loop.add_signal_handler(signal.SIGTERM, self._stop_requested.set)
         loop.add_signal_handler(signal.SIGUSR1, self._trip_kill_switch)
         loop.add_signal_handler(signal.SIGUSR2, self._guard.reset_kill_switch)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1, signal.SIGUSR2})
 
     def _remove_signal_handlers(self) -> None:
         """Restore default dispositions so a stopped engine never holds the
@@ -543,12 +560,28 @@ class Engine:
     def _trip_kill_switch(self) -> None:
         self._guard.trip_kill_switch("SIGUSR1: operator kill switch")
 
+    async def _boot_unless_stopped(self) -> None:
+        """Run the boot, but end it when a stop arrives first (#614).
+
+        A boot can wait on a dark venue for a whole startup budget per step.
+        Docker kills the engine 30 s after SIGTERM, so the stop cannot wait for
+        that. A boot that ends early is like a crash at that point, which every
+        boot step already survives. The next boot recovers from it.
+        """
+        boot = asyncio.create_task(self._start_sequence())
+        stop = asyncio.create_task(self._stop_requested.wait())
+        try:
+            await asyncio.wait((boot, stop), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+            boot.cancel()
+            await asyncio.wait((boot,))
+        # A fault in the boot still faults the run, even beside a stop.
+        if not boot.cancelled():
+            boot.result()
+
     async def _start_sequence(self) -> None:
-        """ADR-0024 steps 1–6: everything before the feed, in order."""
-        # Bind the per-process run correlation first: every record from here on
-        # — the engine's and every component's — is traceable to this run.
-        run_id = self._config.run_id or f"run-{uuid.uuid4().hex[:12]}"
-        bind_run_id(run_id)
+        """ADR-0024 steps 2–5: everything before the feed that waits, in order."""
         # Restore both read-models from the durable record, ledger first — the
         # ordering is ADR-0043 §6/§10's and belongs to the ``Checkpointer``,
         # which is why the rule is stated there rather than reproduced here.
@@ -616,12 +649,37 @@ class Engine:
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
+
+    def _finish_boot(self, tg: asyncio.TaskGroup, feed: FeedHandle) -> None:
+        """ADR-0024 steps 6 and 7, and the one place boot decides on a stop.
+
+        A stop that ended the boot early lands here too, with the barrier never
+        cleared. Nothing here awaits, so no stop can land halfway through.
+        """
+        # A signal during boot means the operator changed their mind. Orders
+        # stay closed, and nothing long-lived starts. Its strategies never
+        # start, so only a Kafka backlog can still bring it a signal. That
+        # signal is denied, and no order follows the stop. A run told to stop
+        # never ran, so it goes from READY straight to STOPPED.
+        if self._stop_requested.is_set():
+            self._execution.stopped_during_boot()
+            return
         self._execution.barrier_has_cleared()
-        # Strategies after the barrier: restore snapshot, resume seq, subscribe.
-        # An exit run starts none, so nothing but its job can place or cancel.
+        # An exit run starts no strategy, schedules no cadence and starts no
+        # feed. So nothing but its job can place or cancel. The job runs every
+        # reconcile pass itself, so two never overlap (ADR-0052). The venue's
+        # own long-lived half runs either way.
         if self._exit_job is None:
+            # Strategies after the barrier: restore snapshot, resume seq, subscribe.
             self._host.start()
         self._state = ComponentState.RUNNING
+        if self._exit_job is None:
+            self._schedule_cadences(tg)
+        self._start_exchange_loop(tg)
+        if self._exit_job is None:
+            self._feed_start_task = tg.create_task(self._start_feed(feed))
+        else:
+            self._exit_task = tg.create_task(self._run_exit_job(self._exit_job, feed))
 
     async def _materialise_account(self) -> bool:
         """The barrier's first step, which also opens the account-row gate."""
@@ -695,6 +753,11 @@ class Engine:
         snapshots, so a late ``Signal`` can still reach the venue: the seam
         answers for that (``Exchange.stop``), not the order.
 
+        An exit job ends first, ahead of the feed (#604). A replay flatten waits
+        for the feed to end before it closes, so a feed stopped first would let
+        the job send a close after the stop. A job still inside the feed connect
+        would also start a loop that no step cancels.
+
         One membership walked twice is the cost of one membership: the faulted
         pass restarts at the top, so a graceful step that raises drives every
         step *ahead* of the break a second time. No entry here may treat a
@@ -708,21 +771,29 @@ class Engine:
         entries that are both — ``feed.stop`` and ``exchange.stop`` wrap a seam
         call *and* a task cancellation — inherit the property from each half.
         """
-        # An exit run never started its strategies. Their snapshot would overwrite
-        # the one the last normal run saved, so it takes none.
-        host_stop: tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...] = (
-            (("host.stop", self._host.stop),) if self._exit_job is None else ()
-        )
+        # An exit run never starts its strategies, so ``host.stop`` takes no
+        # snapshot there. That rule is the host's, not this list's.
         return (
+            ("exit_job.stop", self._stop_exit_job),
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
-            ("exit_job.stop", self._stop_exit_job),
             ("exchange.stop", self._stop_exchange),
-            ("bus.drain", self._bus.drain),
-            *host_stop,
+            ("bus.drain", self._drain_bus),
+            ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
             ("store.close", self._store.close),
         )
+
+    async def _drain_bus(self) -> None:
+        """Drain the bus, unless boot ended before the account row opened (#614).
+
+        Fill and funding handlers wait for that row. With it never open, they
+        never return, and the drain would wait out the whole shutdown timeout.
+        Skipping it loses nothing. Kafka commits a record only after its handler
+        returns, so the next boot handles every record this one left.
+        """
+        if self._account_open.is_set():
+            await self._bus.drain()
 
     async def _stop_cadences(self) -> None:
         """Cancel the continuous reconciliation loops and wait them out, so no
@@ -734,8 +805,9 @@ class Engine:
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
 
     async def _stop_exit_job(self) -> None:
-        """End an exit job a signal interrupted, before the venue it reads is
-        released. A job that already returned is done, so this is a no-op. A
+        """End an exit job a signal interrupted, before the feed it waits on
+        and the venue it reads are released. A job that already returned is
+        done, so this is a no-op. A
         cancel it was sending may or may not land. Its saga mark is already
         durable, so restart reconciliation reads the truth either way."""
         if self._exit_task is None:
@@ -749,6 +821,11 @@ class Engine:
 
     async def _stop_feed(self) -> None:
         """Release the feed, then end the long-lived half this runner supervises."""
+        # A connect still in flight ends first, or its loop could start behind
+        # this step. A connect that already finished makes this a no-op.
+        if self._feed_start_task is not None:
+            self._feed_start_task.cancel()
+            await asyncio.gather(self._feed_start_task, return_exceptions=True)
         # No handle means the run faulted before its task group opened.
         task = None if self._feed_handle is None else self._feed_handle.task
         await self._stop_supervised(self._feed.stop, task)

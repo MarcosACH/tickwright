@@ -10,7 +10,9 @@ loop a turn before the barrier runs. That turn is the gap this suite covers.
 """
 
 import asyncio
-from collections.abc import Sequence
+import os
+import signal
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from eth_account import Account as Wallet
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    VenueDarkOn,
     idle_ws,
     order_status_response,
     request_type,
@@ -47,6 +50,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.engine.runner import Engine
+from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -216,6 +220,7 @@ def test_an_old_intent_in_the_kafka_backlog_is_denied_and_never_placed(tmp_path:
     saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
     assert saga is not None
     assert saga.state is OrderState.DENIED
+    assert saga.reason == "the startup barrier has not cleared"
     assert _sent_orders(post) == []
 
 
@@ -249,6 +254,103 @@ def test_an_intent_that_arrives_after_the_barrier_still_places(tmp_path: Path) -
     assert saga.state is OrderState.LIVE
     (sent,) = _sent_orders(post)
     assert sent["action"]["orders"][0]["c"] == derive_cloid(intent.signal_id)
+
+
+class _BacklogArrivesInTheTeardown:
+    """A feed whose stop waits while the bus hands an old intent to the engine.
+
+    The run stops during boot, so it never starts this feed. Its ``stop()``
+    is a teardown step, so the intent lands after the stop.
+    """
+
+    def __init__(self, broker: FakeKafkaBroker, intent: PlaceSignal) -> None:
+        self._broker = broker
+        self._intent = intent
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
+    async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        _produce(self._broker, self._intent)
+        await self._broker.all_committed()
+
+
+def test_a_stop_during_boot_denies_an_intent_that_arrives_in_the_teardown(
+    tmp_path: Path,
+) -> None:
+    # The operator asked to stop, so no order may reach the venue after it (#604).
+    # The stop ends the boot before the barrier clears (#614). The denial must
+    # still name the stop, not the barrier.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    intent = _old_intent()
+    post = _venue()
+    store = SQLiteStore(db)
+    stop_sent: list[str] = []
+
+    async def network(url: str, payload: dict) -> object:
+        if not stop_sent:
+            stop_sent.append(url)
+            os.kill(os.getpid(), signal.SIGTERM)
+            # The loop runs the engine's handler a few turns later. A real wait
+            # lets it run before boot goes on.
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
+        return await post(url, payload)
+
+    async def life() -> int:
+        bus = _kafka_bus(broker)
+        clock = ManualClock(start_ns=START_MS * 1_000_000)
+        config = HyperliquidConfig(
+            testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+        )
+        exchange = HyperliquidExchange(
+            config=config,
+            bus=bus,
+            clock=clock,
+            universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
+            post=network,
+            connect=idle_ws,
+            startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
+        )
+        store.checkpoint_ledger(
+            account=Account(
+                account_id=exchange.account_spec().account_id,
+                genesis_collateral=Decimal("0"),
+                genesis_ts_ns=0,
+            ),
+            ts_ns=0,
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=exchange,
+            feed=_BacklogArrivesInTheTeardown(broker, intent),
+        )
+        return await asyncio.wait_for(engine.run(), timeout=5)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(life())
+
+    assert exit_code == 0
+    assert stop_sent
+    assert _sent_orders(post) == []
+    saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
+    assert saga is not None
+    assert saga.state is OrderState.DENIED
+    # A row that names its cause tells an operator this was a stop, not a backlog.
+    assert saga.reason == "the engine was told to stop during boot"
+    events = [record["event"] for record in logs]
+    assert "engine.barrier_cleared" not in events
+    assert events[-1] == "engine.stopped"
 
 
 def test_an_old_cancel_in_the_kafka_backlog_still_reaches_the_venue(tmp_path: Path) -> None:
@@ -384,6 +486,60 @@ def test_an_old_funding_payment_survives_a_boot_that_faults_while_it_waits(
     account = SQLiteStore(db).load_account()
     assert account is not None
     assert account.cash == Decimal("98.5")
+
+
+def test_a_stop_while_the_venue_is_dark_ends_a_boot_with_a_kafka_backlog(
+    tmp_path: Path,
+) -> None:
+    # The backlog holds an intent and a payment that waits for the account row.
+    # The barrier's account read never comes back, and the operator stops the
+    # engine (#614). The run must end long before Docker's 30 s SIGKILL.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    intent = _old_intent()
+    _produce(broker, intent)
+    _produce(broker, _payment_after_the_venue_read())
+    post = _venue()
+    venue = VenueDarkOn("clearinghouseState", post)
+
+    async def life() -> int:
+        bus = _kafka_bus(broker)
+        clock = ManualClock(start_ns=START_MS * 1_000_000)
+        config = HyperliquidConfig(
+            testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=HyperliquidExchange(
+                config=config,
+                bus=bus,
+                clock=clock,
+                universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
+                post=venue,
+                connect=idle_ws,
+                startup_timeout_seconds=60.0,
+                shrink_wait_seconds=30.0,
+            ),
+            feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
+        )
+        # Far below the engine's own shutdown timeout, so a teardown that waits
+        # it out fails here.
+        return await asyncio.wait_for(engine.run(), timeout=2)
+
+    assert asyncio.run(life()) == 0
+
+    assert venue.stopped
+    assert _sent_orders(post) == []
+    # The payment was never booked, so Kafka still holds it for the next life.
+    assert SQLiteStore(db).load_account() is None
+    next_venue = _venue()
+    _run_one_life(db, broker, next_venue, first_start=True)
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.cash == Decimal("98.5")
+    assert _sent_orders(next_venue) == []
 
 
 def _payment_after_the_venue_read() -> FundingAccrual:

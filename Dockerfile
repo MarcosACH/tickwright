@@ -19,6 +19,9 @@ RUN uv sync --locked --no-dev --no-editable
 FROM python:3.13-slim-bookworm@sha256:a881a81282cca8c57f97014867fa651def1b3799030cc6b1cff45ed55ba8ef36
 # The venv scripts point at /app/.venv, so it keeps the same path here.
 COPY --from=build /app/.venv /app/.venv
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 10001 --no-create-home tickwright \
     && mkdir /data && chown tickwright /data
 # A user mounts their strategy code at /strategies and names it by import path (ADR-0061).
@@ -26,5 +29,7 @@ ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONPATH=/strategies
 # The SQLite store is written relative to the working directory.
 WORKDIR /data
 USER tickwright
-# Exec form, so the engine is PID 1 and gets TERM itself. It handles TERM and INT.
-ENTRYPOINT ["tickwright"]
+# tini is PID 1 and passes every signal to the engine. The kernel drops a signal sent to a
+# PID 1 with no handler, and the engine has none until it has imported and built (#604).
+# The `tickwright` command holds SIGUSR1 and SIGUSR2 until then, so keep it here (#615).
+ENTRYPOINT ["tini", "--", "tickwright"]

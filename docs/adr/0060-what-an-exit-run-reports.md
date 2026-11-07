@@ -28,6 +28,11 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `outcome: stopped` and `left: none`, and `flatten.gave_up` names the symbol with `size: 0`.
   `left` still comes from the final venue read, so `none` there means only that the venue is
   flat. The next boot resumes the open saga.**)**
+
+  **(Corrected by [#605](https://github.com/MarcosACH/tickwright/issues/605):** `outcome: done`
+  appears only beside code 0. A teardown can break after the job reported done. That is a fault, so
+  the run exits 1 with `outcome: stopped`. `left` still comes from the job's final read, as above.
+  The engine derives `outcome` from the code, so the two can never disagree.**)**
 - **Code 1 covers every run that started and did not finish.** That is flatten giving up, a failed
   read, cancel all leaving orders, a fault, and a stop by signal. Under ADR-0024, SIGINT (Ctrl-C)
   and SIGTERM give 0. Here both give 1, because the job is not done.
@@ -126,6 +131,15 @@ when a venue read fails, and which named events an exit run emits. Decided in
   **(Extended by [#473](https://github.com/MarcosACH/tickwright/issues/473):** `reason` on
   `flatten.dry_attempt` can also be `size_gap`. That is a gap between the partitions and the venue
   size that a drain did not close (ADR-0054). No close goes out against it.**)**
+
+  **(Extended by [#603](https://github.com/MarcosACH/tickwright/issues/603):** flatten gains the
+  event `flatten.price_refused`. It is emitted when the venue rejects a close as too far from its
+  oracle, while the 5 minute cap runs (ADR-0056). Its one field is `symbol`. After the cap, the
+  same reject is a dry attempt, and `reason` on `flatten.dry_attempt` is `price_band`. Not built
+  yet. The build is [#619](https://github.com/MarcosACH/tickwright/issues/619).**)**
+
+  **(Built in [#619](https://github.com/MarcosACH/tickwright/issues/619):** as decided above.
+  `flatten.price_refused` is in the catalog with its one field, `symbol`.**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 

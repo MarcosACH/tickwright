@@ -279,6 +279,11 @@ context. Starts the feed through the `FeedHandle`.
   and is not a dry attempt. The first position read and the final read still stop the run on any
   failed read (ADR-0060).**)**
 - Emit `flatten.dry_attempt` and `flatten.rate_limited`.
+- **(Built by #619:** a close refused with `price_band` is not a dry attempt for 5 minutes. Flatten
+  emits `flatten.price_refused` and waits 2 seconds. The 5 minutes start at the first such refusal
+  since the loop started or since its last fill. Other dry attempts do not move them. After them,
+  the refusal is a dry attempt with `reason` `price_band`. The cap is the constant
+  `PRICE_BAND_CAP_SECONDS` (ADR-0056).**)**
 
 **Seams:** None.
 
@@ -412,6 +417,9 @@ a handled cancel all's seq (ADR-0055).
 - A new raw report, `OrderRefusedReport`, with `refusal`: `rate_limited_address`,
   `rate_limited_ip`, `refused`, or `send_failed`. It moves no saga. Reconcile still resolves the
   order by cloid. `send_failed` means no answer came back, so the order may have landed (#475).
+- **(Extended by #619:** `refusal` has a fifth kind, `price_band`. The venue judged the order and
+  rejected its price against its oracle. Here the outcome is known, and a `REJECTED` status report
+  ends the saga. The refusal report still moves no saga (ADR-0056).**)**
 
 **Responsibilities:** Both new reads answer for the account, so they sit on `AccountAnchor`. That
 is the placement rule in `protocols.py`.
@@ -469,6 +477,9 @@ already gets `account_net`.
 - Emit `OrderRefusedReport` on a refused action and on a send that dies. Tell the address limit and
   the IP limit (HTTP 429) apart from any other refusal (ADR-0056). A dead send is `send_failed`. An
   answer it cannot read emits no report.
+- **(Built by #619:** on a per-order error with the text "too far from oracle", in any case, also
+  emit `OrderRefusedReport` with `price_band`. It goes before the `REJECTED` status report. The
+  docs and testnet word the error differently (#600).**)**
 - Cap every market order price by the mark too (ADR-0059). A missing mark is a missing price.
 - Answer `fetch_open_orders()` and `fetch_positions()`. Return `RATE_LIMITED_IP` on a 429.
 - The feed's `add_symbols()` adds coins to the subscription before `start()`.
@@ -542,6 +553,7 @@ that true.
 **Interface:** Eight new names: `exit.refused`, `exit.new_store`, `exit.unguarded`,
 `exit.finished`, `cancel_all.orders_remain`, `flatten.dry_attempt`, `flatten.rate_limited`,
 `flatten.gave_up`. Fields as in ADR-0060.
+**(Extended by #619:** a ninth name, `flatten.price_refused`, with one field, `symbol`.**)**
 
 **Responsibilities:** A closed set, so the catalog tests cover them.
 

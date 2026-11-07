@@ -9,6 +9,9 @@ those components.
 `Engine.start()`:
 
 1. Bind the `run_id` correlation, init observability, open the `Store`, build the `Cache`.
+   **(Placed by [#605](https://github.com/MarcosACH/tickwright/issues/605):** the bind is the first
+   line of `run()`. It comes before the store lock (ADR-0052), so a run that faults or is refused
+   before boot still logs its run id.**)**
 2. **Recover**: rebuild the `Cache` from the `Store` (write-through projection, ADR-0009).
    **(Extended by ADR-0043 §6/§10:** the accounting ledger recovers here too, and it goes **first**
    — `Engine._start_sequence` calls `PortfolioProjection.recover()`, which checks the store's
@@ -175,6 +178,51 @@ therefore unchanged; it is now enforced across two calls instead of one. An adap
 reach returns at once from `start()` and that is a legitimate implementation, not an omission:
 `ReplayFeed` has no venue, exactly as `HyperliquidExchange` has no loop to supervise in `run()`.**)**
 
+**(Amended by [#604](https://github.com/MarcosACH/tickwright/issues/604): a stop during boot
+starts nothing, and the feed connect is no longer inline.** A signal sets the stop request at any
+point in the boot. Boot does not check it between steps 2 and 6, so those steps still finish. Once
+the barrier clears, a run told to stop skips the strategies, the cadences, the venue loop and the
+feed. It then takes the clean ending and exits 0.
+
+That run calls `stopped_during_boot()` instead of `barrier_has_cleared()`, so orders stay closed.
+Its strategies never start, but a Kafka bus can still deliver an old `PlaceSignal` during the
+teardown. The saga denies it as it would before the barrier. The `DENIED` row is durable, so a
+later life never places it either. Its reason names the stop, so an operator can tell it from a
+boot backlog. Placing it would send an order after the operator asked to stop, and `Exchange.stop()`
+leaves `place` answerable through the drain.
+
+The runner now runs `feed.start()` as a task in the `TaskGroup`, beside the stop watcher. Awaited
+inline, a slow connect blocked the watcher, and strategy wake-ups kept firing after the signal.
+The teardown's `feed.stop` entry cancels a connect still in flight before it releases the feed. A
+refused connect still faults the boot, because a task that raises aborts the group as an inline
+`await` did.
+
+A stop during a venue outage still waits for `Exchange.start()` and the barrier. Cancelling them
+could leave a Kafka drain waiting on a handler that waits for the account row.
+
+The handlers exist only once `run()` reaches them, so the image runs `tini` as PID 1. Before this,
+the engine was PID 1, and the kernel drops a signal sent to a PID 1 with no handler. Docker then
+waited out the grace period and killed the engine with exit 137. With `tini`, a `SIGTERM` in that
+window ends the process with exit 143. That is outside the 0, 1, 2 contract and is accepted,
+because nothing has started by then. A `SIGUSR1` in that window ends the process with exit 138 and
+trips nothing.**)**
+
+**(Amended by [#615](https://github.com/MarcosACH/tickwright/issues/615): a kill switch signal
+during boot is held, not lost.** The `tickwright` command now starts in `tickwright/__main__.py`.
+That module blocks `SIGUSR1` and `SIGUSR2` before it imports the engine. A signal sent while the
+engine imports and builds waits in the kernel. `run()` reads it when it installs the handlers. The
+store lock is held by then, so a trip is written before `recover()` and before any order. If both
+signals wait, the trip wins. The kernel keeps no order between them, and a wrong trip loses no
+money. A run that exits before that point, such as a boot refusal or a held lock, cannot write the
+trip. It prints a stderr line saying the kill switch is not tripped. The engine writes the trip
+before it discards the waiting signal. So a failed write leaves the signal waiting, and the run
+faults with exit 1 and prints the same line. A lost `SIGUSR2` is not
+reported, because the switch stays as it was. The window that is left is interpreter startup,
+about 30 ms on a laptop. A `SIGUSR1` there still ends the process with exit 138. `SIGTERM` and
+`SIGINT` are not blocked, so the #604 behavior for them stands. `app/__main__.py` became
+`app/cli.py`, with no `__main__` block. So `python -m tickwright.app` no longer starts an engine,
+and every start goes through the block.**)**
+
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
 we proceed; a sustained outage trips the timeout → `FAULTED` → the process exits non-zero → the
@@ -213,6 +261,31 @@ returns, so SIGKILL is the only escape — the opposite of the bounded teardown 
 composition root must **hand the adapter the budget** to size its own timeouts with. Bounding the
 start sequence in the runner is the alternative and was not taken here: `bus.start()` at step 3 has
 the same exposure, so the fix belongs to the whole sequence rather than to this one call.
+
+**(Amended by [#614](https://github.com/MarcosACH/tickwright/issues/614): a stop ends the boot.**
+This replaces two #604 rules. Boot steps 2 to 6 no longer finish after a stop. A stop during a venue
+outage no longer waits for `Exchange.start()` and the barrier. A boot can wait on a dark venue for a
+whole startup budget per step. Docker sends `SIGKILL` 30 s after `SIGTERM`, so the stop cannot wait
+that long.
+
+- `run()` races steps 2 to 5 against the stop request. A stop that comes first cancels the boot.
+  So a `SIGTERM` no longer needs `SIGKILL` to end a boot wedged at step 4.
+- A cancelled boot is like a crash at that point, which every boot step already survives. The next
+  boot recovers from it. A fault in the boot still faults the run, even beside a stop.
+- Step 6 is the one place boot decides on a stop. It reads the request once, after the race. A boot
+  that was cancelled lands there too, with the barrier never cleared. Nothing in step 6 awaits, so
+  no stop can land halfway through it.
+- Step 6 runs inside the `TaskGroup` and starts the long-lived tasks itself. So one branch on the
+  stop gates the order gate, the strategies, the cadences, the venue loop, the feed and the exit
+  job. A new start step goes behind that branch, with no check of its own.
+- A fault in step 6 now reaches `run()` wrapped in an `ExceptionGroup`, like a task fault.
+  `engine.faulted` and the exit code still name the fault itself (ADR-0048, #338). `Engine.fault`
+  keeps the group, as it does for every fault raised inside the group.
+- A run told to stop never reaches `RUNNING`. It goes from `READY` to `STOPPED`.
+- The Kafka drain no longer hangs on a handler that waits for the account row. The teardown skips
+  the drain when this boot never opened the row. The shutdown section below says why that is safe.
+
+`start()` must still not hang when no stop comes. The step-4 budget rule above stands.**)**
 
 ## Shutdown reverses the sequence and leaves resting orders alone
 
@@ -288,6 +361,28 @@ which.**)**
   step 4 and can fill mid-window, so "the feed starts last" bounds new **sends**, never **fills**.
   A future flatten-on-exit or cancel-on-stop policy would shrink that race; nothing else depends on
   it, and ADR-0044 accepts the race regardless.**)**
+
+**(Extended by [#605](https://github.com/MarcosACH/tickwright/issues/605):** a normal run that
+finishes the graceful teardown logs `engine.stopped` as its last event. The event comes after the
+teardown because only a finished teardown proves the stop was clean. A teardown that breaks or hangs
+logs `engine.faulted` instead. A log that holds neither ended in a crash or a kill. An exit run
+logs no `engine.stopped`, because `exit.finished` is its last event (ADR-0060).**)**
+
+**(Amended by [#604](https://github.com/MarcosACH/tickwright/issues/604): an exit job ends before
+the feed.** `exit_job.stop` is now the first teardown entry, ahead of `feed.stop`. A replay flatten
+waits for the feed to end before it closes anything. With the feed stopped first, the job read the
+stop as the end of the file and sent a close after the stop. A job still inside the feed connect
+could also finish it during `feed.stop` and start a loop that no entry cancelled, so the run never
+ended. The job still ends ahead of `exchange.stop`, so the venue it reads stays up until it is
+done.**)**
+
+**(Amended by [#614](https://github.com/MarcosACH/tickwright/issues/614): the drain is skipped when
+the account row never opened.** Fill and funding handlers wait for the account row, and only this
+boot's barrier opens it. A row left by an earlier run does not count. When a stop ends the boot
+before that, those handlers never return. The drain would then wait out `shutdown_timeout`, and the
+run would fault. So the `bus.drain` entry does nothing in that case, on both teardown paths. This
+loses nothing. Kafka commits a record only after its handler returns, so the next boot handles it
+once.**)**
 
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 

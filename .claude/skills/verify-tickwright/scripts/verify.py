@@ -39,7 +39,8 @@ ROOT = SCRIPTS.parents[3]
 # ``VERIFY_HOME`` is for the helper's own tests, which must never write into the
 # checkout's run tree. Nothing else sets it.
 VERIFY_HOME = Path(os.environ.get("VERIFY_HOME") or ROOT / ".agents" / "verify")
-ENGINE_CMD = [sys.executable, "-m", "tickwright.app"]
+# The operator's entry point, which holds kill switch signals sent during boot (#615).
+ENGINE_CMD = [sys.executable, "-m", "tickwright"]
 STRATEGY_RUNNER = SCRIPTS / "run_strategy.py"
 # Strategies outside the package, mounted at ``/strategies`` in a container life.
 STRATEGIES = SCRIPTS.parent / "strategies"
@@ -188,7 +189,7 @@ def pid_is_ours(pid: int, run_id: str) -> bool:
     out = subprocess.run(
         ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
     ).stdout
-    return "tickwright.app" in out or "run_strategy.py" in out or str(scratch(run_id)) in out
+    return "-m tickwright" in out or "run_strategy.py" in out or str(scratch(run_id)) in out
 
 
 def parse_offset(text: str) -> int:
@@ -702,6 +703,7 @@ ALARM_EVENTS = (
     "leverage.divergence",
     "exchange.request_failed",
     "exchange.action_rejected",
+    "exchange.order_rejected",
 )
 
 

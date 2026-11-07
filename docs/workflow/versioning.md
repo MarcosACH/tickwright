@@ -17,7 +17,7 @@ SemVer is a promise about a *public API*. For Tickwright that surface is:
 
 - the **seam Protocols** a user implements or swaps — `Strategy`, `MarketFeed`, `Exchange`, `EventBus`, `Store`, `Clock`, `PreTradeGuard`, fill models (ADR-0032);
 - the **config contract** — `AppConfig` / the `TICKWRIGHT_*` environment variables (`.env.example` is canonical);
-- the **CLI** — `tickwright` / `python -m tickwright.app`.
+- the **CLI** — `tickwright` / `python -m tickwright`.
 
 Internal engine mechanics (saga internals, reconciler scheduling, private modules) are **not** part of the versioned contract; changing them is not a breaking change.
 

@@ -1,6 +1,6 @@
 """Run the engine with one of the verification strategies instead of a configured one.
 
-Mirrors ``src/tickwright/app/__main__.py``: the same ``AppSettings`` read from
+Mirrors ``src/tickwright/app/cli.py``: the same ``AppSettings`` read from
 the scratch ``.env``, the same per-seam builders, the same ``Engine.run()``
 exit-code contract. The differences are the hand-registered strategy and the
 leverage book, which ``AppConfig`` refuses for a symbol no configured strategy
