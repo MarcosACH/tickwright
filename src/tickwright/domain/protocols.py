@@ -550,7 +550,9 @@ class OrderAnchor(Protocol):
 
         - The venue took the order: its ack, its fills, and its end.
         - The venue judged the order and refused it: ``REJECTED``, with the
-          venue's reason.
+          venue's reason. If the venue rejected the price as too far from its
+          oracle, an ``OrderRefusedReport`` with ``PRICE_BAND`` comes first.
+          Flatten waits that reject out instead of counting it (ADR-0056).
         - The adapter has no price to send the order with, so it sends
           nothing: ``FAILED``, with the reason. Not sending is the proof that
           the order never landed (ADR-0010).

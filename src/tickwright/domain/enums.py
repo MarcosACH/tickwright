@@ -77,7 +77,8 @@ class OrderRefusal(StrEnum):
     """Why the venue did not take an order, as the engine sees it (ADR-0056).
 
     A closed set, so the engine never reads venue text. Flatten waits out a
-    rate limit. Any other kind is a dry attempt.
+    rate limit. It waits out a price band too, up to a time cap. Any other
+    kind is a dry attempt.
     """
 
     RATE_LIMITED_ADDRESS = "rate_limited_address"
@@ -85,3 +86,8 @@ class OrderRefusal(StrEnum):
     REFUSED = "refused"
     SEND_FAILED = "send_failed"
     """No answer came back. The order may still have reached the venue."""
+    PRICE_BAND = "price_band"
+    """The venue judged the order and rejected its price as too far from its oracle.
+
+    Unlike the other kinds, the outcome is known. The order still ends ``REJECTED``.
+    """

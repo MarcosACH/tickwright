@@ -16,9 +16,11 @@ from typing import Any
 
 import pytest
 from hyperliquid_fakes import (
+    ORACLE_REJECT,
     FakeExchangeApi,
     FakeWsConnection,
     asset_ctx_frame,
+    error_response,
     order_status_response,
     request_type,
     trade,
@@ -30,6 +32,7 @@ from hyperliquid_flatten import (
     HYPE_ASSET,
     START_MS,
     AnswersFirst,
+    FillsHalfAfterOracleRejects,
     HalfClosesBesideAGap,
     HeldShort,
     priced_frames,
@@ -301,6 +304,135 @@ def test_a_refused_or_dead_close_the_venue_never_took_is_a_refused_dry_attempt(
     assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
     dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
     assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [("HYPE", 1, "refused")]
+
+
+def test_a_close_rejected_against_the_oracle_is_no_dry_attempt_and_is_tried_again(
+    tmp_path: Path,
+) -> None:
+    # When the book leaves the oracle, every close is rejected for a while (ADR-0056, #603).
+    # Counting each as dry would give up in about 6 seconds with the position open.
+    venue = AnswersFirst(ORACLE_REJECT)
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    refused = [log for log in logs if log["event"] == "flatten.price_refused"]
+    assert [log["symbol"] for log in refused] == ["HYPE"]
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    first, second = [
+        payload["nonce"] for url, payload in post.requests if request_type(url, payload) == "order"
+    ]
+    assert second - first >= 2_000
+    assert logs[-1]["outcome"] == "done"
+
+
+class _RejectsAgainstTheOracle(HeldShort):
+    """Rejects every close against its oracle, so the short stays open."""
+
+    def order(self, payload: dict) -> object:
+        return ORACLE_REJECT
+
+
+def _order_nonces(post: FakeExchangeApi) -> list[int]:
+    """The nonce of every close sent. It is the clock's ms at the send."""
+    return [
+        payload["nonce"] for url, payload in post.requests if request_type(url, payload) == "order"
+    ]
+
+
+def test_oracle_rejects_past_5_minutes_count_as_dry_and_flatten_gives_up(
+    tmp_path: Path,
+) -> None:
+    # A gap that outlasts 100 oracle updates is not closing soon (ADR-0056, #603).
+    # Waiting longer would be a retry forever, so the give-up rule takes over.
+    venue = _RejectsAgainstTheOracle()
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [
+        ("HYPE", 1, "price_band"),
+        ("HYPE", 2, "price_band"),
+        ("HYPE", 3, "price_band"),
+    ]
+    assert [log["event"] for log in logs if log["event"].startswith("flatten.")][-1] == (
+        "flatten.gave_up"
+    )
+    nonces = _order_nonces(post)
+    # The 3 dry closes are the last 3. Every close before them was inside the cap.
+    assert nonces[-3] - nonces[0] >= 300_000
+    assert nonces[-4] - nonces[0] < 300_000
+    assert venue.held
+    assert "HYPE" in logs[-1]["left"]
+
+
+class _RefusesOnceAmongOracleRejects(_RejectsAgainstTheOracle):
+    """Refuses the 20th close for a bad nonce, and rejects every other one against its oracle."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closes = 0
+
+    def order(self, payload: dict) -> object:
+        self.closes += 1
+        return REFUSED if self.closes == 20 else super().order(payload)
+
+
+def test_another_dry_attempt_does_not_restart_the_oracle_cap(tmp_path: Path) -> None:
+    # The cap starts at the first oracle reject and only a fill restarts it (ADR-0056).
+    # If any dry attempt restarted it, the wait could run far past 5 minutes.
+    venue = _RefusesOnceAmongOracleRejects()
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "refused"),
+        (2, "price_band"),
+        (3, "price_band"),
+    ]
+    nonces = _order_nonces(post)
+    # The refusal comes at least 30 seconds in. A restart there would end the run at least
+    # 5 minutes and 30 seconds in. Without one, the run ends just past 5 minutes.
+    assert nonces[19] - nonces[0] >= 30_000
+    assert nonces[-2] - nonces[0] >= 300_000
+    assert nonces[-1] - nonces[0] < 300_000 + 30_000
+
+
+def test_a_fill_restarts_the_oracle_cap(tmp_path: Path) -> None:
+    # A fill is progress, so the next oracle reject starts a new 5 minutes (ADR-0056).
+    # Without the restart, flatten would give up just after the fill.
+    venue = FillsHalfAfterOracleRejects(fill_after_s=240)
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 1
+    assert venue.filled_ms is not None
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "price_band"),
+        (2, "price_band"),
+        (3, "price_band"),
+    ]
+    nonces = _order_nonces(post)
+    # The 3 dry closes are the last 3, so the first of them is past the new cap.
+    assert nonces[-3] - venue.filled_ms >= 300_000
+    assert logs[-1]["left"] == "HYPE=-1.0"
+
+
+def test_any_other_per_order_reject_is_still_a_dry_attempt(tmp_path: Path) -> None:
+    # Only an oracle reject is waited out (ADR-0056). Any other reject the venue
+    # judged will not pass by waiting, so the give-up rule must still count it.
+    venue = AnswersFirst(error_response("Order must have minimum value of $10"))
+
+    exit_code, logs, _, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [("HYPE", 1, "no_fill")]
+    assert not [log for log in logs if log["event"] == "flatten.price_refused"]
 
 
 def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:

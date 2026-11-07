@@ -23,6 +23,7 @@ from hyperliquid_fakes import (
     FakeExchangeApi,
     RecordingClock,
     answers_in_turn,
+    error_response,
     fill_entry,
     filled_response,
     idle_ws,
@@ -423,14 +424,6 @@ def test_a_resting_placement_reports_the_order_live() -> None:
     assert report.venue_oid == "77"
 
 
-def error_response(message: str) -> dict:
-    """The venue's per-order placement refusal (still HTTP 200 / status ok)."""
-    return {
-        "status": "ok",
-        "response": {"type": "order", "data": {"statuses": [{"error": message}]}},
-    }
-
-
 def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() -> None:
     post = FakeExchangeApi({"order": error_response("Order must have minimum value of $10")})
     reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.0001", "42000")))
@@ -442,6 +435,36 @@ def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() ->
     assert report.status is OrderState.REJECTED
     assert report.reason == "Order must have minimum value of $10"
     assert report.cloid == CLOID
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["Order price too far from oracle", "Price too far from oracle"],
+    ids=["docs_wording", "testnet_wording"],
+)
+def test_an_oracle_reject_reports_a_price_band_refusal_and_the_order_rejected(
+    message: str,
+) -> None:
+    # Flatten waits out an oracle reject instead of counting it (ADR-0056). The
+    # engine never reads venue text, so the kind comes in a refusal. The venue
+    # judged the order, so the saga still ends REJECTED. The docs and testnet
+    # (#600) word the error differently.
+    post = FakeExchangeApi({"order": error_response(message)})
+    reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    refused, rejected = reports
+    assert isinstance(refused, OrderRefusedReport)
+    assert (refused.cloid, refused.symbol, refused.refusal) == (
+        CLOID,
+        "BTC",
+        OrderRefusal.PRICE_BAND,
+    )
+    assert isinstance(rejected, OrderStatusReport)
+    assert (rejected.cloid, rejected.status, rejected.reason) == (
+        CLOID,
+        OrderState.REJECTED,
+        message,
+    )
 
 
 def rejections(events: list[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
