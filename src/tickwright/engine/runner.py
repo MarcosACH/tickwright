@@ -553,6 +553,8 @@ class Engine:
         # The store lock is held by now, so the trip is durable before boot goes on.
         if signal.SIGUSR1 in early:
             self._trip_kill_switch()
+        elif signal.SIGUSR2 in early:
+            self._guard.reset_kill_switch()
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1, signal.SIGUSR2})
 
     def _remove_signal_handlers(self) -> None:

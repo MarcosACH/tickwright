@@ -603,6 +603,51 @@ def test_a_sigusr1_sent_while_the_engine_boots_trips_the_kill_switch(
     assert _kill_switch_tripped(tmp_path / "saga.db")
 
 
+def test_a_sigusr2_sent_while_the_engine_boots_resets_a_tripped_kill_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR2)
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        store.save_kill_switch(tripped=True, reason="an earlier operator trip", ts_ns=1)
+    log = tmp_path / "engine.log"
+
+    with _spawn(tmp_path, log) as process:
+        try:
+            # The shooter only fills if the reset came before its order.
+            _await_states(tmp_path / "saga.db", {_FILLED_CLOID: OrderState.FILLED})
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"exit {process.wait()}; stderr:\n{log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    assert [event["event"] for event in _events(log)].count("guard.kill_switch_reset") == 1
+    assert not _kill_switch_tripped(tmp_path / "saga.db")
+
+
+def test_a_trip_and_a_reset_both_sent_while_the_engine_boots_leave_it_tripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two waiting signals keep no order, so the engine cannot know which came
+    # last. It picks the trip, because a wrong trip loses no money.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1, signal.SIGUSR2)
+    log = tmp_path / "engine.log"
+
+    with _spawn(tmp_path, log) as process:
+        try:
+            _await_event(log, "order.denied")
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"exit {process.wait()}; stderr:\n{log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    assert "guard.kill_switch_reset" not in [event["event"] for event in _events(log)]
+    assert _kill_switch_tripped(tmp_path / "saga.db")
+
+
 def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
