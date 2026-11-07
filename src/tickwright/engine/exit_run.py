@@ -367,7 +367,9 @@ class _DryAttempts:
         self._price_band_since: int | None = None
 
     def reset(self) -> None:
+        """Start a new row after a fill. The next oracle reject starts a new cap."""
         self._count = 0
+        self._price_band_since = None
 
     @property
     def spent(self) -> bool:

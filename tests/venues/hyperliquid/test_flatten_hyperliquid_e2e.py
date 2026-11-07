@@ -31,6 +31,7 @@ from hyperliquid_flatten import (
     HYPE_ASSET,
     START_MS,
     AnswersFirst,
+    FillsHalfAfterOracleRejects,
     HalfClosesBesideAGap,
     HeldShort,
     priced_frames,
@@ -397,6 +398,27 @@ def test_another_dry_attempt_does_not_restart_the_oracle_cap(tmp_path: Path) -> 
     assert nonces[19] - nonces[0] >= 30_000
     assert nonces[-2] - nonces[0] >= 300_000
     assert nonces[-1] - nonces[0] < 300_000 + 30_000
+
+
+def test_a_fill_restarts_the_oracle_cap(tmp_path: Path) -> None:
+    # A fill is progress, so the next oracle reject starts a new 5 minutes (ADR-0056).
+    # Without the restart, flatten would give up just after the fill.
+    venue = FillsHalfAfterOracleRejects(fill_after_s=240)
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 1
+    assert venue.filled_ms is not None
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "price_band"),
+        (2, "price_band"),
+        (3, "price_band"),
+    ]
+    nonces = _order_nonces(post)
+    # The 3 dry closes are the last 3, so the first of them is past the new cap.
+    assert nonces[-3] - venue.filled_ms >= 300_000
+    assert logs[-1]["left"] == "HYPE=-1.0"
 
 
 def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:
