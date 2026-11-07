@@ -90,13 +90,24 @@ class _MissingPrice(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class _BoundPrices:
+    """The last trade and the mark a MARKET's bound was taken from (ADR-0059).
+
+    The bound needs both, so they travel as one value. Two optional fields
+    could hold a trade with no mark, which no order is ever priced from.
+    """
+
+    last_trade: Decimal
+    mark: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class _Pricing:
-    """The price an order is sent at, with the trade and mark a MARKET's bound
-    used. A LIMIT has neither. A rejection logs all three (#601)."""
+    """The price an order is sent at, and for a MARKET the prices its bound
+    came from. A LIMIT has none. A rejection logs them all (#601)."""
 
     price: Decimal
-    last_trade: Decimal | None = None
-    mark: Decimal | None = None
+    bound_prices: _BoundPrices | None = None
 
 
 class HyperliquidExchange:
@@ -356,13 +367,16 @@ class HyperliquidExchange:
                 # the order was sent and judged, and the venue's reason rides along.
                 # The reason alone cannot say why a price was refused, so the
                 # prices go in the log beside it (#601).
+                bound_prices = pricing.bound_prices
                 named_event(
                     NamedEvent.EXCHANGE_ORDER_REJECTED,
                     cloid=order.cloid,
                     reason=reason,
                     price=_wire_decimal(pricing.price),
-                    last_trade=_logged(pricing.last_trade),
-                    mark=_logged(pricing.mark),
+                    last_trade=(
+                        None if bound_prices is None else _wire_decimal(bound_prices.last_trade)
+                    ),
+                    mark=None if bound_prices is None else _wire_decimal(bound_prices.mark),
                 )
                 await self._bus.publish(
                     self._status_report(
@@ -923,8 +937,7 @@ class HyperliquidExchange:
         price = tighter(latest * bound, mark * bound)
         return _Pricing(
             price=quantize_price(price, order.side, self._universe.specs[order.symbol]),
-            last_trade=latest,
-            mark=mark,
+            bound_prices=_BoundPrices(last_trade=latest, mark=mark),
         )
 
     def _wire_tif(self, order: PlaceOrder) -> str:
@@ -1302,10 +1315,6 @@ def _fee_settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     if token != "USDC":
         refuse_non_usdc(reported=f"fill fee settled in {token!r}, not USDC", row="fill")
     return figure(entry["fee"])
-
-
-def _logged(value: Decimal | None) -> str | None:
-    return None if value is None else _wire_decimal(value)
 
 
 def _wire_decimal(value: Decimal) -> str:
