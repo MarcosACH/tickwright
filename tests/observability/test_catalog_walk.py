@@ -598,6 +598,42 @@ def _drive_exchange_action_rejected() -> None:
     asyncio.run(go())
 
 
+def _drive_exchange_order_rejected() -> None:
+    """A live placement the venue judges and refuses: the adapter names the
+    prices it sent beside the venue's reason (``HyperliquidExchange``, #601)."""
+    refusal = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": "Price too far"}]}},
+    }
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                signing_key=SecretStr(TEST_SIGNING_KEY),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
+            post=FakeExchangeApi({"order": refusal}),
+        )
+        await exchange.place(
+            LimitOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
 def _drive_exchange_spot_order_skipped() -> None:
     """A live open-orders read that lists a spot order: the adapter leaves it
     out of the list and names it, because the engine trades perps only (#470)."""
@@ -1259,6 +1295,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
+    NamedEvent.EXCHANGE_ORDER_REJECTED: _drive_exchange_order_rejected,
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: _drive_exchange_spot_order_skipped,
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: _drive_exchange_leverage_unchanged,
 }
