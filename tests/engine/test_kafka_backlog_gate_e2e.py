@@ -219,6 +219,7 @@ def test_an_old_intent_in_the_kafka_backlog_is_denied_and_never_placed(tmp_path:
     saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
     assert saga is not None
     assert saga.state is OrderState.DENIED
+    assert saga.reason == "the startup barrier has not cleared"
     assert _sent_orders(post) == []
 
 
@@ -343,6 +344,8 @@ def test_a_stop_during_boot_denies_an_intent_that_arrives_after_the_barrier(
     saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
     assert saga is not None
     assert saga.state is OrderState.DENIED
+    # A row that names its cause tells an operator this was a stop, not a backlog.
+    assert saga.reason == "the engine was told to stop during boot"
     assert logs[-1]["event"] == "engine.stopped"
 
 

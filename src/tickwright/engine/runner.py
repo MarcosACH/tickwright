@@ -317,7 +317,7 @@ class Engine:
             )
         self._install_signal_handlers()
         try:
-            await self._start_sequence()
+            stopping = await self._start_sequence()
             async with asyncio.TaskGroup() as tg:
                 # An exit run schedules no cadence and starts no feed. Its job
                 # runs every reconcile pass itself, so two never overlap
@@ -325,7 +325,7 @@ class Engine:
                 self._feed_handle = FeedHandle(self._feed, tg)
                 # A signal during boot means the operator changed their mind.
                 # Nothing long-lived starts, and the run takes the clean ending.
-                if not self._stop_requested.is_set():
+                if not stopping:
                     if self._exit_job is None:
                         self._schedule_cadences(tg)
                     self._start_exchange_loop(tg)
@@ -555,8 +555,11 @@ class Engine:
     def _trip_kill_switch(self) -> None:
         self._guard.trip_kill_switch("SIGUSR1: operator kill switch")
 
-    async def _start_sequence(self) -> None:
-        """ADR-0024 steps 2–6: everything before the feed, in order."""
+    async def _start_sequence(self) -> bool:
+        """ADR-0024 steps 2–6: everything before the feed, in order.
+
+        Returns True when a stop arrived during boot, so nothing long-lived starts.
+        """
         # Restore both read-models from the durable record, ledger first — the
         # ordering is ADR-0043 §6/§10's and belongs to the ``Checkpointer``,
         # which is why the rule is stated there rather than reproduced here.
@@ -624,17 +627,23 @@ class Engine:
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
+        # Read once, so every step after the barrier makes the same choice. Two
+        # reads could disagree if a stop landed between them (#604).
+        stopping = self._stop_requested.is_set()
         # A run told to stop keeps orders closed. Its strategies never start,
         # so only a Kafka backlog can still bring it a signal. That signal is
-        # denied, as before the barrier, and no order follows the stop (#604).
-        if not self._stop_requested.is_set():
+        # denied, and no order follows the stop.
+        if stopping:
+            self._execution.stopped_during_boot()
+        else:
             self._execution.barrier_has_cleared()
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         # An exit run starts none, so nothing but its job can place or cancel.
-        # A run told to stop starts none either (#604).
-        if self._exit_job is None and not self._stop_requested.is_set():
+        # A run told to stop starts none either.
+        if self._exit_job is None and not stopping:
             self._host.start()
         self._state = ComponentState.RUNNING
+        return stopping
 
     async def _materialise_account(self) -> bool:
         """The barrier's first step, which also opens the account-row gate."""
