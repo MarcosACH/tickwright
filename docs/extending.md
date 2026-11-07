@@ -251,9 +251,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   barrier reads an already-aligned venue. Retry a transient venue blip inside the
   `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
   spends the last of it. That budget is **yours to enforce** — the runner neither retries nor bounds
-  `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape. The task
-  that watches SIGINT is created only *after* the last inline `start()` — the exchange's at step 4
-  and the feed's at step 7 are both ahead of it — so for either of them SIGKILL is the only way out.
+  `start()`, so it **must not hang**: a wedged boot has no bound. A stop cancels the boot (#614),
+  and it cancels the feed's start too. So SIGTERM ends a wedged `start()` at step 4 or step 7.
+  Without a stop, the engine waits forever and never faults.
   Put a timeout on any blocking venue call you make here, as a constant of your own rather than a
   knob: the shipped websocket transport bounds its handshake with `WS_OPEN_TIMEOUT_SECONDS` beside
   `post_json`'s `ClientTimeout`, and neither is injected config — `startup_timeout_seconds` is a
