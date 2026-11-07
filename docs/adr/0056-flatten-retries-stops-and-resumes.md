@@ -161,6 +161,11 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   does not, the wait never runs. Evidence:
   [`hyperliquid-oracle-price-band.md`](../research/hyperliquid-oracle-price-band.md). Not built
   yet. The build is [#619](https://github.com/MarcosACH/tickwright/issues/619).**)**
+  **(Built in [#619](https://github.com/MarcosACH/tickwright/issues/619):** as decided above. The
+  adapter matches the text "too far from oracle" in any case. The docs say "Order price too far
+  from oracle". Testnet said "Price too far from oracle" (#600). The cap is
+  `PRICE_BAND_CAP_SECONDS` in `engine/exit_run.py`. A fill restarts it, on a close from this run or
+  from an earlier one.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It

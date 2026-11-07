@@ -434,8 +434,8 @@ async def _flatten_symbol(
 
     It closes until the venue reads the symbol flat, or stops after 3 dry
     attempts in a row. A failed read is dry too, so a venue that cannot answer
-    never hangs the run (ADR-0060). A rate limit is the one failure that waits
-    instead. True when the loop gave up. The final read reports what is left.
+    never hangs the run (ADR-0060). A rate limit waits instead, and so does an
+    oracle reject, up to its cap. True when the loop gave up. The final read reports what is left.
     """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
