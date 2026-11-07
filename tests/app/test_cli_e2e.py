@@ -667,6 +667,37 @@ def test_a_boot_that_refuses_after_a_sigusr1_says_the_kill_switch_did_not_trip(
     assert "kill switch is not tripped" in log.read_text().splitlines()[-1]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory")
+def test_a_sigusr1_whose_trip_cannot_be_written_faults_and_says_it_did_not_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The strategy is built after the store opens and before ``run()``. It makes
+    # the directory read-only there, so SQLite cannot write its journal and the
+    # trip is the first write that fails. The signal must outlive that failure,
+    # or no one hears of it.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    _signal_while_booting(tmp_path, signal.SIGUSR1, name="ReadOnlyStoreStrategy")
+    with (tmp_path / "early_signal.py").open("a") as module:
+        module.write(
+            "\n\nclass ReadOnlyStoreStrategy(SingleShotMarketStrategy):\n"
+            "    def __init__(self, **kwargs):\n"
+            "        super().__init__(**kwargs)\n"
+            "        os.chmod(os.getcwd(), 0o555)\n"
+        )
+    # Files the run opens for writing, made while the directory still allows it.
+    log = tmp_path / "engine.log"
+    log.touch()
+    (tmp_path / "saga.db.lock").touch()
+    try:
+        assert _run_to_exit(tmp_path, log) == 1, log.read_text()
+    finally:
+        tmp_path.chmod(0o755)
+
+    assert "engine.faulted" in [event["event"] for event in _events(log)]
+    assert "kill switch is not tripped" in log.read_text().splitlines()[-1]
+
+
 def test_the_app_package_does_not_start_an_engine_that_skips_the_signal_hold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

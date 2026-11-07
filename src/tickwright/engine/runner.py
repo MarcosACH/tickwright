@@ -315,8 +315,10 @@ class Engine:
             return self._refuse_exit_run(
                 refusal, reason="new_store", store=self._store.name, holder="none"
             )
-        self._install_signal_handlers()
         try:
+            # Inside the ``try``, because a boot signal's trip is a store write
+            # and a failed one must fault like any other (ADR-0024).
+            self._install_signal_handlers()
             stopping = await self._start_sequence()
             async with asyncio.TaskGroup() as tg:
                 # An exit run schedules no cadence and starts no feed. Its job
@@ -541,20 +543,23 @@ class Engine:
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
         # The ``tickwright`` entry point blocks the kill switch signals until
-        # here, so one sent during boot is still waiting (issue #615). Setting
-        # SIG_IGN discards it, so the handlers below do not see it a second time.
+        # here, so one sent during boot is still waiting (issue #615). The store
+        # lock is held by now, so the trip is durable before boot goes on.
         early = signal.sigpending() & {signal.SIGUSR1, signal.SIGUSR2}
+        # Written while the signal still waits. A failed write leaves it waiting,
+        # so the entry point can still say the kill switch did not trip.
+        if signal.SIGUSR1 in early:
+            self._trip_kill_switch()
+        elif signal.SIGUSR2 in early:
+            self._guard.reset_kill_switch()
+        # SIG_IGN discards a waiting signal, so the handlers below do not act on
+        # it a second time.
         for sig in early:
             signal.signal(sig, signal.SIG_IGN)
         loop.add_signal_handler(signal.SIGINT, self._stop_requested.set)
         loop.add_signal_handler(signal.SIGTERM, self._stop_requested.set)
         loop.add_signal_handler(signal.SIGUSR1, self._trip_kill_switch)
         loop.add_signal_handler(signal.SIGUSR2, self._guard.reset_kill_switch)
-        # The store lock is held by now, so the trip is durable before boot goes on.
-        if signal.SIGUSR1 in early:
-            self._trip_kill_switch()
-        elif signal.SIGUSR2 in early:
-            self._guard.reset_kill_switch()
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1, signal.SIGUSR2})
 
     def _remove_signal_handlers(self) -> None:

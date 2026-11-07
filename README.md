@@ -219,7 +219,8 @@ The engine has no handlers while Python imports it, which is the first seconds o
 
 A `SIGUSR1` or `SIGUSR2` in that window is held until the engine opens its store. Then it trips or
 resets the kill switch before any order. If both arrive, the trip wins. A start that fails before
-the store opens prints `The kill switch is not tripped.` on stderr. In the first tens of
+the store opens prints `The kill switch is not tripped.` on stderr. So does a start whose trip
+write fails, and that start exits `1`. In the first tens of
 milliseconds, before Python runs any engine code, a `SIGUSR1` still ends the process with exit
 `138`.
 

@@ -214,7 +214,9 @@ engine imports and builds waits in the kernel. `run()` reads it when it installs
 store lock is held by then, so a trip is written before `recover()` and before any order. If both
 signals wait, the trip wins. The kernel keeps no order between them, and a wrong trip loses no
 money. A run that exits before that point, such as a boot refusal or a held lock, cannot write the
-trip. It prints a stderr line saying the kill switch is not tripped. A lost `SIGUSR2` is not
+trip. It prints a stderr line saying the kill switch is not tripped. The engine writes the trip
+before it discards the waiting signal. So a failed write leaves the signal waiting, and the run
+faults with exit 1 and prints the same line. A lost `SIGUSR2` is not
 reported, because the switch stays as it was. The window that is left is interpreter startup,
 about 30 ms on a laptop. A `SIGUSR1` there still ends the process with exit 138. `SIGTERM` and
 `SIGINT` are not blocked, so the #604 behavior for them stands. `app/__main__.py` became
