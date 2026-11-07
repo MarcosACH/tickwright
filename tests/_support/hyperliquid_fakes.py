@@ -9,6 +9,8 @@ what the venue sends back. A suite that needs a venue body builds it here."""
 
 import asyncio
 import json
+import os
+import signal
 from collections.abc import Sequence
 
 from tickwright.adapters.clock import ManualClock
@@ -116,6 +118,35 @@ def answers_in_turn(*answers: object) -> object:
         return remaining.pop(0) if len(remaining) > 1 else remaining[0]
 
     return answer
+
+
+class VenueDarkOn:
+    """A venue that answers everything but ``dark``, which it never answers.
+
+    The first ``dark`` request sends this process SIGTERM, then waits forever.
+    That is an operator stopping the engine during an outage (#614). Every
+    other request goes to ``api``. ``after_stop`` keeps every request the
+    engine sent after the signal.
+    """
+
+    def __init__(self, dark: str, api: FakeExchangeApi) -> None:
+        self._dark = dark
+        self._api = api
+        self.stopped = False
+        self.after_stop: list[str] = []
+
+    async def __call__(self, url: str, payload: dict) -> object:
+        asked = request_type(url, payload)
+        if self.stopped:
+            self.after_stop.append(asked)
+        if asked == self._dark:
+            if not self.stopped:
+                self.stopped = True
+                os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.Event().wait()
+        # A real request leaves the event loop. This one-turn yield is that.
+        await asyncio.sleep(0)
+        return await self._api(url, payload)
 
 
 def resting_response(oid: int) -> dict:
