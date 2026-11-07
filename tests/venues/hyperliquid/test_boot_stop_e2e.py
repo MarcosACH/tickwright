@@ -9,12 +9,10 @@ kind of request, as a black-holed route does.
 """
 
 import asyncio
-import os
-import signal
 from decimal import Decimal
 from pathlib import Path
 
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, idle_ws, request_type
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, VenueDarkOn, idle_ws
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -50,16 +48,11 @@ FLAT_ACCOUNT = {
 }
 
 
-class _VenueDarkOn:
-    """A venue that answers everything but ``dark``, which it never answers.
-
-    The first ``dark`` request sends the engine SIGTERM, then waits forever.
-    ``after_stop`` keeps every request the engine sent after the signal.
-    """
-
-    def __init__(self, dark: str) -> None:
-        self._dark = dark
-        self._api = FakeExchangeApi(
+def _dark_on(dark: str) -> VenueDarkOn:
+    """A flat account with no orders, dark on one kind of request."""
+    return VenueDarkOn(
+        dark,
+        FakeExchangeApi(
             {
                 "userAbstraction": "disabled",
                 "clearinghouseState": FLAT_ACCOUNT,
@@ -67,24 +60,11 @@ class _VenueDarkOn:
                 "userFills": [],
                 "userFillsByTime": [],
             }
-        )
-        self.stopped = False
-        self.after_stop: list[str] = []
-
-    async def __call__(self, url: str, payload: dict) -> object:
-        asked = request_type(url, payload)
-        if self.stopped:
-            self.after_stop.append(asked)
-        if asked == self._dark:
-            if not self.stopped:
-                self.stopped = True
-                os.kill(os.getpid(), signal.SIGTERM)
-            await asyncio.Event().wait()
-        await asyncio.sleep(0)
-        return await self._api(url, payload)
+        ),
+    )
 
 
-def _stop_during_outage(tmp_path: Path, venue: _VenueDarkOn) -> tuple[int, Engine]:
+def _stop_during_outage(tmp_path: Path, venue: VenueDarkOn) -> tuple[int, Engine]:
     async def life() -> tuple[int, Engine]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=START_MS * 1_000_000)
@@ -118,7 +98,7 @@ def test_sigterm_while_the_exchange_starts_against_a_dark_venue_ends_the_run(
     tmp_path: Path,
 ) -> None:
     # The mode read is the first thing ``Exchange.start`` asks the venue.
-    venue = _VenueDarkOn("userAbstraction")
+    venue = _dark_on("userAbstraction")
 
     with capture_events() as logs:
         exit_code, engine = _stop_during_outage(tmp_path, venue)
@@ -138,7 +118,7 @@ def test_sigterm_while_the_barrier_reads_the_account_from_a_dark_venue_ends_the_
 ) -> None:
     # With no leverage to push, ``Exchange.start`` reads only the mode. So the
     # one account read is the barrier's, which opens the account row.
-    venue = _VenueDarkOn("clearinghouseState")
+    venue = _dark_on("clearinghouseState")
 
     with capture_events() as logs:
         exit_code, engine = _stop_during_outage(tmp_path, venue)

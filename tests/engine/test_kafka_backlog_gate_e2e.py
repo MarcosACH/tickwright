@@ -20,6 +20,7 @@ from eth_account import Account as Wallet
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    VenueDarkOn,
     idle_ws,
     order_status_response,
     request_type,
@@ -499,16 +500,7 @@ def test_a_stop_while_the_venue_is_dark_ends_a_boot_with_a_kafka_backlog(
     _produce(broker, intent)
     _produce(broker, _payment_after_the_venue_read())
     post = _venue()
-    stopped: list[str] = []
-
-    async def dark_account_read(url: str, payload: dict) -> object:
-        if request_type(url, payload) == "clearinghouseState":
-            if not stopped:
-                stopped.append(url)
-                os.kill(os.getpid(), signal.SIGTERM)
-            await asyncio.Event().wait()
-        await asyncio.sleep(0)
-        return await post(url, payload)
+    venue = VenueDarkOn("clearinghouseState", post)
 
     async def life() -> int:
         bus = _kafka_bus(broker)
@@ -525,7 +517,7 @@ def test_a_stop_while_the_venue_is_dark_ends_a_boot_with_a_kafka_backlog(
                 bus=bus,
                 clock=clock,
                 universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
-                post=dark_account_read,
+                post=venue,
                 connect=idle_ws,
                 startup_timeout_seconds=60.0,
                 shrink_wait_seconds=30.0,
@@ -538,7 +530,7 @@ def test_a_stop_while_the_venue_is_dark_ends_a_boot_with_a_kafka_backlog(
 
     assert asyncio.run(life()) == 0
 
-    assert stopped
+    assert venue.stopped
     assert _sent_orders(post) == []
     # The payment was never booked, so Kafka still holds it for the next life.
     assert SQLiteStore(db).load_account() is None
