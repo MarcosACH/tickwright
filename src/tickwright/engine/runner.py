@@ -722,18 +722,15 @@ class Engine:
         entries that are both — ``feed.stop`` and ``exchange.stop`` wrap a seam
         call *and* a task cancellation — inherit the property from each half.
         """
-        # An exit run never started its strategies. Their snapshot would overwrite
-        # the one the last normal run saved, so it takes none.
-        host_stop: tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...] = (
-            (("host.stop", self._host.stop),) if self._exit_job is None else ()
-        )
+        # An exit run never starts its strategies, so ``host.stop`` takes no
+        # snapshot there. That rule is the host's, not this list's.
         return (
             ("exit_job.stop", self._stop_exit_job),
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
             ("exchange.stop", self._stop_exchange),
             ("bus.drain", self._bus.drain),
-            *host_stop,
+            ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
             ("store.close", self._store.close),
         )
