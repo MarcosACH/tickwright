@@ -9,6 +9,8 @@ what the venue sends back. A suite that needs a venue body builds it here."""
 
 import asyncio
 import json
+import os
+import signal
 from collections.abc import Sequence
 
 from tickwright.adapters.clock import ManualClock
@@ -118,12 +120,53 @@ def answers_in_turn(*answers: object) -> object:
     return answer
 
 
+class VenueDarkOn:
+    """A venue that answers everything but ``dark``, which it never answers.
+
+    The first ``dark`` request sends this process SIGTERM, then waits forever.
+    That is an operator stopping the engine during an outage (#614). Every
+    other request goes to ``api``. ``after_stop`` keeps every request the
+    engine sent after the signal.
+    """
+
+    def __init__(self, dark: str, api: FakeExchangeApi) -> None:
+        self._dark = dark
+        self._api = api
+        self.stopped = False
+        self.after_stop: list[str] = []
+
+    async def __call__(self, url: str, payload: dict) -> object:
+        asked = request_type(url, payload)
+        if self.stopped:
+            self.after_stop.append(asked)
+        if asked == self._dark:
+            if not self.stopped:
+                self.stopped = True
+                os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.Event().wait()
+        # A real request leaves the event loop. This one-turn yield is that.
+        await asyncio.sleep(0)
+        return await self._api(url, payload)
+
+
 def resting_response(oid: int) -> dict:
     """The venue's successful placement response for an order that rests."""
     return {
         "status": "ok",
         "response": {"type": "order", "data": {"statuses": [{"resting": {"oid": oid}}]}},
     }
+
+
+def error_response(message: str) -> dict:
+    """The venue's per-order placement refusal (still HTTP 200 / status ok)."""
+    return {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": message}]}},
+    }
+
+
+ORACLE_REJECT = error_response("Order price too far from oracle")
+"""A per-order reject against the venue's oracle, in the wording of its docs."""
 
 
 def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:

@@ -10,9 +10,10 @@ sent. Venue quirk translation lives in the adapter, never the engine
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 import pytest
 from eth_account import Account
@@ -22,6 +23,7 @@ from hyperliquid_fakes import (
     FakeExchangeApi,
     RecordingClock,
     answers_in_turn,
+    error_response,
     fill_entry,
     filled_response,
     idle_ws,
@@ -422,14 +424,6 @@ def test_a_resting_placement_reports_the_order_live() -> None:
     assert report.venue_oid == "77"
 
 
-def error_response(message: str) -> dict:
-    """The venue's per-order placement refusal (still HTTP 200 / status ok)."""
-    return {
-        "status": "ok",
-        "response": {"type": "order", "data": {"statuses": [{"error": message}]}},
-    }
-
-
 def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() -> None:
     post = FakeExchangeApi({"order": error_response("Order must have minimum value of $10")})
     reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.0001", "42000")))
@@ -441,6 +435,120 @@ def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() ->
     assert report.status is OrderState.REJECTED
     assert report.reason == "Order must have minimum value of $10"
     assert report.cloid == CLOID
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["Order price too far from oracle", "Price too far from oracle"],
+    ids=["docs_wording", "testnet_wording"],
+)
+def test_an_oracle_reject_reports_a_price_band_refusal_and_the_order_rejected(
+    message: str,
+) -> None:
+    # Flatten waits out an oracle reject instead of counting it (ADR-0056). The
+    # engine never reads venue text, so the kind comes in a refusal. The venue
+    # judged the order, so the saga still ends REJECTED. The docs and testnet
+    # (#600) word the error differently.
+    post = FakeExchangeApi({"order": error_response(message)})
+    reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    refused, rejected = reports
+    assert isinstance(refused, OrderRefusedReport)
+    assert (refused.cloid, refused.symbol, refused.refusal) == (
+        CLOID,
+        "BTC",
+        OrderRefusal.PRICE_BAND,
+    )
+    assert isinstance(rejected, OrderStatusReport)
+    assert (rejected.cloid, rejected.status, rejected.reason) == (
+        CLOID,
+        OrderState.REJECTED,
+        message,
+    )
+
+
+def rejections(events: list[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
+    return [e for e in events if e["event"] == NamedEvent.EXCHANGE_ORDER_REJECTED]
+
+
+def test_a_rejected_market_order_logs_the_price_sent_and_the_prices_behind_it() -> None:
+    # In #600 the log showed only the venue's reason. It could not say why the
+    # venue judged the price too far away, because the price was not there.
+    post = FakeExchangeApi({"order": error_response("Price too far from oracle")})
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "44000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    (rejection,) = rejections(events)
+    # 43250.5 × 1.05 = 45413.025, and the mark's 46200 is looser, so the trade
+    # binds. A buy rounds down to five significant figures.
+    assert rejection["cloid"] == CLOID
+    assert rejection["reason"] == "Price too far from oracle"
+    assert rejection["price"] == "45413"
+    assert rejection["last_trade"] == "43250.5"
+    assert rejection["mark"] == "44000"
+
+
+def test_a_rejected_limit_order_logs_its_own_price_and_no_bound_inputs() -> None:
+    # A LIMIT goes out at the strategy's price, so no trade or mark shaped it.
+    # A trade and a mark are cached here, and still neither is logged.
+    post = FakeExchangeApi({"order": error_response("Price too far from oracle")})
+    with capture_events() as events:
+        asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    (rejection,) = rejections(events)
+    assert rejection["price"] == "42000"
+    assert rejection["last_trade"] is None
+    assert rejection["mark"] is None
+
+
+class PricesMoveWhileSending(FakeExchangeApi):
+    """A venue that answers only after newer prices have reached the bus. The
+    send is a real await, so a tick can land while the order is in flight."""
+
+    def __init__(
+        self, responses: dict[str, object], *, bus: InMemoryBus, later: list[MarketTick | MarkTick]
+    ) -> None:
+        super().__init__(responses)
+        self._bus = bus
+        self._later = later
+
+    async def __call__(self, url: str, payload: dict) -> object:
+        for later in self._later:
+            await self._bus.publish(later)
+        return await super().__call__(url, payload)
+
+
+def test_a_rejection_logs_the_prices_the_order_was_sent_with_not_newer_ones() -> None:
+    # The log must explain the price the venue judged. Prices that arrived
+    # after the send did not shape it, so logging them would mislead.
+    bus = InMemoryBus()
+    post = PricesMoveWhileSending(
+        {"order": error_response("Price too far from oracle")},
+        bus=bus,
+        later=[tick("BTC", "50000"), mark("BTC", "50000")],
+    )
+
+    async def main() -> None:
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "44000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    (rejection,) = rejections(events)
+    assert rejection["price"] == "45413"
+    assert rejection["last_trade"] == "43250.5"
+    assert rejection["mark"] == "44000"
 
 
 def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:

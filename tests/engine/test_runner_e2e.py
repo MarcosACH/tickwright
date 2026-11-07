@@ -1931,6 +1931,66 @@ def test_a_fault_from_a_supervised_task_is_named_by_the_fault_itself(tmp_path: P
     assert faulted["error"] == repr(InvariantViolation("the read loop broke an engine assumption"))
 
 
+class _UnsnapshottableStrategy(NeverWakes):
+    """A strategy the host cannot persist, so its boot probe faults."""
+
+    strategy_id = "unsnapshottable"
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        return None
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        return None
+
+    def snapshot(self) -> bytes:
+        raise RuntimeError("no state to save")
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_strategy_the_host_cannot_persist_faults_the_boot(tmp_path: Path) -> None:
+    """The host probes each snapshot at step 6 (ADR-0016). A strategy it cannot
+    persist cannot recover, so the boot faults with exit 1 and starts no feed."""
+
+    async def faulted_boot() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+                applied_fills=lambda cloid: (),
+                resting_orders=list,
+            ),
+            feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        )
+        engine.register(_UnsnapshottableStrategy(), symbols={"BTC"})
+        return await asyncio.wait_for(engine.run(), timeout=5), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(faulted_boot())
+
+    assert exit_code == 1
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.feed_started" not in [log["event"] for log in logs]
+    (faulted,) = [log for log in logs if log["event"] == "engine.faulted"]
+    assert faulted["error"] == repr(
+        InvariantViolation(
+            "strategy unsnapshottable snapshot() failed: RuntimeError('no state to save')"
+        )
+    )
+
+
 def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:
     return KafkaBus(
         bootstrap_servers="kafka:9092",

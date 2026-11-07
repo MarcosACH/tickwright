@@ -59,6 +59,9 @@ as a field of their own.**)**
 **(Extended by [#470](https://github.com/MarcosACH/tickwright/issues/470):**
 `exchange.action_rejected` also carries `oid`. A hand-placed order has no cloid, so its `cloid` is
 `None` and its oid names it. `oid` is `None` where the order has no venue id yet.**)**
+**(Extended by [#601](https://github.com/MarcosACH/tickwright/issues/601):**
+`exchange.order_rejected` is a third adapter event that carries `cloid` as a field. It names a
+per-order rejection with the price sent, and for a MARKET the trade and mark its bound used.**)**
 
 ## Coverage requirement
 

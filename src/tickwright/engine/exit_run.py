@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, assert_never
 
 from tickwright.domain import (
     AccountAnchor,
@@ -241,8 +241,19 @@ DRY_WAIT_SECONDS = 2.0
 RATE_LIMIT_WAIT_SECONDS = 10.0
 """The wait after the venue refused a close or a read for a rate limit (ADR-0056, ADR-0060)."""
 
-_RATE_LIMITS = {OrderRefusal.RATE_LIMITED_ADDRESS: "address", OrderRefusal.RATE_LIMITED_IP: "ip"}
-"""The ``limit`` field ``flatten.rate_limited`` names for each rate limit (ADR-0060)."""
+PRICE_BAND_CAP_SECONDS = 300.0
+"""How long oracle rejects are waited out before they count as dry (ADR-0056, #603)."""
+
+
+class _DryReason(StrEnum):
+    """Why a step closed nothing. It is the ``reason`` on ``flatten.dry_attempt`` (ADR-0060)."""
+
+    NO_FILL = "no_fill"
+    NO_PRICE = "no_price"
+    PRICE_BAND = "price_band"
+    READ_FAILED = "read_failed"
+    REFUSED = "refused"
+    SIZE_GAP = "size_gap"
 
 
 class _Prices:
@@ -352,37 +363,83 @@ class _DryAttempts:
 
     Most steps count as one dry attempt in a row, then wait 2 seconds. A rate
     limit waits 10 seconds and does not count, because waiting it out makes
-    progress. This is the one place that tells the two apart.
+    progress. An oracle reject waits 2 seconds and does not count, until its
+    5 minute cap has passed. This is the one place that tells them apart.
+    ``close_cost`` names the cost of each refusal, and ``gave_up`` counts it.
     """
 
     def __init__(self, symbol: str, clock: Clock) -> None:
         self._symbol = symbol
         self._clock = clock
         self._count = 0
+        # When the first oracle reject of the current wait came, on the engine clock.
+        self._price_band_since: int | None = None
 
     def reset(self) -> None:
+        """Start a new row after a fill. The next oracle reject starts a new cap."""
         self._count = 0
+        self._price_band_since = None
 
     @property
     def spent(self) -> bool:
         """Whether the loop gave up. Nothing resets the count after that."""
         return self._count == DRY_ATTEMPTS_TO_GIVE_UP
 
-    async def gave_up(self, reason: str, size: Decimal) -> bool:
+    @staticmethod
+    def close_cost(refusal: OrderRefusal | None) -> tuple[str | None, _DryReason | None]:
+        """What a close that filled nothing costs, by why the venue did not take it.
+
+        Returns the rate limit to wait out beside the verdict, named as on
+        ``flatten.rate_limited`` (ADR-0060). Also returns the reason to count. A
+        rate limit counts nothing, because waiting it out makes progress.
+        """
+        # No fallback case. A new kind is a type error here until it has a cost.
+        match refusal:
+            case None:
+                return None, _DryReason.NO_FILL
+            case OrderRefusal.RATE_LIMITED_ADDRESS:
+                return "address", None
+            case OrderRefusal.RATE_LIMITED_IP:
+                return "ip", None
+            case OrderRefusal.PRICE_BAND:
+                return None, _DryReason.PRICE_BAND
+            case OrderRefusal.REFUSED | OrderRefusal.SEND_FAILED:
+                # A send that dies counts as refused too (ADR-0060).
+                return None, _DryReason.REFUSED
+            case unreachable:
+                assert_never(unreachable)
+
+    async def gave_up(self, reason: _DryReason, size: Decimal) -> bool:
         """Count one dry attempt. Say whether it was the last, or wait before the next.
 
         ``size`` is the last size the venue reported. After failed reads it can be
         from before the last close, so the final read says what is left (ADR-0060).
         """
+        if reason is _DryReason.PRICE_BAND and self._within_price_band_cap():
+            # The book can stay far from the oracle for minutes. Counting each
+            # reject would give up in about 6 seconds with the position open (#603).
+            named_event(NamedEvent.FLATTEN_PRICE_REFUSED, symbol=self._symbol)
+            await self._clock.sleep(DRY_WAIT_SECONDS)
+            return False
         self._count += 1
         named_event(
-            NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=self._symbol, count=self._count, reason=reason
+            NamedEvent.FLATTEN_DRY_ATTEMPT,
+            symbol=self._symbol,
+            count=self._count,
+            reason=reason.value,
         )
         if self._count == DRY_ATTEMPTS_TO_GIVE_UP:
             named_event(NamedEvent.FLATTEN_GAVE_UP, symbol=self._symbol, size=str(size))
             return True
         await self._clock.sleep(DRY_WAIT_SECONDS)
         return False
+
+    def _within_price_band_cap(self) -> bool:
+        """Start the cap at the first oracle reject, and say whether it still runs."""
+        now = self._clock.timestamp_ns()
+        if self._price_band_since is None:
+            self._price_band_since = now
+        return now - self._price_band_since < PRICE_BAND_CAP_SECONDS * 1_000_000_000
 
     async def read_failed(self, size: Decimal, *, rate_limited: bool) -> bool:
         """Count a failed venue read as dry, unless the IP limit refused it.
@@ -393,7 +450,7 @@ class _DryAttempts:
         if rate_limited:
             await self.wait_out("ip")
             return False
-        return await self.gave_up("read_failed", size)
+        return await self.gave_up(_DryReason.READ_FAILED, size)
 
     async def wait_out(self, limit: str) -> None:
         """Wait out a rate limit. ``limit`` is the field ``flatten.rate_limited`` names."""
@@ -413,8 +470,8 @@ async def _flatten_symbol(
 
     It closes until the venue reads the symbol flat, or stops after 3 dry
     attempts in a row. A failed read is dry too, so a venue that cannot answer
-    never hangs the run (ADR-0060). A rate limit is the one failure that waits
-    instead. True when the loop gave up. The final read reports what is left.
+    never hangs the run (ADR-0060). A rate limit waits instead, and so does an
+    oracle reject, up to its cap. True when the loop gave up. The final read reports what is left.
     """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
@@ -442,15 +499,15 @@ async def _attempt(
     """
     # Why the attempt closed nothing. It stays ``None`` when the close filled,
     # or when it waited out a rate limit, because waiting makes progress.
-    reason: str | None = None
+    reason: _DryReason | None = None
     # No venue can send a market close without a price.
     if not await priced.has(symbol):
-        reason = "no_price"
+        reason = _DryReason.NO_PRICE
     elif await _size_gap(symbol, size, turns, context):
-        reason = "size_gap"
+        reason = _DryReason.SIZE_GAP
     else:
         cloid, refusal = await turns.close(symbol, size, emitter)
-        limit = _RATE_LIMITS.get(refusal) if refusal is not None else None
+        limit, unfilled = dry.close_cost(refusal)
         verdict = _verdict(cloid, size, dry, turns, context)
         if limit is not None:
             # The 10 seconds count from the refusal, so they run beside the verdict.
@@ -462,9 +519,8 @@ async def _attempt(
         if _filled(cloid, context):
             # Before the read, so a failed read after a fill starts a new row.
             dry.reset()
-        elif limit is None:
-            # A send that dies counts as refused too (ADR-0060).
-            reason = "no_fill" if refusal is None else "refused"
+        else:
+            reason = unfilled
     left = await _read_left(symbol, size, dry, context)
     if left is None:
         return None

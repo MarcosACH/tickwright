@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 from closed_sets import assert_covers_exactly
 from hyperliquid_fakes import (
+    ORACLE_REJECT,
     TEST_SIGNING_KEY,
     FakeExchangeApi,
     FakeWsConnection,
@@ -598,6 +599,42 @@ def _drive_exchange_action_rejected() -> None:
     asyncio.run(go())
 
 
+def _drive_exchange_order_rejected() -> None:
+    """A live placement the venue judges and refuses: the adapter names the
+    prices it sent beside the venue's reason (``HyperliquidExchange``, #601)."""
+    refusal = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": "Price too far"}]}},
+    }
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                signing_key=SecretStr(TEST_SIGNING_KEY),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
+            post=FakeExchangeApi({"order": refusal}),
+        )
+        await exchange.place(
+            LimitOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
 def _drive_exchange_spot_order_skipped() -> None:
     """A live open-orders read that lists a spot order: the adapter leaves it
     out of the list and names it, because the engine trades perps only (#470)."""
@@ -877,6 +914,12 @@ def _drive_flatten_rate_limited() -> None:
     """One Hyperliquid flatten whose first close the venue refuses over the IP limit (ADR-0056)."""
     venue = AnswersFirst(IpRateLimited("429 from the venue"))
     exit_code, _, _ = run_flatten(":memory:", venue, priced_frames())
+    assert exit_code == 0
+
+
+def _drive_flatten_price_refused() -> None:
+    """One Hyperliquid flatten whose first close the venue rejects against its oracle (ADR-0056)."""
+    exit_code, _, _ = run_flatten(":memory:", AnswersFirst(ORACLE_REJECT), priced_frames())
     assert exit_code == 0
 
 
@@ -1243,6 +1286,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.FLATTEN_DRY_ATTEMPT: _drive_flatten_gave_up,
     NamedEvent.FLATTEN_GAVE_UP: _drive_flatten_gave_up,
     NamedEvent.FLATTEN_RATE_LIMITED: _drive_flatten_rate_limited,
+    NamedEvent.FLATTEN_PRICE_REFUSED: _drive_flatten_price_refused,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
@@ -1259,6 +1303,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
+    NamedEvent.EXCHANGE_ORDER_REJECTED: _drive_exchange_order_rejected,
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: _drive_exchange_spot_order_skipped,
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: _drive_exchange_leverage_unchanged,
 }
