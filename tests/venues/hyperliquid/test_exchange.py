@@ -473,6 +473,19 @@ def test_a_rejected_market_order_logs_the_price_sent_and_the_prices_behind_it() 
     assert rejection["mark"] == "44000"
 
 
+def test_a_rejected_limit_order_logs_its_own_price_and_no_bound_inputs() -> None:
+    # A LIMIT goes out at the strategy's price, so no trade or mark shaped it.
+    # A trade and a mark are cached here, and still neither is logged.
+    post = FakeExchangeApi({"order": error_response("Price too far from oracle")})
+    with capture_events() as events:
+        asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    (rejection,) = rejections(events)
+    assert rejection["price"] == "42000"
+    assert rejection["last_trade"] is None
+    assert rejection["mark"] is None
+
+
 def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     # The placement response carries no trade ids, and inventing one would
     # double-count against reconciliation's {cloid}:fill:{tid} dedup — so the
