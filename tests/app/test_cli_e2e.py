@@ -667,6 +667,28 @@ def test_a_boot_that_refuses_after_a_sigusr1_says_the_kill_switch_did_not_trip(
     assert "kill switch is not tripped" in log.read_text().splitlines()[-1]
 
 
+def test_the_app_package_does_not_start_an_engine_that_skips_the_signal_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only ``tickwright/__main__.py`` holds kill switch signals sent during boot.
+    # A second way to start would lose them, so it must not exist (issue #615).
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "tickwright.app"],
+        cwd=tmp_path,
+        env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert "cannot be directly executed" in result.stderr
+    assert not (tmp_path / "saga.db").exists()
+
+
 def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

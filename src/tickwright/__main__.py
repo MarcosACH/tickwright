@@ -16,7 +16,7 @@ def main() -> int:
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1, signal.SIGUSR2})
 
     # Imported here, after the block, because this import is the slow part.
-    from tickwright.app.__main__ import main as run
+    from tickwright.app.cli import main as run
 
     try:
         return run()
