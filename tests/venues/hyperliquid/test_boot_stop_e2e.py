@@ -131,3 +131,24 @@ def test_sigterm_while_the_exchange_starts_against_a_dark_venue_ends_the_run(
     events = [record["event"] for record in logs]
     assert "engine.barrier_cleared" not in events
     assert events[-1] == "engine.stopped"
+
+
+def test_sigterm_while_the_barrier_reads_the_account_from_a_dark_venue_ends_the_run(
+    tmp_path: Path,
+) -> None:
+    # With no leverage to push, ``Exchange.start`` reads only the mode. So the
+    # one account read is the barrier's, which opens the account row.
+    venue = _VenueDarkOn("clearinghouseState")
+
+    with capture_events() as logs:
+        exit_code, engine = _stop_during_outage(tmp_path, venue)
+
+    assert venue.stopped
+    assert exit_code == 0
+    assert engine.state is ComponentState.STOPPED
+    assert venue.after_stop == []
+    # The barrier never opened the account row, so the next boot reads it again.
+    assert SQLiteStore(tmp_path / "saga.db").load_account() is None
+    events = [record["event"] for record in logs]
+    assert "engine.barrier_cleared" not in events
+    assert events[-1] == "engine.stopped"
