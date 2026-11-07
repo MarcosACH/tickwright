@@ -221,8 +221,7 @@ A `SIGUSR1` or `SIGUSR2` in that window is held until the engine opens its store
 resets the kill switch before any order. If both arrive, the trip wins. A start that fails before
 the store opens prints `The kill switch is not tripped.` on stderr. In the first tens of
 milliseconds, before Python runs any engine code, a `SIGUSR1` still ends the process with exit
-`138`. Run `tickwright` or `python -m tickwright` to get this. `python -m tickwright.app` does not
-hold the signals.
+`138`.
 
 The image runs `tini` as PID 1, because the kernel drops a signal with no handler when the engine
 itself is PID 1.

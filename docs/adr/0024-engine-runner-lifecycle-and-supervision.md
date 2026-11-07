@@ -217,8 +217,9 @@ money. A run that exits before that point, such as a boot refusal or a held lock
 trip. It prints a stderr line saying the kill switch is not tripped. A lost `SIGUSR2` is not
 reported, because the switch stays as it was. The window that is left is interpreter startup,
 about 30 ms on a laptop. A `SIGUSR1` there still ends the process with exit 138. `SIGTERM` and
-`SIGINT` are not blocked, so the #604 behavior for them stands. `python -m tickwright.app` skips the
-new module and keeps the old window.**)**
+`SIGINT` are not blocked, so the #604 behavior for them stands. `app/__main__.py` became
+`app/cli.py`, with no `__main__` block. So `python -m tickwright.app` no longer starts an engine,
+and every start goes through the block.**)**
 
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
