@@ -486,6 +486,48 @@ def test_a_rejected_limit_order_logs_its_own_price_and_no_bound_inputs() -> None
     assert rejection["mark"] is None
 
 
+class PricesMoveWhileSending(FakeExchangeApi):
+    """A venue that answers only after newer prices have reached the bus. The
+    send is a real await, so a tick can land while the order is in flight."""
+
+    def __init__(
+        self, responses: dict[str, object], *, bus: InMemoryBus, later: list[MarketTick | MarkTick]
+    ) -> None:
+        super().__init__(responses)
+        self._bus = bus
+        self._later = later
+
+    async def __call__(self, url: str, payload: dict) -> object:
+        for later in self._later:
+            await self._bus.publish(later)
+        return await super().__call__(url, payload)
+
+
+def test_a_rejection_logs_the_prices_the_order_was_sent_with_not_newer_ones() -> None:
+    # The log must explain the price the venue judged. Prices that arrived
+    # after the send did not shape it, so logging them would mislead.
+    bus = InMemoryBus()
+    post = PricesMoveWhileSending(
+        {"order": error_response("Price too far from oracle")},
+        bus=bus,
+        later=[tick("BTC", "50000"), mark("BTC", "50000")],
+    )
+
+    async def main() -> None:
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "44000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    (rejection,) = rejections(events)
+    assert rejection["price"] == "45413"
+    assert rejection["last_trade"] == "43250.5"
+    assert rejection["mark"] == "44000"
+
+
 def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     # The placement response carries no trade ids, and inventing one would
     # double-count against reconciliation's {cloid}:fill:{tid} dedup — so the
