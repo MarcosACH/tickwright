@@ -624,7 +624,11 @@ class Engine:
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
-        self._execution.barrier_has_cleared()
+        # A run told to stop keeps orders closed. Its strategies never start,
+        # so only a Kafka backlog can still bring it a signal. That signal is
+        # denied, as before the barrier, and no order follows the stop (#604).
+        if not self._stop_requested.is_set():
+            self._execution.barrier_has_cleared()
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         # An exit run starts none, so nothing but its job can place or cancel.
         # A run told to stop starts none either (#604).

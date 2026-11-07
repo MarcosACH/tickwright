@@ -184,6 +184,12 @@ point in the boot. Boot does not check it between steps 2 and 6, so those steps 
 the barrier clears, a run told to stop skips the strategies, the cadences, the venue loop and the
 feed. It then takes the clean ending and exits 0.
 
+That run also never calls `barrier_has_cleared()`, so orders stay closed. Its strategies never
+start, but a Kafka bus can still deliver an old `PlaceSignal` during the teardown. The saga denies
+it as it would before the barrier. The `DENIED` row is durable, so a later life never places it
+either. Placing it would send an order after the operator asked to stop, and `Exchange.stop()`
+leaves `place` answerable through the drain.
+
 The runner now runs `feed.start()` as a task in the `TaskGroup`, beside the stop watcher. Awaited
 inline, a slow connect blocked the watcher, and strategy wake-ups kept firing after the signal.
 The teardown's `feed.stop` entry cancels a connect still in flight before it releases the feed. A

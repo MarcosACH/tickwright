@@ -213,7 +213,10 @@ class ExecutionManager:
         self._guard = guard if guard is not None else NoopGuard()
 
     def barrier_has_cleared(self) -> None:
-        """Let orders place. Before this, every order is denied (ADR-0024 step 5)."""
+        """Let orders place. Before this, every order is denied (ADR-0024 step 5).
+
+        A run told to stop during boot never calls it (#604).
+        """
         self._barrier_cleared = True
 
     async def on_signal(self, signal: Signal) -> None:
@@ -279,8 +282,11 @@ class ExecutionManager:
         if not self._barrier_cleared:
             # Only a Kafka backlog from an earlier life can arrive this early.
             # Denied rather than held: a held signal is lost if the process
-            # crashes after its offset commits (issue #563).
-            decision = Denied(reason="the startup barrier has not cleared")
+            # crashes after its offset commits (issue #563). A run told to stop
+            # during boot never opens orders, so its backlog lands here too.
+            decision = Denied(
+                reason="orders are closed: the barrier has not cleared, or the engine is stopping"
+            )
         elif signal.strategy_id == OPERATOR and not is_flatten(signal):
             # Every operator fill splits over the partitions, and the split is
             # right only for an order that closes the net. So an operator order
