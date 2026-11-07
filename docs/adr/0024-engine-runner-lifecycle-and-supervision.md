@@ -320,6 +320,14 @@ teardown because only a finished teardown proves the stop was clean. A teardown 
 logs `engine.faulted` instead. A log that holds neither ended in a crash or a kill. An exit run
 logs no `engine.stopped`, because `exit.finished` is its last event (ADR-0060).**)**
 
+**(Amended by [#604](https://github.com/MarcosACH/tickwright/issues/604): an exit job ends before
+the feed.** `exit_job.stop` is now the first teardown entry, ahead of `feed.stop`. A replay flatten
+waits for the feed to end before it closes anything. With the feed stopped first, the job read the
+stop as the end of the file and sent a close after the stop. A job still inside the feed connect
+could also finish it during `feed.stop` and start a loop that no entry cancelled, so the run never
+ended. The job still ends ahead of `exchange.stop`, so the venue it reads stays up until it is
+done.**)**
+
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 
 `asyncio.run(engine.run())`; `run()` performs the startup above, then supervises the long-running

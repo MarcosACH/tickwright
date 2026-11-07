@@ -704,6 +704,11 @@ class Engine:
         snapshots, so a late ``Signal`` can still reach the venue: the seam
         answers for that (``Exchange.stop``), not the order.
 
+        An exit job ends first, ahead of the feed (#604). A replay flatten waits
+        for the feed to end before it closes, so a feed stopped first would let
+        the job send a close after the stop. A job still inside the feed connect
+        would also start a loop that no step cancels.
+
         One membership walked twice is the cost of one membership: the faulted
         pass restarts at the top, so a graceful step that raises drives every
         step *ahead* of the break a second time. No entry here may treat a
@@ -723,9 +728,9 @@ class Engine:
             (("host.stop", self._host.stop),) if self._exit_job is None else ()
         )
         return (
+            ("exit_job.stop", self._stop_exit_job),
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
-            ("exit_job.stop", self._stop_exit_job),
             ("exchange.stop", self._stop_exchange),
             ("bus.drain", self._bus.drain),
             *host_stop,
@@ -743,8 +748,9 @@ class Engine:
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
 
     async def _stop_exit_job(self) -> None:
-        """End an exit job a signal interrupted, before the venue it reads is
-        released. A job that already returned is done, so this is a no-op. A
+        """End an exit job a signal interrupted, before the feed it waits on
+        and the venue it reads are released. A job that already returned is
+        done, so this is a no-op. A
         cancel it was sending may or may not land. Its saga mark is already
         durable, so restart reconciliation reads the truth either way."""
         if self._exit_task is None:
