@@ -102,9 +102,10 @@ def _first_leaf(exc: BaseException) -> BaseException:
     """The fault itself, out of the ``ExceptionGroup`` a ``TaskGroup`` wraps it in.
 
     A fault from the inline start sequence arrives raw. One from a supervised
-    task arrives wrapped. ``engine.faulted`` names the fault the same way in
-    both cases (#338). The group keeps only the first leaf: the first raw-handler
-    exception is what aborted the group, and its siblings were cancelled.
+    task arrives wrapped. So does one from step 6, which runs inside the group.
+    ``engine.faulted`` names the fault the same way in both cases (#338). The
+    group keeps only the first leaf: the first raw-handler exception is what
+    aborted the group, and its siblings were cancelled.
     """
     while isinstance(exc, BaseExceptionGroup):
         exc = exc.exceptions[0]
@@ -320,24 +321,10 @@ class Engine:
             # and a failed one must fault like any other (ADR-0024).
             self._install_signal_handlers()
             await self._boot_unless_stopped()
-            stopping = self._finish_boot()
             async with asyncio.TaskGroup() as tg:
-                # An exit run schedules no cadence and starts no feed. Its job
-                # runs every reconcile pass itself, so two never overlap
-                # (ADR-0052). The venue's own long-lived half runs either way.
+                # Built on both paths, because the teardown reads it.
                 self._feed_handle = FeedHandle(self._feed, tg)
-                # A signal during boot means the operator changed their mind.
-                # Nothing long-lived starts, and the run takes the clean ending.
-                if not stopping:
-                    if self._exit_job is None:
-                        self._schedule_cadences(tg)
-                    self._start_exchange_loop(tg)
-                    if self._exit_job is None:
-                        self._feed_start_task = tg.create_task(self._start_feed(self._feed_handle))
-                    else:
-                        self._exit_task = tg.create_task(
-                            self._run_exit_job(self._exit_job, self._feed_handle)
-                        )
+                self._finish_boot(tg, self._feed_handle)
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -663,32 +650,36 @@ class Engine:
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
 
-    def _finish_boot(self) -> bool:
-        """ADR-0024 step 6, and the one place boot decides on a stop.
+    def _finish_boot(self, tg: asyncio.TaskGroup, feed: FeedHandle) -> None:
+        """ADR-0024 steps 6 and 7, and the one place boot decides on a stop.
 
-        Returns True when a stop arrived during boot, so nothing long-lived starts.
         A stop that ended the boot early lands here too, with the barrier never
         cleared. Nothing here awaits, so no stop can land halfway through.
         """
-        # Read once, so every step below makes the same choice. Two reads could
-        # disagree if a stop landed between them (#604).
-        stopping = self._stop_requested.is_set()
-        # A run told to stop keeps orders closed. Its strategies never start,
-        # so only a Kafka backlog can still bring it a signal. That signal is
-        # denied, and no order follows the stop.
-        if stopping:
+        # A signal during boot means the operator changed their mind. Orders
+        # stay closed, and nothing long-lived starts. Its strategies never
+        # start, so only a Kafka backlog can still bring it a signal. That
+        # signal is denied, and no order follows the stop. A run told to stop
+        # never ran, so it goes from READY straight to STOPPED.
+        if self._stop_requested.is_set():
             self._execution.stopped_during_boot()
-        else:
-            self._execution.barrier_has_cleared()
-        # Strategies after the barrier: restore snapshot, resume seq, subscribe.
-        # An exit run starts none, so nothing but its job can place or cancel.
-        # A run told to stop starts none either.
-        if self._exit_job is None and not stopping:
+            return
+        self._execution.barrier_has_cleared()
+        # An exit run starts no strategy, schedules no cadence and starts no
+        # feed. So nothing but its job can place or cancel. The job runs every
+        # reconcile pass itself, so two never overlap (ADR-0052). The venue's
+        # own long-lived half runs either way.
+        if self._exit_job is None:
+            # Strategies after the barrier: restore snapshot, resume seq, subscribe.
             self._host.start()
-        # A run told to stop never ran, so it goes straight to STOPPED.
-        if not stopping:
-            self._state = ComponentState.RUNNING
-        return stopping
+        self._state = ComponentState.RUNNING
+        if self._exit_job is None:
+            self._schedule_cadences(tg)
+        self._start_exchange_loop(tg)
+        if self._exit_job is None:
+            self._feed_start_task = tg.create_task(self._start_feed(feed))
+        else:
+            self._exit_task = tg.create_task(self._run_exit_job(self._exit_job, feed))
 
     async def _materialise_account(self) -> bool:
         """The barrier's first step, which also opens the account-row gate."""

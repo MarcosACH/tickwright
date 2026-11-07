@@ -264,8 +264,9 @@ the same exposure, so the fix belongs to the whole sequence rather than to this 
 
 **(Amended by [#614](https://github.com/MarcosACH/tickwright/issues/614): a stop ends the boot.**
 This replaces two #604 rules. Boot steps 2 to 6 no longer finish after a stop. A stop during a venue
-outage no longer waits for `Exchange.start()` and the barrier. A boot can wait on a dark venue for a whole startup budget per step. Docker sends `SIGKILL`
-30 s after `SIGTERM`, so the stop cannot wait that long.
+outage no longer waits for `Exchange.start()` and the barrier. A boot can wait on a dark venue for a
+whole startup budget per step. Docker sends `SIGKILL` 30 s after `SIGTERM`, so the stop cannot wait
+that long.
 
 - `run()` races steps 2 to 5 against the stop request. A stop that comes first cancels the boot.
   So a `SIGTERM` no longer needs `SIGKILL` to end a boot wedged at step 4.
@@ -274,6 +275,12 @@ outage no longer waits for `Exchange.start()` and the barrier. A boot can wait o
 - Step 6 is the one place boot decides on a stop. It reads the request once, after the race. A boot
   that was cancelled lands there too, with the barrier never cleared. Nothing in step 6 awaits, so
   no stop can land halfway through it.
+- Step 6 runs inside the `TaskGroup` and starts the long-lived tasks itself. So one branch on the
+  stop gates the order gate, the strategies, the cadences, the venue loop, the feed and the exit
+  job. A new start step goes behind that branch, with no check of its own.
+- A fault in step 6 now reaches `run()` wrapped in an `ExceptionGroup`, like a task fault.
+  `engine.faulted` and the exit code still name the fault itself (ADR-0048, #338). `Engine.fault`
+  keeps the group, as it does for every fault raised inside the group.
 - A run told to stop never reaches `RUNNING`. It goes from `READY` to `STOPPED`.
 - The Kafka drain no longer hangs on a handler that waits for the account row. The teardown skips
   the drain when this boot never opened the row. The shutdown section below says why that is safe.
