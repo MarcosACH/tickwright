@@ -91,10 +91,10 @@ conflating them would give this a knob whose value nothing could reason about.
 
 It matters most where the reconnect loop is *not* underneath it. ``Exchange.start()``
 is awaited inline during the boot (ADR-0024 step 4), and ``MarketFeed.start()`` runs at
-step 7. Neither is retried nor bounded by the runner. The task that watches SIGINT is
-created only after ``Exchange.start()`` returns, so a handshake there that never
-completes wedges a boot with SIGKILL as the only way out. A feed handshake that never
-completes leaves the engine running with no data until someone stops it (#604).
+step 7. Neither is retried nor bounded by the runner. A handshake in ``Exchange.start()``
+that never completes holds the boot until the operator stops the engine. Since #614 a
+stop cancels the boot, so SIGTERM ends it (``test_boot_stop_e2e.py``). A feed
+handshake that never completes leaves the engine running with no data until someone stops it (#604).
 
 The timeout surfaces as ``TimeoutError``, which is an ``OSError`` only because Python
 3.11 aliased it — the same load-bearing coincidence ``post_json``'s translation rests

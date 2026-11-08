@@ -760,10 +760,9 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
         one — so **``start()`` must not hang**, the peer of the "never hanging"
         clause on ``stop()`` below. The asymmetry is deliberate but sharp: a
         teardown that cannot finish is bounded and faults non-zero
-        (``shutdown_timeout``), whereas a *boot* wedged here has no bound and
-        no operator escape — the signal handlers are installed, but the task
-        that watches them is only created once this sequence returns, so SIGINT
-        sets a flag nobody awaits and SIGKILL is the only way out. An adapter
+        (``shutdown_timeout``), whereas a *boot* wedged here has no bound.
+        Since #614 a stop cancels the boot, so SIGINT or SIGTERM ends it.
+        Without a stop, the engine waits forever and never faults. An adapter
         that makes a blocking venue call here owns a timeout on it; the
         composition root must hand it the budget to size that timeout with,
         since ``EngineConfig`` does not reach the adapter.

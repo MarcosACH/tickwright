@@ -280,5 +280,7 @@ def run_flatten(
         config=engine_config,
         exit_job=Flatten(feed_ends=False),
     )
-    exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+    # No cap here. The suite timeout in pyproject.toml ends a hung run (#510). A 5 s cap
+    # here failed runs that were only slow on a busy runner (#623).
+    exit_code = asyncio.run(engine.run())
     return exit_code, post, socket
