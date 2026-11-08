@@ -75,6 +75,9 @@ IMAGE_TAG=sha-<commit> docker compose -f compose.example.yaml up
   is in the image.
 - **The store.** It lives in the `/data` volume. Keep that volume. Without it a restart cannot
   recover the saga.
+- **Keep tini.** A custom `entrypoint` replaces `tini -- tickwright`. So does an `ENTRYPOINT` in
+  an image you build on ours. Add `init: true` to the service, or start your entrypoint with
+  `tini --`. Without it, a stop during boot is lost. See [Operate it](#operate-it).
 
 ### Restarts
 
