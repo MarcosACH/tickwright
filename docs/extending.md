@@ -252,8 +252,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
   spends the last of it. That budget is **yours to enforce** — the runner neither retries nor bounds
   `start()`, so it **must not hang**: a wedged boot has no bound. A stop cancels the boot (#614),
-  and it cancels the feed's start too. So SIGTERM ends a wedged `start()` at step 4 or step 7.
-  Without a stop, the engine waits forever and never faults.
+  and it cancels the feed's start too. So SIGINT or SIGTERM ends a wedged `start()` at step 4 or
+  step 7. Without a stop, a wedged step 4 waits forever and never faults. A wedged step 7 leaves
+  the engine running with no data (#604).
   Put a timeout on any blocking venue call you make here, as a constant of your own rather than a
   knob: the shipped websocket transport bounds its handshake with `WS_OPEN_TIMEOUT_SECONDS` beside
   `post_json`'s `ClientTimeout`, and neither is injected config — `startup_timeout_seconds` is a
