@@ -498,7 +498,10 @@ reduce-only market order per symbol at a time, sized to the venue's position, on
 it. After each one, it reconciles and sends another until the venue is flat. It gives up after 3
 attempts in a row that fill nothing (ADR-0056). After an attempt that fills nothing, it waits 2
 seconds. A venue rate limit does not count as such an attempt. Flatten waits 10 seconds and tries
-again, with no cap. Any other refusal counts as an attempt that fills nothing. Before a refused or
+again, with no cap. On Hyperliquid, a close rejected as too far from the oracle does not count
+either, for up to 5 minutes. Flatten waits 2 seconds and tries again. A fill restarts the 5
+minutes. After them, the reject counts (ADR-0056, #619). Any other refusal counts as an attempt
+that fills nothing. Before a refused or
 dead attempt counts, flatten looks up its order by cloid. One read with no record is not proof, so
 the next attempt waits for the in-flight verdict (ADR-0011). That verdict and the wait start when
 the attempt ends and run at the same time. The next attempt goes when both are done, with a new

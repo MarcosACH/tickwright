@@ -262,6 +262,31 @@ composition root must **hand the adapter the budget** to size its own timeouts w
 start sequence in the runner is the alternative and was not taken here: `bus.start()` at step 3 has
 the same exposure, so the fix belongs to the whole sequence rather than to this one call.
 
+**(Amended by [#614](https://github.com/MarcosACH/tickwright/issues/614): a stop ends the boot.**
+This replaces two #604 rules. Boot steps 2 to 6 no longer finish after a stop. A stop during a venue
+outage no longer waits for `Exchange.start()` and the barrier. A boot can wait on a dark venue for a
+whole startup budget per step. Docker sends `SIGKILL` 30 s after `SIGTERM`, so the stop cannot wait
+that long.
+
+- `run()` races steps 2 to 5 against the stop request. A stop that comes first cancels the boot.
+  So a `SIGTERM` no longer needs `SIGKILL` to end a boot wedged at step 4.
+- A cancelled boot is like a crash at that point, which every boot step already survives. The next
+  boot recovers from it. A fault in the boot still faults the run, even beside a stop.
+- Step 6 is the one place boot decides on a stop. It reads the request once, after the race. A boot
+  that was cancelled lands there too, with the barrier never cleared. Nothing in step 6 awaits, so
+  no stop can land halfway through it.
+- Step 6 runs inside the `TaskGroup` and starts the long-lived tasks itself. So one branch on the
+  stop gates the order gate, the strategies, the cadences, the venue loop, the feed and the exit
+  job. A new start step goes behind that branch, with no check of its own.
+- A fault in step 6 now reaches `run()` wrapped in an `ExceptionGroup`, like a task fault.
+  `engine.faulted` and the exit code still name the fault itself (ADR-0048, #338). `Engine.fault`
+  keeps the group, as it does for every fault raised inside the group.
+- A run told to stop never reaches `RUNNING`. It goes from `READY` to `STOPPED`.
+- The Kafka drain no longer hangs on a handler that waits for the account row. The teardown skips
+  the drain when this boot never opened the row. The shutdown section below says why that is safe.
+
+`start()` must still not hang when no stop comes. The step-4 budget rule above stands.**)**
+
 ## Shutdown reverses the sequence and leaves resting orders alone
 
 `Engine.stop()`, bounded by `shutdown_timeout` so teardown cannot hang: stop the feed (cut the
@@ -350,6 +375,14 @@ stop as the end of the file and sent a close after the stop. A job still inside 
 could also finish it during `feed.stop` and start a loop that no entry cancelled, so the run never
 ended. The job still ends ahead of `exchange.stop`, so the venue it reads stays up until it is
 done.**)**
+
+**(Amended by [#614](https://github.com/MarcosACH/tickwright/issues/614): the drain is skipped when
+the account row never opened.** Fill and funding handlers wait for the account row, and only this
+boot's barrier opens it. A row left by an earlier run does not count. When a stop ends the boot
+before that, those handlers never return. The drain would then wait out `shutdown_timeout`, and the
+run would fault. So the `bus.drain` entry does nothing in that case, on both teardown paths. This
+loses nothing. Kafka commits a record only after its handler returns, so the next boot handles it
+once.**)**
 
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 

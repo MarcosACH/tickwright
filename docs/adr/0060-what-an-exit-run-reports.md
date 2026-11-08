@@ -131,6 +131,15 @@ when a venue read fails, and which named events an exit run emits. Decided in
   **(Extended by [#473](https://github.com/MarcosACH/tickwright/issues/473):** `reason` on
   `flatten.dry_attempt` can also be `size_gap`. That is a gap between the partitions and the venue
   size that a drain did not close (ADR-0054). No close goes out against it.**)**
+
+  **(Extended by [#603](https://github.com/MarcosACH/tickwright/issues/603):** flatten gains the
+  event `flatten.price_refused`. It is emitted when the venue rejects a close as too far from its
+  oracle, while the 5 minute cap runs (ADR-0056). Its one field is `symbol`. After the cap, the
+  same reject is a dry attempt, and `reason` on `flatten.dry_attempt` is `price_band`. Not built
+  yet. The build is [#619](https://github.com/MarcosACH/tickwright/issues/619).**)**
+
+  **(Built in [#619](https://github.com/MarcosACH/tickwright/issues/619):** as decided above.
+  `flatten.price_refused` is in the catalog with its one field, `symbol`.**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 

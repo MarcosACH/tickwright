@@ -347,6 +347,10 @@ class OrderRefusedReport(ExecutionReport):
     It moves no saga. The order's truth is still unknown, so reconcile resolves
     it by cloid. Flatten reads ``refusal`` to choose how long to wait before
     its next attempt. Paper never emits it.
+
+    ``PRICE_BAND`` is the one kind where the outcome is known. The venue judged
+    the order and rejected its price against its oracle. A ``REJECTED`` status
+    report follows and ends the saga. This report only tells flatten the kind.
     """
 
     refusal: OrderRefusal

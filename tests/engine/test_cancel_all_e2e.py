@@ -789,5 +789,7 @@ def test_sigterm_during_boot_stops_the_run_before_the_job_sends_anything(
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "unread"
     [order] = _sagas(tmp_path, cloids)
-    assert order.state is OrderState.LIVE
+    # The stop ended the boot before startup reconcile read the venue (#614).
+    # So the order keeps its last known state, and the next boot reads it.
+    assert order.state is OrderState.SUBMITTED
     assert not order.cancel_requested

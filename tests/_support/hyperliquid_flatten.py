@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from hyperliquid_fakes import (
+    ORACLE_REJECT,
     TEST_SIGNING_KEY,
     FakeExchangeApi,
     FakeWsConnection,
@@ -188,6 +189,34 @@ class HalfClosesBesideAGap(HeldShort):
         ]
 
 
+class FillsHalfAfterOracleRejects(HeldShort):
+    """Rejects closes against its oracle, but fills half the short once ``fill_after_s`` passed.
+
+    Every close after that fill is rejected against the oracle again.
+    """
+
+    def __init__(self, *, fill_after_s: float) -> None:
+        super().__init__()
+        self._fill_at_ns = self.clock.timestamp_ns() + int(fill_after_s * 1_000_000_000)
+        self.filled_ms: int | None = None
+
+    def account(self, payload: dict) -> dict:
+        size = "-2.0" if self.filled_ms is None else "-1.0"
+        return _account(_short("HYPE", size, "25.0"))
+
+    def order(self, payload: dict) -> object:
+        if self.filled_ms is not None or self.clock.timestamp_ns() < self._fill_at_ns:
+            return ORACLE_REJECT
+        self.filled_ms = self.clock.timestamp_ns() // 1_000_000
+        return filled_response(oid=CLOSE_OID, total_sz="1.0", avg_px="25.0")
+
+    def fills(self, payload: dict) -> list[dict]:
+        if self.filled_ms is None:
+            return []
+        fill = fill_entry(oid=CLOSE_OID, tid=1, px="25.0", sz="1.0", time=self.filled_ms)
+        return [fill | {"coin": "HYPE", "dir": "Close Short", "startPosition": "-2.0"}]
+
+
 def run_flatten(
     store: Path | str,
     venue: HeldShort,
@@ -251,5 +280,7 @@ def run_flatten(
         config=engine_config,
         exit_job=Flatten(feed_ends=False),
     )
-    exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+    # No cap here. The suite timeout in pyproject.toml ends a hung run (#510). A 5 s cap
+    # here failed runs that were only slow on a busy runner (#623).
+    exit_code = asyncio.run(engine.run())
     return exit_code, post, socket

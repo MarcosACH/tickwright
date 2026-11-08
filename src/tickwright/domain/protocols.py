@@ -550,7 +550,9 @@ class OrderAnchor(Protocol):
 
         - The venue took the order: its ack, its fills, and its end.
         - The venue judged the order and refused it: ``REJECTED``, with the
-          venue's reason.
+          venue's reason. If the venue rejected the price as too far from its
+          oracle, an ``OrderRefusedReport`` with ``PRICE_BAND`` comes first.
+          Flatten waits that reject out instead of counting it (ADR-0056).
         - The adapter has no price to send the order with, so it sends
           nothing: ``FAILED``, with the reason. Not sending is the proof that
           the order never landed (ADR-0010).
@@ -758,10 +760,9 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
         one — so **``start()`` must not hang**, the peer of the "never hanging"
         clause on ``stop()`` below. The asymmetry is deliberate but sharp: a
         teardown that cannot finish is bounded and faults non-zero
-        (``shutdown_timeout``), whereas a *boot* wedged here has no bound and
-        no operator escape — the signal handlers are installed, but the task
-        that watches them is only created once this sequence returns, so SIGINT
-        sets a flag nobody awaits and SIGKILL is the only way out. An adapter
+        (``shutdown_timeout``), whereas a *boot* wedged here has no bound.
+        Since #614 a stop cancels the boot, so SIGINT or SIGTERM ends it.
+        Without a stop, the engine waits forever and never faults. An adapter
         that makes a blocking venue call here owns a timeout on it; the
         composition root must hand it the budget to size that timeout with,
         since ``EngineConfig`` does not reach the adapter.
