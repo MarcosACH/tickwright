@@ -136,11 +136,13 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   The reconcile no longer heals cash over a gap smaller than one USDC unit (#580). It compares
   net cash, so it no longer heals after a partial close on Hyperliquid (#582). msgpack is bumped
   so the dependency audit passes (#583). Bump PR backed by #587.
-- **v0.8.0** (2026-11-08). Fixes from the testnet soak rehearsal. MINOR, because the CLI and the
-  `Exchange` seam changed. The `tickwright` command now starts in `tickwright/__main__.py`. So
-  `python -m tickwright.app` no longer starts an engine (#615). `OrderRefusal` gains
-  `PRICE_BAND`. An adapter may now publish an `OrderRefusedReport` for an order it also reports
-  `REJECTED` (#619). No `TICKWRIGHT_*` variable changed. A `SIGTERM` during boot now stops the
+- **v0.8.0** (2026-11-08). Fixes from the testnet soak rehearsal. MINOR, because the CLI, the
+  `Exchange` seam and the `MarketFeed` seam changed. The `tickwright` command now starts in
+  `tickwright/__main__.py`. So `python -m tickwright.app` no longer starts an engine (#615).
+  `OrderRefusal` gains `PRICE_BAND`. An adapter may now publish an `OrderRefusedReport` for an
+  order it also reports `REJECTED` (#619). A stop during the connect now cancels
+  `MarketFeed.start`, so a feed must let that cancellation through (#604). No `TICKWRIGHT_*`
+  variable changed. A `SIGTERM` during boot now stops the
   engine with no order after it, and the image runs `tini` as PID 1 (#604). A stop during a
   venue outage at boot ends the boot at once (#614). A `SIGUSR1` or `SIGUSR2` during boot is
   held, then acted on before any order (#615). A clean stop logs `engine.stopped` (#605). A
