@@ -186,3 +186,22 @@ def test_a_map_entry_for_an_adapter_no_longer_configured_fails(tmp_path: Path) -
                 "gone": Answered("GoneFeed", suite=tmp_path),
             },
         )
+
+
+def test_an_exchange_suite_fails_naming_each_order_end_it_never_drives(tmp_path: Path) -> None:
+    """An exchange owes one answer per way a venue can end an order (#632).
+
+    One call per adapter would not do. #629 stalled the soak on a case no suite
+    drove, while every test of each adapter was green. So the failure has to
+    name the case still owed, not only the gate.
+    """
+    suite = _suite(tmp_path, _ANSWERS_ALL_THREE.format(protocol="Exchange", feed="FakeExchange"))
+
+    with pytest.raises(AssertionError) as failure:
+        assert_every_adapter_answers_its_gates(
+            Exchange,
+            configured=Literal["fake"],
+            answers={"fake": Answered("FakeExchange", suite=suite)},
+        )
+
+    assert "assert_order_ends(case=OrderEnd.IOC_PARTIAL_FILL)" in str(failure.value)

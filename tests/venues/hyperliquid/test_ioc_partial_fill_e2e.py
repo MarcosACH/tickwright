@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import replace
 from decimal import Decimal
 
+from exchange_contract import OrderEnd, assert_order_ends
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -137,8 +138,12 @@ def test_a_market_order_filled_in_part_ends_cancelled_at_placement() -> None:
 
     order = _run(MARKET_BUY, post)
 
-    assert order.state is OrderState.CANCELLED
-    assert order.cum_qty == Decimal("0.00008")
+    assert_order_ends(
+        order,
+        case=OrderEnd.IOC_PARTIAL_FILL,
+        filled=Decimal("0.00008"),
+        name="HyperliquidExchange",
+    )
 
 
 def test_reconcile_ends_a_market_order_filled_in_part_once_two_passes_read_the_same_fills() -> None:
