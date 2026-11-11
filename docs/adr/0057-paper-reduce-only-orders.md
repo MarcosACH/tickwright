@@ -47,6 +47,14 @@ decides how paper copies them. Decided in
   at placement is now read again, up to three times in 3.5 s (ADR-0011). If a retry holds every
   fill, the adapter sends `CANCELLED` at placement. Only a read that fails, or stays short after
   the retries, leaves the order to reconcile.**)**
+
+  **(Amended by [#629](https://github.com/MarcosACH/tickwright/issues/629):** an IOC order that
+  fills only in part ends the same way. The venue drops the part it could not fill and answers
+  `filled`, so the saga stayed open forever. The adapter now ends the cut part `CANCELLED` with the
+  reason "ioc remainder", at placement and at reconcile, with the same wait. Reconcile reads the
+  venue's `tif` from the order record. Only reduce-only and IOC orders may end short. Any other
+  order the venue calls `filled` filled in full. A short fills read there means a fill is missing,
+  so its saga stays open. Paper already cancels the remainder of an IOC order, with no reason.**)**
 - **After every fill, paper re-checks its resting reduce-only orders in that symbol.** If the net
   is smaller than an order's working size, the order shrinks to the net. If the net is zero or on
   the order's side, paper cancels the order with the reason "reduce-only cancelled". This copies

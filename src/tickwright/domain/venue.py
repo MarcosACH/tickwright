@@ -71,8 +71,8 @@ class OrderRef:
     this saga's order (#354).
 
     The quantity is the size the saga asked for. A venue that shrank a
-    reduce-only order reports it done for less, and only the asked size shows
-    the cut part (ADR-0057).
+    reduce-only order, or filled an IOC order only in part, reports it done
+    for less. Only the asked size shows the cut part (ADR-0057, #629).
     """
 
     cloid: str
