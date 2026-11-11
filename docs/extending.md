@@ -295,7 +295,7 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `observability` only, never `engine` or another adapter.
 - [ ] Add one row per half to the maps in
   [`tests/app/test_seam_answers.py`](../tests/app/test_seam_answers.py): the config value, your
-  adapter's class name, and the directory of its suite. That test reads your suite for the three
+  adapter's class name, and the directory of its suite. That test reads your suite for the
   gates below and fails naming each one you have not answered yet. It reads the source, not a run,
   so write the class name as a string literal in each gate call (`feed="MyFeed"`,
   `name="MyExchange"`). A name passed through a variable reads as never answered. The test also
@@ -320,6 +320,14 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   the replay one does not. The helper refuses an empty transcript rather than pass on a loop that
   never ran, so a `run()` that publishes nothing cannot answer it today. No shipped adapter is
   silent, so that case is open. If yours is, the helper needs a clause for it, not an opt-out.
+- [ ] Drive your `Exchange` half through the **shared exchange contract**
+  ([`tests/_support/exchange_contract.py`](../tests/_support/exchange_contract.py),
+  [#632](https://github.com/MarcosACH/tickwright/issues/632)). Each `OrderEnd` member names one way
+  a venue ends an order, such as an IOC order filled only in part. For each member, drive an order
+  to that end through the real `ExecutionManager`. Then hand the saga to `assert_order_ends`, with
+  `case=OrderEnd.<NAME>` and `name="MyExchange"`. The contract holds the state every venue must
+  end in, so your venue cannot drift from the others. A member added later goes red on every
+  exchange suite that does not drive it yet.
 - [ ] TDD the adapters at their own seam, and give **both** halves a **claim per member**:
   `assert isinstance(exchange, Exchange)`, plus a `_SEAM_CLAIMS` map — member → the test that says
   what that member does on *your* venue — handed to `assert_every_member_is_claimed`

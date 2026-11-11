@@ -1,9 +1,10 @@
 """The gate over whether every configured adapter answered the seam gates.
 
-The three shared gates over the adapter seams are opt-in imports, and each is
+The four shared gates over the adapter seams are opt-in imports, and each is
 called by the adapter's own suite: ``seam_claims`` for a claim per member,
 ``feed_contract`` for the mark a feed owes, ``lifecycle_contract`` for going
-quiet once stopped. Every one of them is real on the adapters that call it and
+quiet once stopped, and ``exchange_contract`` for how an exchange ends an
+order. The last is owed once per ``OrderEnd`` case (#632). Every one of them is real on the adapters that call it and
 blind to an adapter that does not. A third venue that shipped a feed, an
 exchange, a config and a suite that never imported ``_support`` was green on
 the whole merge gate while asserting none of it (#303). ``docs/extending.md``
