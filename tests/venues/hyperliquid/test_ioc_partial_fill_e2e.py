@@ -5,6 +5,9 @@ with only the HTTP transport fake.
 The venue drops the part an IOC order could not fill and answers `filled`. A
 `filled` report moves no saga, so without an explicit end the saga stays
 PARTIALLY_FILLED forever and the strategy waits on it.
+
+An IOC order that matches nothing ends here too (issue #632). The venue
+answers it with an error, but nothing was refused, so it ends CANCELLED.
 """
 
 import asyncio
@@ -15,6 +18,7 @@ from exchange_contract import OrderEnd, assert_order_ends
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    error_response,
     fill_entry,
     filled_response,
     order_status_response,
@@ -143,6 +147,19 @@ def test_a_market_order_filled_in_part_ends_cancelled_at_placement() -> None:
         case=OrderEnd.IOC_PARTIAL_FILL,
         filled=Decimal("0.00008"),
         name="HyperliquidExchange",
+    )
+
+
+def test_a_market_order_that_matches_nothing_ends_cancelled() -> None:
+    # The venue answers an IOC order with no match as an error, in the wording a
+    # testnet probe saw. The order was valid, so it ends as paper ends it (#632).
+    no_match = "Order could not immediately match against any resting orders. asset=3"
+    post = FakeExchangeApi({"order": error_response(no_match)})
+
+    order = _run(MARKET_BUY, post)
+
+    assert_order_ends(
+        order, case=OrderEnd.IOC_NO_MATCH, filled=Decimal("0"), name="HyperliquidExchange"
     )
 
 

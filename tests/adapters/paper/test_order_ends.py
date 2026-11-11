@@ -115,6 +115,15 @@ def test_an_ioc_order_filled_in_part_ends_cancelled_with_its_fill_kept() -> None
     )
 
 
+def test_an_ioc_order_that_matches_nothing_ends_cancelled() -> None:
+    # The last trade is 41000, so a buy limited to 40000 crosses nothing.
+    ioc_buy = _signal(1, Side.BUY, "1", limit_price="40000")
+
+    order = _run(ioc_buy)
+
+    assert_order_ends(order, case=OrderEnd.IOC_NO_MATCH, filled=Decimal("0"), name="PaperExchange")
+
+
 def test_a_reduce_only_order_cut_to_the_position_ends_cancelled_with_the_net_filled() -> None:
     open_long = _signal(1, Side.BUY, "0.3")
     close_more = _signal(2, Side.SELL, "0.5", reduce_only=True)

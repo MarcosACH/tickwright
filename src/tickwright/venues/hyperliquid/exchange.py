@@ -90,6 +90,12 @@ _ADDRESS_LIMIT_PREFIX = "Too many cumulative requests"
 # Evidence: docs/research/hyperliquid-oracle-price-band.md.
 _ORACLE_REJECT = "too far from oracle"
 
+# How the venue words an IOC order that matched nothing, lower case. The docs say
+# "Order could not immediately match against any resting orders." (iocCancelRejected).
+# Testnet added " asset=78" after it, so this matches a part of the text.
+# Evidence: docs/research/hyperliquid-reduce-only-cancel-market-probes.md.
+_IOC_NO_MATCH = "could not immediately match"
+
 
 class _MissingPrice(Exception):
     """A market order has no price to bound it, so it cannot be sent."""
@@ -364,6 +370,15 @@ class HyperliquidExchange:
                     await self._refused(order, OrderRefusal.REFUSED)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
+            case _Rejected(reason=reason) if _IOC_NO_MATCH in reason.lower():
+                # The venue answers an IOC order that matched nothing with an
+                # error. But the order was valid and only found no match, so it
+                # ends as an unfilled IOC ends on every venue (ADR-0007, #632).
+                await self._bus.publish(
+                    self._status_report(
+                        cloid=order.cloid, symbol=order.symbol, status=OrderState.CANCELLED
+                    )
+                )
             case _Rejected(reason=reason):
                 # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
                 # the order was sent and judged, and the venue's reason rides along.

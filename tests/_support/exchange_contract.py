@@ -30,6 +30,9 @@ class OrderEnd(Enum):
     # A reduce-only order larger than the position is cut to it. The cut part
     # never fills, so the order ends with the net filled (ADR-0057).
     REDUCE_ONLY_CUT = auto()
+    # Nothing matched, so nothing filled. The order was valid, so the venue did
+    # not refuse it. It ends as an unfilled IOC ends (ADR-0007), not REJECTED.
+    IOC_NO_MATCH = auto()
 
 
 # Kept apart from the enum: two members with one value would make the second
@@ -37,6 +40,7 @@ class OrderEnd(Enum):
 _ENDS_AS: dict[OrderEnd, OrderState] = {
     OrderEnd.IOC_PARTIAL_FILL: OrderState.CANCELLED,
     OrderEnd.REDUCE_ONLY_CUT: OrderState.CANCELLED,
+    OrderEnd.IOC_NO_MATCH: OrderState.CANCELLED,
 }
 
 
