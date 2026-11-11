@@ -188,12 +188,16 @@ def order_status_response(
     coin: str = "BTC",
     placed_ms: int = 1_700_000_000_000,
     reduce_only: bool = False,
+    tif: str | None = "Gtc",
 ) -> dict:
     """The venue's ``orderStatus`` answer for a known order.
 
     ``placed_ms`` is the venue's placement time. A test that asserts on the
     fills window, or on whether the record predates the saga, passes it so
     the assertion reads against the value it depends on.
+
+    ``tif`` is ``Gtc``, ``Ioc`` or ``Alo``. The venue sends null for a trigger
+    order.
     """
     return {
         "status": "order",
@@ -208,6 +212,7 @@ def order_status_response(
                 "origSz": "0.5",
                 "cloid": cloid,
                 "reduceOnly": reduce_only,
+                "tif": tif,
             },
             "status": status,
             "statusTimestamp": placed_ms + 100,

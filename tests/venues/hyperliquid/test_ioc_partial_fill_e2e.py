@@ -15,6 +15,7 @@ from hyperliquid_fakes import (
     FakeExchangeApi,
     fill_entry,
     filled_response,
+    order_status_response,
 )
 from ledgers import checkpointer
 from pydantic import SecretStr
@@ -133,6 +134,33 @@ def test_a_market_order_filled_in_part_ends_cancelled_at_placement() -> None:
     )
 
     order = _run(MARKET_BUY, post)
+
+    assert order.state is OrderState.CANCELLED
+    assert order.cum_qty == Decimal("0.00008")
+
+
+def test_reconcile_ends_a_market_order_filled_in_part_once_two_passes_read_the_same_fills() -> None:
+    # The fills read right after placement dies, so placement cannot end the
+    # order. A restart lands here too. Reconcile reads the venue's `filled`
+    # record and the fills. It ends the cut part once the fill total has held
+    # for one open-order interval (ADR-0057, #478).
+
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.00008", avg_px="104000.0"),
+            "userFills": ConnectionError("connection refused"),
+            "orderStatus": order_status_response(
+                cloid=derive_cloid(MARKET_BUY.signal_id),
+                status="filled",
+                oid=91,
+                placed_ms=ACK_MS,
+                tif="Ioc",
+            ),
+            "userFillsByTime": [PART_FILL],
+        }
+    )
+
+    order = _run(MARKET_BUY, post, passes=2)
 
     assert order.state is OrderState.CANCELLED
     assert order.cum_qty == Decimal("0.00008")

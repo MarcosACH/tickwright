@@ -669,7 +669,7 @@ class HyperliquidExchange:
             record.state is OrderState.FILLED
             and ref.quantity is not None
             and _shrunk(
-                reduce_only=record.reduce_only, ioc=False, asked=ref.quantity, filled=filled
+                reduce_only=record.reduce_only, ioc=record.ioc, asked=ref.quantity, filled=filled
             )
             and self._fills_settled(ref.cloid, filled, seen=seen)
         ):
@@ -986,14 +986,15 @@ class _OrderRecord:
     """The venue's decoded ``orderStatus`` order record: the coin it lives
     under, the venue oid, its placement timestamp (ms), and its status already
     in saga vocabulary. ``fetch_order`` bounds the fills read at ``timestamp``
-    and reports ``state``. ``reduce_only`` tells a shrunk order from a filled
-    one (ADR-0057)."""
+    and reports ``state``. ``reduce_only`` and ``ioc`` tell an order the venue
+    ended short from one it filled (ADR-0057, #629)."""
 
     coin: str
     oid: int
     timestamp: int
     state: OrderState
     reduce_only: bool = False
+    ioc: bool = False
 
 
 class _OrderStatusRead(Enum):
@@ -1065,14 +1066,15 @@ def _decode_order_status(response: object) -> _OrderDecode:
                 "status": str(status),
             },
         }:
-            # A record without the flag reads as a plain order. That only keeps
-            # a shrunk saga open, which is the safe side.
+            # A record without a flag reads as a plain order. That only keeps
+            # a saga the venue ended short open, which is the safe side.
             return _OrderRecord(
                 coin=coin,
                 oid=oid,
                 timestamp=timestamp,
                 state=_order_state(status),
                 reduce_only=record.get("reduceOnly") is True,
+                ioc=record.get("tif") == "Ioc",
             )
     raise ValueError("unrecognized orderStatus response")
 
