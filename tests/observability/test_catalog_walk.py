@@ -604,9 +604,20 @@ def _drive_exchange_action_rejected() -> None:
 def _drive_exchange_order_rejected() -> None:
     """A live placement the venue judges and refuses: the adapter names the
     prices it sent beside the venue's reason (``HyperliquidExchange``, #601)."""
+    _place_answered_with_error("Price too far")
+
+
+def _drive_exchange_order_unmatched() -> None:
+    """A live IOC order that matches nothing: the adapter logs the venue's text
+    and its prices, though the saga ends CANCELLED (``HyperliquidExchange``, #632)."""
+    _place_answered_with_error("Order could not immediately match against any resting orders.")
+
+
+def _place_answered_with_error(error: str) -> None:
+    """Place one live order that the venue answers with a per-order ``error``."""
     refusal = {
         "status": "ok",
-        "response": {"type": "order", "data": {"statuses": [{"error": "Price too far"}]}},
+        "response": {"type": "order", "data": {"statuses": [{"error": error}]}},
     }
 
     async def go() -> None:
@@ -1330,6 +1341,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
     NamedEvent.EXCHANGE_ORDER_REJECTED: _drive_exchange_order_rejected,
+    NamedEvent.EXCHANGE_ORDER_UNMATCHED: _drive_exchange_order_unmatched,
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: _drive_exchange_spot_order_skipped,
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: _drive_exchange_leverage_unchanged,
 }

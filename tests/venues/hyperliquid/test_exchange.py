@@ -551,6 +551,32 @@ def test_a_rejection_logs_the_prices_the_order_was_sent_with_not_newer_ones() ->
     assert rejection["mark"] == "44000"
 
 
+def test_an_unmatched_market_order_logs_the_venue_text_and_the_prices_behind_it() -> None:
+    # The saga only says CANCELLED. A market order matches nothing mostly when
+    # its bound was off, so the log keeps the prices that set the bound (#632).
+    no_match = "Order could not immediately match against any resting orders. asset=3"
+    post = FakeExchangeApi({"order": error_response(no_match)})
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "44000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    (unmatched,) = [e for e in events if e["event"] == NamedEvent.EXCHANGE_ORDER_UNMATCHED]
+    assert unmatched["cloid"] == CLOID
+    assert unmatched["reason"] == no_match
+    assert unmatched["price"] == "45413"
+    assert unmatched["last_trade"] == "43250.5"
+    assert unmatched["mark"] == "44000"
+    # Nothing was refused, so the log must not call it a reject.
+    assert rejections(events) == []
+
+
 def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     # The placement response carries no trade ids, and inventing one would
     # double-count against reconciliation's {cloid}:fill:{tid} dedup — so the

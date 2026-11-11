@@ -251,6 +251,11 @@ class NamedEvent(StrEnum):
     # (ADR-0030, ADR-0059). Without them the log cannot say why a price was
     # refused (#601). ``last_trade`` and ``mark`` are ``None`` for a LIMIT.
     EXCHANGE_ORDER_REJECTED = "exchange.order_rejected"
+    # An IOC order that matched nothing. The saga ends CANCELLED, not REJECTED,
+    # because nothing was refused (ADR-0007, #632). The fields are the ones
+    # ``exchange.order_rejected`` has. A market order mostly matches nothing
+    # when its bound was off, so the prices behind the bound say why.
+    EXCHANGE_ORDER_UNMATCHED = "exchange.order_unmatched"
     # The open-orders read listed a spot order, and the adapter left it out.
     # The engine trades perps only, so cancel all does not pull it. Named so an
     # operator sees what stays resting (``HyperliquidExchange``, #470).
@@ -338,6 +343,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.EXCHANGE_REQUEST_FAILED: frozenset({"request", "cloid", "error"}),
     NamedEvent.EXCHANGE_ACTION_REJECTED: frozenset({"request", "cloid", "oid", "reason"}),
     NamedEvent.EXCHANGE_ORDER_REJECTED: frozenset(
+        {"cloid", "reason", "price", "last_trade", "mark"}
+    ),
+    NamedEvent.EXCHANGE_ORDER_UNMATCHED: frozenset(
         {"cloid", "reason", "price", "last_trade", "mark"}
     ),
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: frozenset({"coin", "oid"}),

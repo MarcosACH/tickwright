@@ -116,7 +116,8 @@ class _BoundPrices:
 @dataclass(frozen=True, slots=True)
 class _Pricing:
     """The price an order is sent at, and for a MARKET the prices its bound
-    came from. A LIMIT has none. A rejection logs them all (#601)."""
+    came from. A LIMIT has none. A rejected or unmatched order logs them all
+    (#601, #632)."""
 
     price: Decimal
     bound_prices: _BoundPrices | None = None
@@ -370,7 +371,10 @@ class HyperliquidExchange:
                     await self._refused(order, OrderRefusal.REFUSED)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
-            case _Unmatched():
+            case _Unmatched(reason=reason):
+                # The saga only says CANCELLED. A market order mostly matches
+                # nothing when its bound was off, so the log keeps the prices (#632).
+                _log_priced(NamedEvent.EXCHANGE_ORDER_UNMATCHED, order, reason, pricing)
                 await self._bus.publish(
                     self._status_report(
                         cloid=order.cloid, symbol=order.symbol, status=OrderState.CANCELLED
@@ -381,17 +385,7 @@ class HyperliquidExchange:
                 # the order was sent and judged, and the venue's reason rides along.
                 # The reason alone cannot say why a price was refused, so the
                 # prices go in the log beside it (#601).
-                bound_prices = pricing.bound_prices
-                named_event(
-                    NamedEvent.EXCHANGE_ORDER_REJECTED,
-                    cloid=order.cloid,
-                    reason=reason,
-                    price=_wire_decimal(pricing.price),
-                    last_trade=(
-                        None if bound_prices is None else _wire_decimal(bound_prices.last_trade)
-                    ),
-                    mark=None if bound_prices is None else _wire_decimal(bound_prices.mark),
-                )
+                _log_priced(NamedEvent.EXCHANGE_ORDER_REJECTED, order, reason, pricing)
                 # Flatten waits out an oracle reject instead of counting it (ADR-0056).
                 # The engine never reads venue text, so the kind goes in a report.
                 if price_band:
@@ -1139,8 +1133,10 @@ class _Unmatched:
 
     The venue answers it with an error, but it refused nothing. So it is not a
     ``_Rejected``. It ends as an unfilled IOC order ends on every venue
-    (ADR-0007, #632).
+    (ADR-0007, #632). ``reason`` is the venue's text, kept for the log.
     """
+
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1209,7 +1205,7 @@ def _placement_adjudication(response: object) -> _Adjudication:
     if "error" in status:
         reason = str(status["error"])
         if _IOC_NO_MATCH in reason.lower():
-            return _Unmatched()
+            return _Unmatched(reason=reason)
         return _Rejected(reason=reason, price_band=_ORACLE_REJECT in reason.lower())
     if "filled" in status:
         filled = status["filled"]
@@ -1339,6 +1335,23 @@ def _fee_settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     if token != "USDC":
         refuse_non_usdc(reported=f"fill fee settled in {token!r}, not USDC", row="fill")
     return figure(entry["fee"])
+
+
+def _log_priced(event: NamedEvent, order: PlaceOrder, reason: str, pricing: _Pricing) -> None:
+    """Log an order the venue did not take, with the venue's text and our prices.
+
+    The text alone cannot say why a price missed. So the price sent goes beside
+    it, and for a MARKET the trade and mark its bound came from (#601).
+    """
+    bound_prices = pricing.bound_prices
+    named_event(
+        event,
+        cloid=order.cloid,
+        reason=reason,
+        price=_wire_decimal(pricing.price),
+        last_trade=None if bound_prices is None else _wire_decimal(bound_prices.last_trade),
+        mark=None if bound_prices is None else _wire_decimal(bound_prices.mark),
+    )
 
 
 def _wire_decimal(value: Decimal) -> str:
