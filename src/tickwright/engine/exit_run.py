@@ -373,8 +373,9 @@ class _DryAttempts:
     Most steps count as one dry attempt in a row, then wait 2 seconds. A rate
     limit waits 10 seconds and does not count, because waiting it out makes
     progress. An oracle reject waits 2 seconds and does not count, until its
-    5 minute cap has passed. This is the one place that tells them apart.
-    ``close_cost`` names the cost of each refusal, and ``gave_up`` counts it.
+    5 minute cap has passed. A pass that leaves a saga open does not count
+    either, until its own cap has passed. This is the one place that tells them
+    apart. ``close_cost`` names the cost of each refusal, and ``gave_up`` counts it.
     """
 
     def __init__(self, symbol: str, clock: Clock) -> None:
@@ -383,10 +384,8 @@ class _DryAttempts:
         self._count = 0
         # When the first oracle reject of the current wait came, on the engine clock.
         self._price_band_since: int | None = None
-
-    @property
-    def symbol(self) -> str:
-        return self._symbol
+        # The order whose verdict the loop waits for, and when the wait began.
+        self._verdict_wait: tuple[str, int] | None = None
 
     def reset(self) -> None:
         """Start a new row after a fill. The next oracle reject starts a new cap."""
@@ -453,6 +452,25 @@ class _DryAttempts:
         if self._price_band_since is None:
             self._price_band_since = now
         return now - self._price_band_since < PRICE_BAND_CAP_SECONDS * 1_000_000_000
+
+    async def undecided(self, cloid: str, size: Decimal) -> bool:
+        """Cost of a pass that proved but left ``cloid``'s saga open (#630).
+
+        Says whether the loop gave up, as ``gave_up`` does. The reconciler can
+        need minutes to end a saga, for example over the ghost grace. So these
+        passes count nothing until the cap has passed. After it, each one is a
+        dry attempt. Without the cap, an order no pass can end hangs the run.
+        """
+        now = self._clock.timestamp_ns()
+        if self._verdict_wait is None or self._verdict_wait[0] != cloid:
+            # Each order gets its own cap, so a new cloid starts a new wait.
+            self._verdict_wait = (cloid, now)
+            # The cap is silent for minutes, so the operator needs to see why.
+            with operation(cloid=cloid):
+                named_event(NamedEvent.FLATTEN_VERDICT_WAIT, symbol=self._symbol)
+        if now - self._verdict_wait[1] < NO_VERDICT_CAP_SECONDS * 1_000_000_000:
+            return False
+        return await self.gave_up(_DryReason.NO_VERDICT, size)
 
     async def read_failed(self, size: Decimal, *, rate_limited: bool) -> bool:
         """Count a failed venue read as dry, unless the IP limit refused it.
@@ -594,30 +612,16 @@ async def _verdict(
     could close the size twice. So a failed pass waits for this close again, and
     a give-up leaves it to the next boot.
 
-    A pass that proves can still leave the saga open. That is normal while the
-    reconciler waits out its own windows, such as the ghost grace. Past
-    ``NO_VERDICT_CAP_SECONDS`` it is not, so each such pass is a dry attempt
-    (#630). Without the cap, an order no pass can end hangs the run.
+    A pass that proves can still leave the saga open. What that costs is
+    ``_DryAttempts.undecided``.
     """
-    # When the first pass that proved left the saga open, on the engine clock.
-    since: int | None = None
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
         result = await turns.run_pass()
         if result is not PassResult.PROVED:
             if await dry.read_failed(size, rate_limited=result is PassResult.RATE_LIMITED):
                 return False
-            continue
-        if _decided(cloid, context):
-            return True
-        now = context.clock.timestamp_ns()
-        if since is None:
-            since = now
-            # The cap is silent for minutes, so the operator needs to see why.
-            with operation(cloid=cloid):
-                named_event(NamedEvent.FLATTEN_VERDICT_WAIT, symbol=dry.symbol)
-        past_cap = now - since >= NO_VERDICT_CAP_SECONDS * 1_000_000_000
-        if past_cap and await dry.gave_up(_DryReason.NO_VERDICT, size):
+        elif not _decided(cloid, context) and await dry.undecided(cloid, size):
             return False
     return True
 
