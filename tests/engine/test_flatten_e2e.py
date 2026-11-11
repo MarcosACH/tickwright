@@ -57,7 +57,12 @@ from tickwright.domain import (
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
+from tickwright.engine.exit_run import (
+    NO_VERDICT_CAP_SECONDS,
+    ExitJob,
+    Flatten,
+    OperatorCancelAll,
+)
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine, EngineConfig
@@ -1368,6 +1373,51 @@ def test_a_wait_on_a_close_no_pass_has_ended_is_logged_once(tmp_path: Path) -> N
     ]
     events = [log["event"] for log in logs]
     assert events.index("flatten.verdict_wait") < events.index("flatten.dry_attempt")
+
+
+class _EndsOnlyTheOldClose(_AckedNeverEnded):
+    """The close left open is gone from the venue, so the ghost path ends it.
+
+    Each new close is acked and never ended, as in the parent. ``placed_at`` is
+    when each new close was sent, on the engine clock.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus, clock: ManualClock) -> None:
+        super().__init__(venue, bus=bus)
+        self._clock = clock
+        self.placed_at: dict[str, int] = {}
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.placed_at[order.cloid] = self._clock.timestamp_ns()
+        await super().place(order)
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid in self.placed_at:
+            return await super().fetch_order(ref)
+        # Paper never held the old close, so it reads as gone.
+        return await self._venue.fetch_order(ref)
+
+
+def test_a_new_close_gets_its_own_verdict_cap_after_the_old_one_ends(tmp_path: Path) -> None:
+    # The old close took about 2 minutes to end. The new close must still get
+    # the whole cap, or flatten gives up on it 2 minutes early (#630).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+    bus, clock = InMemoryBus(), ManualClock()
+    links: list[_EndsOnlyTheOldClose] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_EndsOnlyTheOldClose(venue, bus=bus, clock=clock))
+        return links[-1]
+
+    exit_code, logs = _flatten(tmp_path, link=link, bus=bus, clock=clock)
+
+    assert exit_code == 1
+    new_close = derive_cloid(f"{OPERATOR}:BTC:2")
+    waits = [log["cloid"] for log in logs if log["event"] == "flatten.verdict_wait"]
+    assert waits == [left_open, new_close]
+    waited_ns = clock.timestamp_ns() - links[0].placed_at[new_close]
+    assert waited_ns >= NO_VERDICT_CAP_SECONDS * 1_000_000_000
 
 
 def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_the_close(
