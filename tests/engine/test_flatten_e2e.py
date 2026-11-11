@@ -1291,6 +1291,49 @@ def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_i
     assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
 
 
+class _AckedNeverEnded(VenueLink):
+    """The venue acks each close as live, then never ends it and never lists it.
+
+    So every pass proves, and none can end the saga. That is the shape of #629.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+
+    def _live(self, cloid: str, symbol: str) -> OrderStatusReport:
+        return OrderStatusReport(
+            ts_event=0, ts_init=0, cloid=cloid, symbol=symbol, status=OrderState.LIVE
+        )
+
+    async def place(self, order: PlaceOrder) -> None:
+        await self._bus.publish(self._live(order.cloid, order.symbol))
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        return VenueOrderView(status=self._live(ref.cloid, ref.symbol))
+
+
+def test_a_close_that_passes_prove_but_never_end_gives_up(tmp_path: Path) -> None:
+    # Before #630 the wait never ended and logged nothing. Now it waits out the
+    # cap, then each pass that leaves the saga open is a dry attempt.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_AckedNeverEnded, bus=bus), bus=bus)
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "no_verdict"),
+        (2, "no_verdict"),
+        (3, "no_verdict"),
+    ]
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
+    assert logs[-1]["left"] == "BTC=0.02"
+    placed = [log["signal_id"] for log in logs if log["event"] == "order.placed"]
+    assert placed[-1] == f"{OPERATOR}:BTC:1"
+
+
 def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_the_close(
     tmp_path: Path,
 ) -> None:

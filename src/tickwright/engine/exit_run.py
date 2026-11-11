@@ -244,12 +244,20 @@ RATE_LIMIT_WAIT_SECONDS = 10.0
 PRICE_BAND_CAP_SECONDS = 300.0
 """How long oracle rejects are waited out before they count as dry (ADR-0056, #603)."""
 
+NO_VERDICT_CAP_SECONDS = 300.0
+"""How long passes that prove but leave a saga open are waited out (ADR-0060, #630).
+
+It must outlast the reconciler's own windows, or flatten gives up on an order
+the ghost path would end. With the defaults, that is up to 120 seconds.
+"""
+
 
 class _DryReason(StrEnum):
     """Why a step closed nothing. It is the ``reason`` on ``flatten.dry_attempt`` (ADR-0060)."""
 
     NO_FILL = "no_fill"
     NO_PRICE = "no_price"
+    NO_VERDICT = "no_verdict"
     PRICE_BAND = "price_band"
     READ_FAILED = "read_failed"
     REFUSED = "refused"
@@ -580,13 +588,27 @@ async def _verdict(
     failed passes used up the dry attempts. A second close beside an open one
     could close the size twice. So a failed pass waits for this close again, and
     a give-up leaves it to the next boot.
+
+    A pass that proves can still leave the saga open. That is normal while the
+    reconciler waits out its own windows, such as the ghost grace. Past
+    ``NO_VERDICT_CAP_SECONDS`` it is not, so each such pass is a dry attempt
+    (#630). Without the cap, an order no pass can end hangs the run.
     """
+    # When the first pass that proved left the saga open, on the engine clock.
+    since: int | None = None
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
         result = await turns.run_pass()
-        if result is not PassResult.PROVED and await dry.read_failed(
-            size, rate_limited=result is PassResult.RATE_LIMITED
-        ):
+        if result is not PassResult.PROVED:
+            if await dry.read_failed(size, rate_limited=result is PassResult.RATE_LIMITED):
+                return False
+            continue
+        if _decided(cloid, context):
+            return True
+        now = context.clock.timestamp_ns()
+        since = now if since is None else since
+        past_cap = now - since >= NO_VERDICT_CAP_SECONDS * 1_000_000_000
+        if past_cap and await dry.gave_up(_DryReason.NO_VERDICT, size):
             return False
     return True
 
