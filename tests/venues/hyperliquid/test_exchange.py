@@ -1249,7 +1249,7 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     ("filled", "second_read"),
     [("0.3", OrderState.CANCELLED), ("0.5", OrderState.FILLED)],
 )
-def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
+def test_fetch_order_ends_a_reduce_only_order_only_when_filled_for_less_than_asked(
     filled: str, second_read: OrderState
 ) -> None:
     # A reduce-only buy of 0.5. The venue says `filled` either way. Fills of
