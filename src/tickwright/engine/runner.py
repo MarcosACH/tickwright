@@ -451,6 +451,7 @@ class Engine:
             feed=feed,
             reconciler=self._reconciler,
             pass_interval_seconds=self._reconcile_config.inflight_interval_seconds,
+            open_window_seconds=self._reconcile_config.longest_open_window_seconds,
             # The same test as the account cadence: a venue that declares
             # genesis has no account truth to reconcile against.
             reconcile_account=(

@@ -518,6 +518,11 @@ flat (ADR-0054). When no order can close a strategy's leftover, it moves into th
 partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
 nothing (ADR-0060). A read in the close loop refused for a rate limit does not count. It waits
 like an order.
+Flatten waits for each close's saga to end before it sends the next. A reconcile pass that reads
+the venue but leaves the saga open does not count either, for at least 5 minutes. The wait is
+longer when the reconcile windows are longer, such as the ghost grace. Flatten logs
+`flatten.verdict_wait` when it starts. After the wait, each such pass counts as an attempt that
+fills nothing (ADR-0060, #630).
 Flatten is done only when the venue holds no resting order and no position. The fill split is built
 (#471). #472 built one attempt per symbol on paper replay. A symbol the feed never priced gets no
 order, and the final read reports it. #473 built the size check before an order, and #475 added

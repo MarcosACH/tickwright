@@ -101,6 +101,8 @@ which waits for `feed.run()` to return.
 **(Changed by #476:** the order anchor is gone. The context holds `cancel`, which is the
 manager's `cancel_for_operator`. So a job has no cancel that skips the saga mark. The context
 also holds `emitter`, the seeded `__operator__` emitter.**)**
+**(Changed by #630:** the context also holds `open_window_seconds`, the longest a reconcile pass
+can leave a saga open. Flatten waits at least that long before it gives up on a close.**)**
 
 **Responsibilities:** The contract between the host and one operator job. A job is built by the
 composition root with only the facts the root owns: the `--new-store` flag, and for `Flatten`
@@ -284,6 +286,10 @@ context. Starts the feed through the `FeedHandle`.
   since the loop started or since its last fill. Other dry attempts do not move them. After them,
   the refusal is a dry attempt with `reason` `price_band`. The cap is the constant
   `PRICE_BAND_CAP_SECONDS` (ADR-0056).**)**
+- **(Built by #630:** the wait for a cloid verdict gives up too. Passes that prove but leave the
+  saga open are waited out for at least `NO_VERDICT_CAP_SECONDS`, then count as `no_verdict`. The
+  wait grows when the reconcile windows are longer. `_DryAttempts.undecided` holds the rule. The
+  rule and its event `flatten.verdict_wait` are in ADR-0060.**)**
 
 **Seams:** None.
 
@@ -554,6 +560,7 @@ that true.
 `exit.finished`, `cancel_all.orders_remain`, `flatten.dry_attempt`, `flatten.rate_limited`,
 `flatten.gave_up`. Fields as in ADR-0060.
 **(Extended by #619:** a ninth name, `flatten.price_refused`, with one field, `symbol`.**)**
+**(Extended by #630:** a tenth name, `flatten.verdict_wait`, with one field, `symbol`.**)**
 
 **Responsibilities:** A closed set, so the catalog tests cover them.
 

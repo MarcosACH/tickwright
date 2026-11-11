@@ -57,9 +57,15 @@ from tickwright.domain import (
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
+from tickwright.engine.exit_run import (
+    NO_VERDICT_CAP_SECONDS,
+    ExitJob,
+    Flatten,
+    OperatorCancelAll,
+)
 from tickwright.engine.guard import NoopGuard, RealGuard
-from tickwright.engine.runner import Engine
+from tickwright.engine.reconcile import ReconcileConfig
+from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 
 _SPECS = {
@@ -150,6 +156,7 @@ def _flatten(
     new_store: bool = False,
     registered: Sequence[Strategy] = (),
     step_ns: int = 1_000,
+    config: EngineConfig | None = None,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
@@ -161,7 +168,7 @@ def _flatten(
     first, because an exit run refuses one no engine has used (ADR-0052).
     ``new_store`` is the operator's ``--new-store``. ``registered`` strategies
     are registered on BTC. An exit run never starts them. ``step_ns`` spaces
-    the replay rows.
+    the replay rows. ``config`` sets the engine's timing knobs.
     Returns the exit code and every event the run emitted.
     """
     if used:
@@ -180,6 +187,7 @@ def _flatten(
         ),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
         exit_job=Flatten(feed_ends=True, new_store=new_store),
+        config=config,
     )
     for strategy in registered:
         engine.register(strategy, symbols={"BTC"})
@@ -1254,6 +1262,24 @@ def test_flatten_waits_for_the_verdict_on_a_close_the_boot_left_open_before_it_c
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
+def test_a_close_left_open_waits_out_a_ghost_grace_longer_than_the_verdict_cap(
+    tmp_path: Path,
+) -> None:
+    # The ghost path ends this close after 400 seconds. A fixed 300 second cap
+    # would give up first and leave the position open (#630).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+    config = EngineConfig(reconcile=ReconcileConfig(ghost_grace_seconds=400.0))
+
+    exit_code, logs = _flatten(tmp_path, config=config)
+
+    assert exit_code == 0
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    ghosted = [log["cloid"] for log in logs if log["event"] == "ghost.reconciled"]
+    assert ghosted == [left_open]
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
 class _ReadsOnlyAtBoot(VenueLink):
     """The boot reads every order. After that, no order read reaches the venue."""
 
@@ -1289,6 +1315,109 @@ def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_i
     assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
     assert logs[-1]["left"] == "BTC=0.02"
     assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+
+
+class _AckedNeverEnded(VenueLink):
+    """The venue acks each close as live, then never ends it and never lists it.
+
+    So every pass proves, and none can end the saga. That is the shape of #629.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+
+    def _live(self, cloid: str, symbol: str) -> OrderStatusReport:
+        return OrderStatusReport(
+            ts_event=0, ts_init=0, cloid=cloid, symbol=symbol, status=OrderState.LIVE
+        )
+
+    async def place(self, order: PlaceOrder) -> None:
+        await self._bus.publish(self._live(order.cloid, order.symbol))
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        return VenueOrderView(status=self._live(ref.cloid, ref.symbol))
+
+
+def test_a_close_that_passes_prove_but_never_end_gives_up(tmp_path: Path) -> None:
+    # Before #630 the wait never ended and logged nothing. Now it waits out the
+    # cap, then each pass that leaves the saga open is a dry attempt.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_AckedNeverEnded, bus=bus), bus=bus)
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "no_verdict"),
+        (2, "no_verdict"),
+        (3, "no_verdict"),
+    ]
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
+    assert logs[-1]["left"] == "BTC=0.02"
+    placed = [log["signal_id"] for log in logs if log["event"] == "order.placed"]
+    assert placed[-1] == f"{OPERATOR}:BTC:1"
+
+
+def test_a_wait_on_a_close_no_pass_has_ended_is_logged_once(tmp_path: Path) -> None:
+    # The cap waits 5 minutes before any dry attempt. The operator must see why.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+
+    _, logs = _flatten(tmp_path, link=partial(_AckedNeverEnded, bus=bus), bus=bus)
+
+    waits = [log for log in logs if log["event"] == "flatten.verdict_wait"]
+    assert [(log["symbol"], log["cloid"]) for log in waits] == [
+        ("BTC", derive_cloid(f"{OPERATOR}:BTC:1"))
+    ]
+    events = [log["event"] for log in logs]
+    assert events.index("flatten.verdict_wait") < events.index("flatten.dry_attempt")
+
+
+class _EndsOnlyTheOldClose(_AckedNeverEnded):
+    """The close left open is gone from the venue, so the ghost path ends it.
+
+    Each new close is acked and never ended, as in the parent. ``placed_at`` is
+    when each new close was sent, on the engine clock.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus, clock: ManualClock) -> None:
+        super().__init__(venue, bus=bus)
+        self._clock = clock
+        self.placed_at: dict[str, int] = {}
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.placed_at[order.cloid] = self._clock.timestamp_ns()
+        await super().place(order)
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid in self.placed_at:
+            return await super().fetch_order(ref)
+        # Paper never held the old close, so it reads as gone.
+        return await self._venue.fetch_order(ref)
+
+
+def test_a_new_close_gets_its_own_verdict_cap_after_the_old_one_ends(tmp_path: Path) -> None:
+    # The old close took about 2 minutes to end. The new close must still get
+    # the whole cap, or flatten gives up on it 2 minutes early (#630).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+    bus, clock = InMemoryBus(), ManualClock()
+    links: list[_EndsOnlyTheOldClose] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_EndsOnlyTheOldClose(venue, bus=bus, clock=clock))
+        return links[-1]
+
+    exit_code, logs = _flatten(tmp_path, link=link, bus=bus, clock=clock)
+
+    assert exit_code == 1
+    new_close = derive_cloid(f"{OPERATOR}:BTC:2")
+    waits = [log["cloid"] for log in logs if log["event"] == "flatten.verdict_wait"]
+    assert waits == [left_open, new_close]
+    waited_ns = clock.timestamp_ns() - links[0].placed_at[new_close]
+    assert waited_ns >= NO_VERDICT_CAP_SECONDS * 1_000_000_000
 
 
 def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_the_close(

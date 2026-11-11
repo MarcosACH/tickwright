@@ -35,6 +35,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.observability import NamedEvent, named_event
+from tickwright.observability.correlation import operation
 
 from .checkpoint import Checkpointer
 from .feed_handle import FeedHandle
@@ -79,6 +80,10 @@ class ExitContext:
     pass_interval_seconds: float
     """How long a job waits between its own reconcile passes. No cadence runs in an
     exit run, so the job paces them itself (ADR-0052)."""
+    open_window_seconds: float
+    """The longest a pass that proves can leave a saga open
+    (``ReconcileConfig.longest_open_window_seconds``). A job must not give up
+    on an order before it."""
     reconcile_account: Callable[[], Awaitable[object]] | None
     """One account reconcile pass, or ``None`` on a venue with no account truth.
     It heals a position the books cannot see into the unattributed partition
@@ -244,12 +249,22 @@ RATE_LIMIT_WAIT_SECONDS = 10.0
 PRICE_BAND_CAP_SECONDS = 300.0
 """How long oracle rejects are waited out before they count as dry (ADR-0056, #603)."""
 
+NO_VERDICT_CAP_SECONDS = 300.0
+"""The shortest wait for passes that prove but leave a saga open (ADR-0060, #630).
+
+The wait must outlast the reconciler's own windows, or flatten gives up on an
+order the ghost path would end. Those windows are config, so ``_no_verdict_cap``
+makes the wait longer when they are longer. With the defaults they take about
+125 seconds, so the wait is this one.
+"""
+
 
 class _DryReason(StrEnum):
     """Why a step closed nothing. It is the ``reason`` on ``flatten.dry_attempt`` (ADR-0060)."""
 
     NO_FILL = "no_fill"
     NO_PRICE = "no_price"
+    NO_VERDICT = "no_verdict"
     PRICE_BAND = "price_band"
     READ_FAILED = "read_failed"
     REFUSED = "refused"
@@ -364,16 +379,20 @@ class _DryAttempts:
     Most steps count as one dry attempt in a row, then wait 2 seconds. A rate
     limit waits 10 seconds and does not count, because waiting it out makes
     progress. An oracle reject waits 2 seconds and does not count, until its
-    5 minute cap has passed. This is the one place that tells them apart.
-    ``close_cost`` names the cost of each refusal, and ``gave_up`` counts it.
+    5 minute cap has passed. A pass that leaves a saga open does not count
+    either, until its own cap has passed. This is the one place that tells them
+    apart. ``close_cost`` names the cost of each refusal, and ``gave_up`` counts it.
     """
 
-    def __init__(self, symbol: str, clock: Clock) -> None:
+    def __init__(self, symbol: str, clock: Clock, *, no_verdict_cap_seconds: float) -> None:
         self._symbol = symbol
         self._clock = clock
+        self._no_verdict_cap_ns = int(no_verdict_cap_seconds * 1_000_000_000)
         self._count = 0
         # When the first oracle reject of the current wait came, on the engine clock.
         self._price_band_since: int | None = None
+        # The order whose verdict the loop waits for, and when the wait began.
+        self._verdict_wait: tuple[str, int] | None = None
 
     def reset(self) -> None:
         """Start a new row after a fill. The next oracle reject starts a new cap."""
@@ -441,6 +460,25 @@ class _DryAttempts:
             self._price_band_since = now
         return now - self._price_band_since < PRICE_BAND_CAP_SECONDS * 1_000_000_000
 
+    async def undecided(self, cloid: str, size: Decimal) -> bool:
+        """Cost of a pass that proved but left ``cloid``'s saga open (#630).
+
+        Says whether the loop gave up, as ``gave_up`` does. The reconciler can
+        need minutes to end a saga, for example over the ghost grace. So these
+        passes count nothing until the cap has passed. After it, each one is a
+        dry attempt. Without the cap, an order no pass can end hangs the run.
+        """
+        now = self._clock.timestamp_ns()
+        if self._verdict_wait is None or self._verdict_wait[0] != cloid:
+            # Each order gets its own cap, so a new cloid starts a new wait.
+            self._verdict_wait = (cloid, now)
+            # The cap is silent for minutes, so the operator needs to see why.
+            with operation(cloid=cloid):
+                named_event(NamedEvent.FLATTEN_VERDICT_WAIT, symbol=self._symbol)
+        if now - self._verdict_wait[1] < self._no_verdict_cap_ns:
+            return False
+        return await self.gave_up(_DryReason.NO_VERDICT, size)
+
     async def read_failed(self, size: Decimal, *, rate_limited: bool) -> bool:
         """Count a failed venue read as dry, unless the IP limit refused it.
 
@@ -474,11 +512,20 @@ async def _flatten_symbol(
     oracle reject, up to its cap. True when the loop gave up. The final read reports what is left.
     """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
-    dry = _DryAttempts(symbol, context.clock)
+    dry = _DryAttempts(symbol, context.clock, no_verdict_cap_seconds=_no_verdict_cap(context))
     left = await _resume_orders(symbol, size, dry, turns, context)
     while left is not None:
         left = await _attempt(symbol, left, priced, emitter, dry, turns, context)
     return dry.spent
+
+
+def _no_verdict_cap(context: ExitContext) -> float:
+    """How long passes that prove but leave a saga open are waited out (#630).
+
+    Passes run one interval apart, so a verdict can come one interval after the
+    reconciler's longest window ends.
+    """
+    return max(NO_VERDICT_CAP_SECONDS, context.open_window_seconds + context.pass_interval_seconds)
 
 
 async def _attempt(
@@ -580,13 +627,17 @@ async def _verdict(
     failed passes used up the dry attempts. A second close beside an open one
     could close the size twice. So a failed pass waits for this close again, and
     a give-up leaves it to the next boot.
+
+    A pass that proves can still leave the saga open. What that costs is
+    ``_DryAttempts.undecided``.
     """
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
         result = await turns.run_pass()
-        if result is not PassResult.PROVED and await dry.read_failed(
-            size, rate_limited=result is PassResult.RATE_LIMITED
-        ):
+        if result is not PassResult.PROVED:
+            if await dry.read_failed(size, rate_limited=result is PassResult.RATE_LIMITED):
+                return False
+        elif not _decided(cloid, context) and await dry.undecided(cloid, size):
             return False
     return True
 
