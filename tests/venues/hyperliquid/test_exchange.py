@@ -110,7 +110,7 @@ def make_exchange(
         startup_timeout_seconds=60.0,
         # The engine's open-order interval at its default. A shrunk order's
         # fill total must hold this long before its cut part ends (#478).
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
     )
 
 
@@ -611,12 +611,16 @@ def test_a_filled_placement_acks_the_order_live_with_its_oid_before_the_fills() 
     assert isinstance(fill, FillReport)
 
 
-@pytest.mark.parametrize("reduce_only", [True, False])
-def test_a_reduce_only_order_filled_for_less_than_asked_ends_cancelled(reduce_only: bool) -> None:
+@pytest.mark.parametrize(
+    ("reduce_only", "reason"), [(True, "reduce-only shrink"), (False, "ioc remainder")]
+)
+def test_an_ioc_order_filled_for_less_than_asked_ends_cancelled(
+    reduce_only: bool, reason: str
+) -> None:
     # Against a short 0.3, the venue shrinks a reduce-only buy of 0.5 to 0.3
-    # and answers `filled` (probe P1). The saga keeps the 0.5 it asked for, so
-    # without a CANCELLED for the cut part it stays open forever (ADR-0057).
-    # A plain order keeps today's reports.
+    # and answers `filled` (probe P1). A plain IOC buy that finds only 0.3 on
+    # the book gets the same answer (#629). The saga keeps the 0.5 it asked
+    # for, so without a CANCELLED for the cut part it stays open forever.
     post = FakeExchangeApi(
         {
             "order": filled_response(oid=91, total_sz="0.3", avg_px="43250.0"),
@@ -626,14 +630,11 @@ def test_a_reduce_only_order_filled_for_less_than_asked_ends_cancelled(reduce_on
     order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=reduce_only)
     reports = asyncio.run(place_and_collect_reports(post, order))
 
-    if not reduce_only:
-        _ack, _fill = reports
-        return
     _ack, fill, cancelled = reports
     assert isinstance(fill, FillReport)
     assert isinstance(cancelled, OrderStatusReport)
     assert cancelled.status is OrderState.CANCELLED
-    assert cancelled.reason == "reduce-only shrink"
+    assert cancelled.reason == reason
     assert cancelled.cloid == CLOID
 
 
@@ -1248,7 +1249,7 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     ("filled", "second_read"),
     [("0.3", OrderState.CANCELLED), ("0.5", OrderState.FILLED)],
 )
-def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
+def test_fetch_order_ends_a_reduce_only_order_only_when_filled_for_less_than_asked(
     filled: str, second_read: OrderState
 ) -> None:
     # A reduce-only buy of 0.5. The venue says `filled` either way. Fills of
@@ -1278,6 +1279,43 @@ def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
     assert first.status is not None and second.status is not None
     assert first.status.status is OrderState.FILLED
     assert second.status.status is second_read
+
+
+@pytest.mark.parametrize(
+    ("reduce_only", "tif", "reason"),
+    [
+        (True, "Gtc", "reduce-only shrink"),
+        (False, "Ioc", "ioc remainder"),
+        (True, "Ioc", "reduce-only shrink"),
+    ],
+)
+def test_reconcile_names_why_the_venue_ended_the_order_short(
+    reduce_only: bool, tif: str, reason: str
+) -> None:
+    # Reconcile ends the cut part with the same reason placement gives. A
+    # reduce-only IOC order keeps the reason it had before #629 (ADR-0057).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, reduce_only=reduce_only, tif=tif
+            ),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    ref = OrderRef(cloid=CLOID, symbol="BTC", quantity=Decimal("0.5"))
+
+    async def read_twice() -> VenueOrderView | VenueReadFailure:
+        clock = ManualClock()
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=clock)
+        await exchange.fetch_order(ref)
+        clock.advance_to(30 * 1_000_000_000)
+        return await exchange.fetch_order(ref)
+
+    view = asyncio.run(read_twice())
+
+    assert isinstance(view, VenueOrderView) and view.status is not None
+    assert view.status.status is OrderState.CANCELLED
+    assert view.status.reason == reason
 
 
 def test_a_shrunk_order_ends_only_once_its_fills_have_held_for_one_open_order_interval() -> None:

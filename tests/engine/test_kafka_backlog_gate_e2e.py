@@ -165,7 +165,7 @@ def _run_one_life(
             post=network,
             connect=idle_ws,
             startup_timeout_seconds=60.0,
-            shrink_wait_seconds=30.0,
+            cut_part_wait_seconds=30.0,
         )
         if not first_start and store.load_account() is None:
             # The life that published the intent also opened the account row.
@@ -318,7 +318,7 @@ def test_a_stop_during_boot_denies_an_intent_that_arrives_in_the_teardown(
             post=network,
             connect=idle_ws,
             startup_timeout_seconds=60.0,
-            shrink_wait_seconds=30.0,
+            cut_part_wait_seconds=30.0,
         )
         store.checkpoint_ledger(
             account=Account(
@@ -520,7 +520,7 @@ def test_a_stop_while_the_venue_is_dark_ends_a_boot_with_a_kafka_backlog(
                 post=venue,
                 connect=idle_ws,
                 startup_timeout_seconds=60.0,
-                shrink_wait_seconds=30.0,
+                cut_part_wait_seconds=30.0,
             ),
             feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
         )
