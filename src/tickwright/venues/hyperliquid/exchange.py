@@ -55,6 +55,7 @@ from tickwright.observability import NamedEvent, named_event
 from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
+from .cut_part import CutPartWait, cut_part_reason
 from .funding import FundingIngest
 from .preflight import push_leverage, reverify_account_mode, verify_account_mode
 from .reading import figure, read, refuse_non_usdc
@@ -172,15 +173,11 @@ class HyperliquidExchange:
         # strictly increasing, and the ms-truncated clock would collide on two
         # sends inside one millisecond — this floor keeps them monotonic.
         self._last_nonce = 0
-        # The fill total each order the venue ended short shows, by cloid, and when a read
-        # first showed it. Its cut part ends only once that total has held for
-        # the whole wait (``fetch_order``). Kept in memory on purpose: a restart
-        # forgets it and only waits once more.
-        self._short_fills: dict[str, tuple[Decimal, int]] = {}
-        # The engine's open-order interval, handed down by the composition root.
-        # A read count would let a boot retry one second later pass as a second
-        # reconcile pass. A wait in clock time cannot (#478).
-        self._shrink_wait_ns = duration_ns(shrink_wait_seconds, name="shrink_wait_seconds")
+        # The wait is the engine's open-order interval, handed down by the
+        # composition root (#478).
+        self._cut_part_wait = CutPartWait(
+            clock=clock, wait_ns=duration_ns(shrink_wait_seconds, name="shrink_wait_seconds")
+        )
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
@@ -419,25 +416,23 @@ class HyperliquidExchange:
                 filled = await self._publish_placement_fills(order, oid=oid, total_sz=total_sz)
                 if filled is None:
                     return
-                # The venue ended the order short. It shrank a reduce-only order
-                # to the position, or dropped what an IOC order could not fill.
-                # The saga keeps the size it asked for, so it would stay open
-                # forever. The cut part ends CANCELLED, as on paper (ADR-0057,
-                # #629). It goes out
-                # after the fills, because reconcile stops watching a terminal
-                # saga and would never heal fills that came later. For the same
-                # reason it waits until the read holds every fill the venue
-                # reported. A read still short after its retries leaves the saga
-                # open for reconcile.
-                if filled == total_sz and _ended_short(
+                # The cut part ends CANCELLED, as on paper (ADR-0057, #629). It
+                # goes out after the fills, because reconcile stops watching a
+                # terminal saga and would never heal fills that came later. For
+                # the same reason it waits until the read holds every fill the
+                # venue reported. A read still short after its retries leaves
+                # the saga open for reconcile. IOC is read off the wire, because
+                # what the venue got decides how it ends the order.
+                cut_reason = cut_part_reason(
                     reduce_only=order.reduce_only,
                     ioc=self._wire_tif(order) == "Ioc",
                     asked=order.quantity,
                     filled=filled,
-                ):
+                )
+                if filled == total_sz and cut_reason is not None:
                     await self._bus.publish(
-                        self._end_short(
-                            cloid=order.cloid, symbol=order.symbol, reduce_only=order.reduce_only
+                        self._end_cut_part(
+                            cloid=order.cloid, symbol=order.symbol, reason=cut_reason
                         )
                     )
             case unreachable:
@@ -632,11 +627,8 @@ class HyperliquidExchange:
             # venue answering everything else at full speed (ADR-0049). Neither
             # may ever be mistaken for an empty book.
             return record
-        # Taken out on every answer, so an order that stops reading as ended
-        # short leaves nothing behind. Only one still waiting puts it back.
-        # A failed fills read below then restarts the wait, which is the safe
-        # side: it only keeps the saga open longer.
-        seen = self._short_fills.pop(ref.cloid, None)
+        # Taken on every answer, before any path below can return.
+        seen = self._cut_part_wait.take(ref.cloid)
         if record is _OrderStatusRead.NO_RECORD:
             # unknownOid: a *successful* read that positively has no record.
             # Either the order never landed, or the venue has since dropped the
@@ -667,22 +659,19 @@ class HyperliquidExchange:
         if isinstance(fills, VenueReadFailure):
             return fills
         filled = _fill_total(fills)
-        if (
-            record.state is OrderState.FILLED
-            and ref.quantity is not None
-            and _ended_short(
+        cut_reason = (
+            cut_part_reason(
                 reduce_only=record.reduce_only, ioc=record.ioc, asked=ref.quantity, filled=filled
             )
-            and self._fills_settled(ref.cloid, filled, seen=seen)
-        ):
+            if record.state is OrderState.FILLED and ref.quantity is not None
+            else None
+        )
+        if cut_reason is not None and self._cut_part_wait.held(ref.cloid, filled, seen=seen):
             # The venue answers `filled` for an order it ended short, and a
             # FILLED report moves no saga. The cut part ends CANCELLED, as it
             # does when the fills read at placement works (ADR-0057, #629).
-            status = self._end_short(
-                cloid=ref.cloid,
-                symbol=record.coin,
-                reduce_only=record.reduce_only,
-                venue_oid=str(record.oid),
+            status = self._end_cut_part(
+                cloid=ref.cloid, symbol=record.coin, reason=cut_reason, venue_oid=str(record.oid)
             )
             return VenueOrderView(status=status, fills=tuple(fills))
         status = self._status_report(
@@ -690,44 +679,19 @@ class HyperliquidExchange:
         )
         return VenueOrderView(status=status, fills=tuple(fills))
 
-    def _end_short(
-        self, *, cloid: str, symbol: str, reduce_only: bool, venue_oid: str | None = None
+    def _end_cut_part(
+        self, *, cloid: str, symbol: str, reason: str, venue_oid: str | None = None
     ) -> OrderStatusReport:
         """The CANCELLED that ends the cut part of an order the venue ended
-        short (ADR-0057, #629).
-
-        Placement and reconcile both end it here. A reconcile read can start
-        the wait while the placement fills read is still out. The saga ends
-        now, so no later read would take that entry out.
-        """
-        self._short_fills.pop(cloid, None)
+        short. Placement and reconcile both end it here (ADR-0057, #629)."""
+        self._cut_part_wait.forget(cloid)
         return self._status_report(
             cloid=cloid,
             symbol=symbol,
             status=OrderState.CANCELLED,
             venue_oid=venue_oid,
-            reason="reduce-only shrink" if reduce_only else "ioc remainder",
+            reason=reason,
         )
-
-    def _fills_settled(
-        self, cloid: str, total: Decimal, *, seen: tuple[Decimal, int] | None
-    ) -> bool:
-        """Whether this read's fill total has held for the whole wait.
-
-        One read is not proof the venue has listed every fill yet. A fill that
-        lands after CANCELLED is an illegal move and would be lost. So the cut
-        part waits until the same total has held for one open-order interval.
-        ``seen`` is the total an earlier read showed, and when it first did.
-        """
-        now = self._clock.timestamp_ns()
-        if seen is not None and seen[0] == total:
-            if now - seen[1] >= self._shrink_wait_ns:
-                return True
-            self._short_fills[cloid] = seen
-            return False
-        # A new total, so the venue was still listing fills. The wait restarts.
-        self._short_fills[cloid] = (total, now)
-        return False
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         # frontendOpenOrders, not openOrders: only this one carries the cloid,
@@ -1026,22 +990,6 @@ def _placed_before(record: "_OrderRecord", *, created_ts_ns: int | None) -> bool
     if created_ts_ns is None:
         return False
     return record.timestamp < created_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
-
-
-def _ended_short(*, reduce_only: bool, ioc: bool, asked: Decimal, filled: Decimal) -> bool:
-    """Whether the venue ended the order short. The order is done, yet it
-    filled less than the saga asked for.
-
-    Only two kinds can end short. The venue shrinks a reduce-only order to the
-    position (ADR-0057). It drops what an IOC order could not fill (#629). Any
-    other order the venue calls done filled in full. If its fills read short,
-    a fill is missing, and ending the saga would lose it.
-
-    Placement and reconcile both ask this. Each must also prove its fills read
-    holds every fill, and that proof differs. Placement has the venue's own
-    ``totalSz``. Reconcile waits for the total to hold (``_fills_settled``).
-    """
-    return (reduce_only or ioc) and filled < asked
 
 
 def _fill_total(fills: Sequence[FillReport]) -> Decimal:

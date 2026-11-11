@@ -1293,8 +1293,7 @@ def test_reconcile_names_why_the_venue_ended_the_order_short(
     reduce_only: bool, tif: str, reason: str
 ) -> None:
     # Reconcile ends the cut part with the same reason placement gives. A
-    # reduce-only IOC order reads as shrunk, since that is the venue's first
-    # cut (ADR-0057, #629).
+    # reduce-only IOC order keeps the reason it had before #629 (ADR-0057).
     post = FakeExchangeApi(
         {
             "orderStatus": order_status_response(
