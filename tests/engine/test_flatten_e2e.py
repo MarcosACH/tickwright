@@ -1334,6 +1334,21 @@ def test_a_close_that_passes_prove_but_never_end_gives_up(tmp_path: Path) -> Non
     assert placed[-1] == f"{OPERATOR}:BTC:1"
 
 
+def test_a_wait_on_a_close_no_pass_has_ended_is_logged_once(tmp_path: Path) -> None:
+    # The cap waits 5 minutes before any dry attempt. The operator must see why.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+
+    _, logs = _flatten(tmp_path, link=partial(_AckedNeverEnded, bus=bus), bus=bus)
+
+    waits = [log for log in logs if log["event"] == "flatten.verdict_wait"]
+    assert [(log["symbol"], log["cloid"]) for log in waits] == [
+        ("BTC", derive_cloid(f"{OPERATOR}:BTC:1"))
+    ]
+    events = [log["event"] for log in logs]
+    assert events.index("flatten.verdict_wait") < events.index("flatten.dry_attempt")
+
+
 def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_the_close(
     tmp_path: Path,
 ) -> None:

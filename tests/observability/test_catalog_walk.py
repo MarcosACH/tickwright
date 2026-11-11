@@ -29,10 +29,12 @@ from hyperliquid_fakes import (
     FakeExchangeApi,
     FakeWsConnection,
     idle_ws,
+    order_status_response,
+    resting_response,
     trade,
     trades_frame,
 )
-from hyperliquid_flatten import AnswersFirst, priced_frames, run_flatten
+from hyperliquid_flatten import CLOSE_OID, AnswersFirst, HeldShort, priced_frames, run_flatten
 from ledgers import GENESIS, book_fill, checkpointer
 from never_wakes import NeverWakes
 from pydantic import SecretStr
@@ -923,6 +925,29 @@ def _drive_flatten_price_refused() -> None:
     assert exit_code == 0
 
 
+class _RestsAndNeverEnds(HeldShort):
+    """The close rests, and every read by cloid says it is still open (#630)."""
+
+    def order(self, payload: dict) -> object:
+        return resting_response(oid=CLOSE_OID)
+
+    def order_status(self, payload: dict) -> dict:
+        return order_status_response(
+            cloid=payload["oid"],
+            oid=CLOSE_OID,
+            coin="HYPE",
+            placed_ms=self.clock.timestamp_ns() // 1_000_000,
+            reduce_only=True,
+            tif="Ioc",
+        )
+
+
+def _drive_flatten_verdict_wait() -> None:
+    """One Hyperliquid flatten whose close no reconcile pass can end (ADR-0060, #630)."""
+    exit_code, _, _ = run_flatten(":memory:", _RestsAndNeverEnds(), priced_frames())
+    assert exit_code == 1
+
+
 def _drive_exit_refused() -> None:
     """One operator cancel all on a store another engine holds (ADR-0060)."""
     with tempfile.TemporaryDirectory() as tmp, SQLiteStore(Path(tmp) / "saga.db") as holder:
@@ -1287,6 +1312,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.FLATTEN_GAVE_UP: _drive_flatten_gave_up,
     NamedEvent.FLATTEN_RATE_LIMITED: _drive_flatten_rate_limited,
     NamedEvent.FLATTEN_PRICE_REFUSED: _drive_flatten_price_refused,
+    NamedEvent.FLATTEN_VERDICT_WAIT: _drive_flatten_verdict_wait,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,

@@ -35,6 +35,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.observability import NamedEvent, named_event
+from tickwright.observability.correlation import operation
 
 from .checkpoint import Checkpointer
 from .feed_handle import FeedHandle
@@ -383,6 +384,10 @@ class _DryAttempts:
         # When the first oracle reject of the current wait came, on the engine clock.
         self._price_band_since: int | None = None
 
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
     def reset(self) -> None:
         """Start a new row after a fill. The next oracle reject starts a new cap."""
         self._count = 0
@@ -606,7 +611,11 @@ async def _verdict(
         if _decided(cloid, context):
             return True
         now = context.clock.timestamp_ns()
-        since = now if since is None else since
+        if since is None:
+            since = now
+            # The cap is silent for minutes, so the operator needs to see why.
+            with operation(cloid=cloid):
+                named_event(NamedEvent.FLATTEN_VERDICT_WAIT, symbol=dry.symbol)
         past_cap = now - since >= NO_VERDICT_CAP_SECONDS * 1_000_000_000
         if past_cap and await dry.gave_up(_DryReason.NO_VERDICT, size):
             return False
