@@ -80,6 +80,10 @@ class ExitContext:
     pass_interval_seconds: float
     """How long a job waits between its own reconcile passes. No cadence runs in an
     exit run, so the job paces them itself (ADR-0052)."""
+    open_window_seconds: float
+    """The longest a pass that proves can leave a saga open
+    (``ReconcileConfig.longest_open_window_seconds``). A job must not give up
+    on an order before it."""
     reconcile_account: Callable[[], Awaitable[object]] | None
     """One account reconcile pass, or ``None`` on a venue with no account truth.
     It heals a position the books cannot see into the unattributed partition
@@ -246,10 +250,12 @@ PRICE_BAND_CAP_SECONDS = 300.0
 """How long oracle rejects are waited out before they count as dry (ADR-0056, #603)."""
 
 NO_VERDICT_CAP_SECONDS = 300.0
-"""How long passes that prove but leave a saga open are waited out (ADR-0060, #630).
+"""The shortest wait for passes that prove but leave a saga open (ADR-0060, #630).
 
-It must outlast the reconciler's own windows, or flatten gives up on an order
-the ghost path would end. With the defaults, that is up to 120 seconds.
+The wait must outlast the reconciler's own windows, or flatten gives up on an
+order the ghost path would end. Those windows are config, so ``_no_verdict_cap``
+makes the wait longer when they are longer. With the defaults they take about
+125 seconds, so the wait is this one.
 """
 
 
@@ -378,9 +384,10 @@ class _DryAttempts:
     apart. ``close_cost`` names the cost of each refusal, and ``gave_up`` counts it.
     """
 
-    def __init__(self, symbol: str, clock: Clock) -> None:
+    def __init__(self, symbol: str, clock: Clock, *, no_verdict_cap_seconds: float) -> None:
         self._symbol = symbol
         self._clock = clock
+        self._no_verdict_cap_ns = int(no_verdict_cap_seconds * 1_000_000_000)
         self._count = 0
         # When the first oracle reject of the current wait came, on the engine clock.
         self._price_band_since: int | None = None
@@ -468,7 +475,7 @@ class _DryAttempts:
             # The cap is silent for minutes, so the operator needs to see why.
             with operation(cloid=cloid):
                 named_event(NamedEvent.FLATTEN_VERDICT_WAIT, symbol=self._symbol)
-        if now - self._verdict_wait[1] < NO_VERDICT_CAP_SECONDS * 1_000_000_000:
+        if now - self._verdict_wait[1] < self._no_verdict_cap_ns:
             return False
         return await self.gave_up(_DryReason.NO_VERDICT, size)
 
@@ -505,11 +512,20 @@ async def _flatten_symbol(
     oracle reject, up to its cap. True when the loop gave up. The final read reports what is left.
     """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
-    dry = _DryAttempts(symbol, context.clock)
+    dry = _DryAttempts(symbol, context.clock, no_verdict_cap_seconds=_no_verdict_cap(context))
     left = await _resume_orders(symbol, size, dry, turns, context)
     while left is not None:
         left = await _attempt(symbol, left, priced, emitter, dry, turns, context)
     return dry.spent
+
+
+def _no_verdict_cap(context: ExitContext) -> float:
+    """How long passes that prove but leave a saga open are waited out (#630).
+
+    Passes run one interval apart, so a verdict can come one interval after the
+    reconciler's longest window ends.
+    """
+    return max(NO_VERDICT_CAP_SECONDS, context.open_window_seconds + context.pass_interval_seconds)
 
 
 async def _attempt(

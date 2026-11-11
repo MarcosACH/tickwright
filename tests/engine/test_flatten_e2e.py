@@ -59,7 +59,8 @@ from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
-from tickwright.engine.runner import Engine
+from tickwright.engine.reconcile import ReconcileConfig
+from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 
 _SPECS = {
@@ -150,6 +151,7 @@ def _flatten(
     new_store: bool = False,
     registered: Sequence[Strategy] = (),
     step_ns: int = 1_000,
+    config: EngineConfig | None = None,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
@@ -161,7 +163,7 @@ def _flatten(
     first, because an exit run refuses one no engine has used (ADR-0052).
     ``new_store`` is the operator's ``--new-store``. ``registered`` strategies
     are registered on BTC. An exit run never starts them. ``step_ns`` spaces
-    the replay rows.
+    the replay rows. ``config`` sets the engine's timing knobs.
     Returns the exit code and every event the run emitted.
     """
     if used:
@@ -180,6 +182,7 @@ def _flatten(
         ),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
         exit_job=Flatten(feed_ends=True, new_store=new_store),
+        config=config,
     )
     for strategy in registered:
         engine.register(strategy, symbols={"BTC"})
@@ -1251,6 +1254,24 @@ def test_flatten_waits_for_the_verdict_on_a_close_the_boot_left_open_before_it_c
     verdict = events.index(("ghost.reconciled", left_open, None))
     placed = events.index(("order.placed", None, f"{OPERATOR}:BTC:2"))
     assert verdict < placed
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
+def test_a_close_left_open_waits_out_a_ghost_grace_longer_than_the_verdict_cap(
+    tmp_path: Path,
+) -> None:
+    # The ghost path ends this close after 400 seconds. A fixed 300 second cap
+    # would give up first and leave the position open (#630).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+    config = EngineConfig(reconcile=ReconcileConfig(ghost_grace_seconds=400.0))
+
+    exit_code, logs = _flatten(tmp_path, config=config)
+
+    assert exit_code == 0
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    ghosted = [log["cloid"] for log in logs if log["event"] == "ghost.reconciled"]
+    assert ghosted == [left_open]
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 

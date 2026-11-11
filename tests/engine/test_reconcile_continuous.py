@@ -866,6 +866,14 @@ def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() 
         ReconcileConfig(recent_order_protection_seconds=90.0, ghost_grace_seconds=90.0)
 
 
+def test_a_cut_part_wait_longer_than_the_ghost_path_is_the_longest_open_window() -> None:
+    # On Hyperliquid a shrunk order's cut part waits one open-order interval
+    # (ADR-0057). Flatten must not give up on it before that wait ends (#630).
+    config = ReconcileConfig(open_order_interval_seconds=600.0)
+
+    assert config.longest_open_window_seconds == 600.0
+
+
 @pytest.mark.parametrize(
     "field",
     [

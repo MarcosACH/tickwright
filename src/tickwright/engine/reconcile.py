@@ -179,6 +179,20 @@ class ReconcileConfig:
                 "(ADR-0011 inv 3)"
             )
 
+    @property
+    def longest_open_window_seconds(self) -> float:
+        """The longest a pass that reads every order can still leave a saga open.
+
+        A gone order waits out the protection, then the grace, before the ghost
+        verdict. On Hyperliquid, a shrunk order's cut part waits one open-order
+        interval (ADR-0057). The in-flight budget stays under the grace, so the
+        grace covers it. Flatten waits at least this long for a verdict (#630).
+        """
+        return max(
+            self.recent_order_protection_seconds + self.ghost_grace_seconds,
+            self.open_order_interval_seconds,
+        )
+
 
 class Reconciler:
     """Compares local non-terminal sagas against venue truth and heals the gap."""
