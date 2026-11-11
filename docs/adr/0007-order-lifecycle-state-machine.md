@@ -41,7 +41,9 @@ cross-check, ADR-0011 inv 2 as amended by #328. [#328]**)**
 `ioc no-fill → CANCELLED` arrow holds on every venue, even when the venue answers with an error.
 Hyperliquid answers an IOC order that matched nothing with `iocCancelRejected`. The adapter used
 to end it `REJECTED`, while paper ended it `CANCELLED`. The order was valid and only found no
-match, so the venue did not refuse it, and `REJECTED` (ADR-0010) is wrong. Flatten does not
+match, so the venue did not refuse it, and `REJECTED` (ADR-0010) is wrong. The rule holds on
+both read paths. Placement reads the error text. Reconcile reads the order status
+`iocCancelRejected`, after a failed send for example. Both end it `CANCELLED`. Flatten does not
 change. It reads only whether the saga ended and what filled, so the attempt still counts as dry
 (ADR-0056). `tests/_support/exchange_contract.py` now checks that every venue ends this case, an
 IOC order filled only in part, and a cut reduce-only order the same way.**)**
