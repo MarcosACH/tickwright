@@ -166,6 +166,7 @@ Since #460 `cancel` takes a list of refs. A single cancel sends a list of one, a
 is one call that a venue can send as one batch (ADR-0055).
 Since #478 the ref also carries the size the saga asked for. A venue that shrank a reduce-only
 order reports it `filled` for less, and only the asked size shows the cut part (ADR-0057).
+Since #629 an IOC order the venue filled only in part reads the same way.
 Since #468 `fetch_open_orders()` lists every order resting in the account, ours or not. Paper
 answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
@@ -536,6 +537,13 @@ placement table. Both venues end an order shrunk at placement `CANCELLED`. Paper
 resting orders after every fill. On Hyperliquid, reconcile ends a shrunk order `CANCELLED` once its
 fill total holds for one open-order interval. A resting order takes the same path.
 _Avoid_: close order, exit order.
+
+**Cut part**:
+The part of an order the venue will never fill, because it ended the order short. Two kinds of
+order have one. A [[Reduce-only order]] the venue shrank to the net has one (ADR-0057). So does an
+IOC order the book could fill only in part (#629). The venue calls the order done, but the saga
+still asks for the full size. So the cut part ends `CANCELLED`, with the fills kept. Any other order
+the venue calls done filled in full, and a short fills read means a fill is missing.
 
 **Exit run**:
 A one-shot run of `tickwright cancel-all` or `tickwright flatten`, with the engine stopped
