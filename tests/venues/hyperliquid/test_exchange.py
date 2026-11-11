@@ -1281,6 +1281,44 @@ def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
     assert second.status.status is second_read
 
 
+@pytest.mark.parametrize(
+    ("reduce_only", "tif", "reason"),
+    [
+        (True, "Gtc", "reduce-only shrink"),
+        (False, "Ioc", "ioc remainder"),
+        (True, "Ioc", "reduce-only shrink"),
+    ],
+)
+def test_reconcile_names_why_the_venue_ended_the_order_short(
+    reduce_only: bool, tif: str, reason: str
+) -> None:
+    # Reconcile ends the cut part with the same reason placement gives. A
+    # reduce-only IOC order reads as shrunk, since that is the venue's first
+    # cut (ADR-0057, #629).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, reduce_only=reduce_only, tif=tif
+            ),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    ref = OrderRef(cloid=CLOID, symbol="BTC", quantity=Decimal("0.5"))
+
+    async def read_twice() -> VenueOrderView | VenueReadFailure:
+        clock = ManualClock()
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=clock)
+        await exchange.fetch_order(ref)
+        clock.advance_to(30 * 1_000_000_000)
+        return await exchange.fetch_order(ref)
+
+    view = asyncio.run(read_twice())
+
+    assert isinstance(view, VenueOrderView) and view.status is not None
+    assert view.status.status is OrderState.CANCELLED
+    assert view.status.reason == reason
+
+
 def test_a_shrunk_order_ends_only_once_its_fills_have_held_for_one_open_order_interval() -> None:
     # Two reads that agree are not proof the venue has listed every fill. A
     # boot retry can read the order again one second later. So the same total
