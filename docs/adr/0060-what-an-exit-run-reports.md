@@ -140,6 +140,14 @@ when a venue read fails, and which named events an exit run emits. Decided in
 
   **(Built in [#619](https://github.com/MarcosACH/tickwright/issues/619):** as decided above.
   `flatten.price_refused` is in the catalog with its one field, `symbol`.**)**
+
+  **(Extended by [#630](https://github.com/MarcosACH/tickwright/issues/630):** a pass that proves
+  but leaves the saga open used to cost nothing. So an order no pass could end hung flatten with
+  no log line. Now the first such pass emits `flatten.verdict_wait`. Its one field is `symbol`,
+  and the cloid rides the context. Passes like it are waited out for 5 minutes, the constant
+  `NO_VERDICT_CAP_SECONDS`. The cap must outlast the reconciler's own windows, such as the ghost
+  grace. After it, each such pass is a dry attempt, and `reason` on `flatten.dry_attempt` is
+  `no_verdict`. A give-up leaves the saga to the next boot, as after failed reads.**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 

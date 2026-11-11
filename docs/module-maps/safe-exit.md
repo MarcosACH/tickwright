@@ -284,6 +284,9 @@ context. Starts the feed through the `FeedHandle`.
   since the loop started or since its last fill. Other dry attempts do not move them. After them,
   the refusal is a dry attempt with `reason` `price_band`. The cap is the constant
   `PRICE_BAND_CAP_SECONDS` (ADR-0056).**)**
+- **(Built by #630:** the wait for a cloid verdict gives up too. Passes that prove but leave the
+  saga open are waited out for `NO_VERDICT_CAP_SECONDS`, then count as `no_verdict`. The rule and
+  its event `flatten.verdict_wait` are in ADR-0060.**)**
 
 **Seams:** None.
 
@@ -554,6 +557,7 @@ that true.
 `exit.finished`, `cancel_all.orders_remain`, `flatten.dry_attempt`, `flatten.rate_limited`,
 `flatten.gave_up`. Fields as in ADR-0060.
 **(Extended by #619:** a ninth name, `flatten.price_refused`, with one field, `symbol`.**)**
+**(Extended by #630:** a tenth name, `flatten.verdict_wait`, with one field, `symbol`.**)**
 
 **Responsibilities:** A closed set, so the catalog tests cover them.
 
