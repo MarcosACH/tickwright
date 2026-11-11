@@ -17,16 +17,27 @@ pytest does not rewrite its asserts and a bare comparison would fail blind.
 """
 
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, auto
 
 from tickwright.domain import Order, OrderState
 
 
 class OrderEnd(Enum):
-    """Each way a venue ends an order, and the saga state it must end in."""
+    """Each way a venue ends an order."""
 
     # The venue drops the part it could not fill. The fill stands (ADR-0007).
-    IOC_PARTIAL_FILL = OrderState.CANCELLED
+    IOC_PARTIAL_FILL = auto()
+    # A reduce-only order larger than the position is cut to it. The cut part
+    # never fills, so the order ends with the net filled (ADR-0057).
+    REDUCE_ONLY_CUT = auto()
+
+
+# Kept apart from the enum: two members with one value would make the second
+# an alias, and ``seam_answers`` would never ask for it.
+_ENDS_AS: dict[OrderEnd, OrderState] = {
+    OrderEnd.IOC_PARTIAL_FILL: OrderState.CANCELLED,
+    OrderEnd.REDUCE_ONLY_CUT: OrderState.CANCELLED,
+}
 
 
 def assert_order_ends(order: Order | None, *, case: OrderEnd, filled: Decimal, name: str) -> None:
@@ -36,9 +47,10 @@ def assert_order_ends(order: Order | None, *, case: OrderEnd, filled: Decimal, n
     than that dropped a fill the account holds.
     """
     assert order is not None, f"{name} drove {case.name} and the engine holds no saga for it"
-    assert order.state is case.value, (
+    ends_as = _ENDS_AS[case]
+    assert order.state is ends_as, (
         f"{name} ended {case.name} as {order.state.name}. Every venue ends it as "
-        f"{case.value.name}, or the saga can stall or disagree across venues (#629)"
+        f"{ends_as.name}, or the saga can stall or disagree across venues (#629)"
     )
     assert order.cum_qty == filled, (
         f"{name} ended {case.name} with {order.cum_qty} filled, but the venue filled {filled}"

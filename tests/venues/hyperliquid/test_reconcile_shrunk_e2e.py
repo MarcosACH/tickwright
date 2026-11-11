@@ -17,6 +17,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
+from exchange_contract import OrderEnd, assert_order_ends
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -156,8 +157,9 @@ def test_a_shrunk_order_ends_cancelled_once_two_passes_read_the_same_fills() -> 
 
     order, _events = _place_then_reconcile(post, passes=2)
 
-    assert order.state is OrderState.CANCELLED
-    assert order.cum_qty == Decimal("0.3")
+    assert_order_ends(
+        order, case=OrderEnd.REDUCE_ONLY_CUT, filled=Decimal("0.3"), name="HyperliquidExchange"
+    )
 
 
 def test_one_pass_alone_leaves_a_shrunk_order_open() -> None:

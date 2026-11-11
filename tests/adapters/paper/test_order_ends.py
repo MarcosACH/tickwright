@@ -45,7 +45,33 @@ def _tick(price: str) -> MarketTick:
     )
 
 
-def _run(signal: PlaceSignal, *, partial_fill_fraction: str) -> Order | None:
+def _signal(
+    seq: int,
+    side: Side,
+    quantity: str,
+    *,
+    limit_price: str | None = None,
+    reduce_only: bool = False,
+) -> PlaceSignal:
+    """An IOC order. A market order unless it has a ``limit_price``."""
+    return PlaceSignal(
+        ts_event=NS,
+        ts_init=NS,
+        strategy_id="paper",
+        symbol="BTC",
+        seq=seq,
+        side=side,
+        quantity=Decimal(quantity),
+        order_type=OrderType.MARKET if limit_price is None else OrderType.LIMIT,
+        time_in_force=TimeInForce.IOC,
+        price=None if limit_price is None else Decimal(limit_price),
+        reduce_only=reduce_only,
+    )
+
+
+def _run(*signals: PlaceSignal, partial_fill_fraction: str = "1") -> Order | None:
+    """Send each signal in turn, and return the last one's saga."""
+
     async def main() -> Order | None:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=NS)
@@ -72,28 +98,29 @@ def _run(signal: PlaceSignal, *, partial_fill_fraction: str) -> Order | None:
         )
         bus.subscribe(ExecutionReport, manager.on_execution_report)
         await bus.publish(_tick("41000"))
-        await manager.on_signal(signal)
-        return store.get_order(derive_cloid(signal.signal_id))
+        for signal in signals:
+            await manager.on_signal(signal)
+        return store.get_order(derive_cloid(signals[-1].signal_id))
 
     return asyncio.run(main())
 
 
 def test_an_ioc_order_filled_in_part_ends_cancelled_with_its_fill_kept() -> None:
-    ioc_buy = PlaceSignal(
-        ts_event=NS,
-        ts_init=NS,
-        strategy_id="paper",
-        symbol="BTC",
-        seq=1,
-        side=Side.BUY,
-        quantity=Decimal("1"),
-        order_type=OrderType.LIMIT,
-        time_in_force=TimeInForce.IOC,
-        price=Decimal("42000"),
-    )
+    ioc_buy = _signal(1, Side.BUY, "1", limit_price="42000")
 
     order = _run(ioc_buy, partial_fill_fraction="0.4")
 
     assert_order_ends(
         order, case=OrderEnd.IOC_PARTIAL_FILL, filled=Decimal("0.4"), name="PaperExchange"
+    )
+
+
+def test_a_reduce_only_order_cut_to_the_position_ends_cancelled_with_the_net_filled() -> None:
+    open_long = _signal(1, Side.BUY, "0.3")
+    close_more = _signal(2, Side.SELL, "0.5", reduce_only=True)
+
+    order = _run(open_long, close_more)
+
+    assert_order_ends(
+        order, case=OrderEnd.REDUCE_ONLY_CUT, filled=Decimal("0.3"), name="PaperExchange"
     )
