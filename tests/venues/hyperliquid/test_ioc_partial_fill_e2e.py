@@ -8,6 +8,7 @@ PARTIALLY_FILLED forever and the strategy waits on it.
 """
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 
 from hyperliquid_fakes import (
@@ -16,6 +17,7 @@ from hyperliquid_fakes import (
     fill_entry,
     filled_response,
     order_status_response,
+    resting_response,
 )
 from ledgers import checkpointer
 from pydantic import SecretStr
@@ -163,4 +165,35 @@ def test_reconcile_ends_a_market_order_filled_in_part_once_two_passes_read_the_s
     order = _run(MARKET_BUY, post, passes=2)
 
     assert order.state is OrderState.CANCELLED
+    assert order.cum_qty == Decimal("0.00008")
+
+
+def test_a_gtc_order_the_venue_calls_filled_stays_open_while_its_fills_read_short() -> None:
+    # A GTC order the venue calls `filled` filled in full. If our fills read is
+    # short, a fill is missing, not dropped. Ending the saga would lose that
+    # fill for good, because reconcile stops watching a terminal saga. So only
+    # reduce-only and IOC orders may end short.
+    gtc_buy = replace(
+        MARKET_BUY,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("104000"),
+    )
+    post = FakeExchangeApi(
+        {
+            "order": resting_response(oid=91),
+            "orderStatus": order_status_response(
+                cloid=derive_cloid(gtc_buy.signal_id),
+                status="filled",
+                oid=91,
+                placed_ms=ACK_MS,
+                tif="Gtc",
+            ),
+            "userFillsByTime": [PART_FILL],
+        }
+    )
+
+    order = _run(gtc_buy, post, passes=3)
+
+    assert order.state is OrderState.PARTIALLY_FILLED
     assert order.cum_qty == Decimal("0.00008")
