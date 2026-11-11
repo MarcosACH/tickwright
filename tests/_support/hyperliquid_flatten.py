@@ -257,7 +257,7 @@ def run_flatten(
         post=post if transport is None else transport(post),
         connect=idle_ws,
         startup_timeout_seconds=60.0,
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
     )
     socket = FakeWsConnection(frames)
     used = SQLiteStore(store)

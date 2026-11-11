@@ -110,7 +110,7 @@ def make_exchange(
         startup_timeout_seconds=60.0,
         # The engine's open-order interval at its default. A shrunk order's
         # fill total must hold this long before its cut part ends (#478).
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
     )
 
 

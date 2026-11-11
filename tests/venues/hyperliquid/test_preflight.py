@@ -176,7 +176,7 @@ def _exchange(
         # and this suite is about the HTTP guards ahead of it.
         connect=idle_ws,
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
         leverage=leverage,
     )
 
@@ -1109,7 +1109,7 @@ def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
         ),
         post=FakeExchangeApi({"userAbstraction": "disabled"}),
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
         leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=50)}),
     )
 

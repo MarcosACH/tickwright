@@ -188,7 +188,7 @@ def _cancel_all(
         post=post,
         connect=idle_ws,
         startup_timeout_seconds=60.0,
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
     )
     # The engine that placed the order also opened the account row (ADR-0052).
     store.checkpoint_ledger(

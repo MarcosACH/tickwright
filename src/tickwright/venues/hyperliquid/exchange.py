@@ -127,7 +127,7 @@ class HyperliquidExchange:
         clock: Clock,
         universe: HyperliquidUniverse,
         startup_timeout_seconds: float,
-        shrink_wait_seconds: float,
+        cut_part_wait_seconds: float,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         post: PostJson | None = None,
         connect: Connect = open_websocket,
@@ -176,7 +176,7 @@ class HyperliquidExchange:
         # The wait is the engine's open-order interval, handed down by the
         # composition root (#478).
         self._cut_part_wait = CutPartWait(
-            clock=clock, wait_ns=duration_ns(shrink_wait_seconds, name="shrink_wait_seconds")
+            clock=clock, wait_ns=duration_ns(cut_part_wait_seconds, name="cut_part_wait_seconds")
         )
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.

@@ -83,7 +83,7 @@ def _stop_during_outage(tmp_path: Path, venue: VenueDarkOn) -> tuple[int, Engine
                 post=venue,
                 connect=idle_ws,
                 startup_timeout_seconds=60.0,
-                shrink_wait_seconds=30.0,
+                cut_part_wait_seconds=30.0,
             ),
             feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
         )

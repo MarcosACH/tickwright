@@ -122,7 +122,7 @@ def _place_then_reconcile(
             post=post,
             startup_timeout_seconds=60.0,
             # What the composition root hands it: the engine's open-order interval.
-            shrink_wait_seconds=config.open_order_interval_seconds,
+            cut_part_wait_seconds=config.open_order_interval_seconds,
         )
         store = SQLiteStore(":memory:")
         checks = checkpointer(store, clock=clock)

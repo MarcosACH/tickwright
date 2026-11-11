@@ -77,7 +77,7 @@ def make_exchange(
         post=post,
         connect=connect,
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
-        shrink_wait_seconds=30.0,
+        cut_part_wait_seconds=30.0,
     )
 
 

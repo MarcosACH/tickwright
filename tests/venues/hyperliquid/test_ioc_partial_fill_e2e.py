@@ -88,7 +88,7 @@ def _run(signal: PlaceSignal, post: FakeExchangeApi, *, passes: int = 0) -> Orde
             universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
             post=post,
             startup_timeout_seconds=60.0,
-            shrink_wait_seconds=config.open_order_interval_seconds,
+            cut_part_wait_seconds=config.open_order_interval_seconds,
         )
         # A market order is priced from the latest trade and mark (ADR-0059).
         await exchange.on_tick(
