@@ -1063,6 +1063,11 @@ def _order_state(status: str) -> OrderState:
             return OrderState.LIVE
         case "filled":
             return OrderState.FILLED
+        case "iocCancelRejected":
+            # An IOC order that matched nothing. The venue names it a reject,
+            # but nothing was refused. It ends CANCELLED, as it does when
+            # placement reads the answer (_IOC_NO_MATCH, ADR-0007, #632).
+            return OrderState.CANCELLED
         case _ if status.endswith(("anceled", "ancel")):
             return OrderState.CANCELLED
         case _ if status.endswith("ejected"):
