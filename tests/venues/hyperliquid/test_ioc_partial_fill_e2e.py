@@ -1,0 +1,138 @@
+"""An IOC order the venue fills only in part, end to end (issue #629): the real
+``ExecutionManager`` and ``Reconciler`` against the real ``HyperliquidExchange``,
+with only the HTTP transport fake.
+
+The venue drops the part an IOC order could not fill and answers `filled`. A
+`filled` report moves no saga, so without an explicit end the saga stays
+PARTIALLY_FILLED forever and the strategy waits on it.
+"""
+
+import asyncio
+from decimal import Decimal
+
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    fill_entry,
+    filled_response,
+)
+from ledgers import checkpointer
+from pydantic import SecretStr
+
+from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.store import SQLiteStore
+from tickwright.domain import (
+    ExecutionReport,
+    InstrumentSpec,
+    MarketTick,
+    MarkTick,
+    Order,
+    OrderState,
+    OrderType,
+    PlaceSignal,
+    Side,
+    TimeInForce,
+    derive_cloid,
+)
+from tickwright.domain.enums import AggressorSide
+from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
+from tickwright.venues.hyperliquid import (
+    HyperliquidConfig,
+    HyperliquidExchange,
+    HyperliquidUniverse,
+)
+
+BTC_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=5,
+    max_decimals=6,
+    min_notional=Decimal("10"),
+    max_sig_figs=5,
+)
+
+ACK_MS = 1_700_000_060_000
+FILL_MS = ACK_MS + 5
+NS = ACK_MS * 1_000_000
+
+# The soak's cycle 1604: a market buy of 0.00015 BTC, of which 0.00008 filled.
+MARKET_BUY = PlaceSignal(
+    ts_event=NS,
+    ts_init=NS,
+    strategy_id="live",
+    symbol="BTC",
+    seq=1,
+    side=Side.BUY,
+    quantity=Decimal("0.00015"),
+    order_type=OrderType.MARKET,
+    time_in_force=TimeInForce.IOC,
+)
+PART_FILL = fill_entry(oid=91, tid=556, px="104000.0", sz="0.00008", time=FILL_MS)
+
+
+def _run(signal: PlaceSignal, post: FakeExchangeApi, *, passes: int = 0) -> Order:
+    async def main() -> Order:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=NS)
+        config = ReconcileConfig()
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+            ),
+            bus=bus,
+            clock=clock,
+            universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
+            post=post,
+            startup_timeout_seconds=60.0,
+            shrink_wait_seconds=config.open_order_interval_seconds,
+        )
+        # A market order is priced from the latest trade and mark (ADR-0059).
+        await exchange.on_tick(
+            MarketTick(
+                symbol="BTC",
+                price=Decimal("104000"),
+                size=Decimal("1"),
+                aggressor_side=AggressorSide.BUY,
+                trade_id="1",
+                seq=0,
+                venue_trade_id=True,
+                ts_event=NS,
+                ts_init=NS,
+            )
+        )
+        await exchange.on_mark(
+            MarkTick(symbol="BTC", price=Decimal("104000"), ts_event=NS, ts_init=NS)
+        )
+        store = SQLiteStore(":memory:")
+        checks = checkpointer(store, clock=clock)
+        manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
+        bus.subscribe(ExecutionReport, manager.on_execution_report)
+        await manager.on_signal(signal)
+        reconciler = Reconciler(
+            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=config
+        )
+        for _ in range(passes):
+            clock.advance_to(
+                clock.timestamp_ns() + int(config.open_order_interval_seconds * 1_000_000_000)
+            )
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
+        order = store.get_order(derive_cloid(signal.signal_id))
+        assert order is not None
+        return order
+
+    return asyncio.run(main())
+
+
+def test_a_market_order_filled_in_part_ends_cancelled_at_placement() -> None:
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.00008", avg_px="104000.0"),
+            "userFills": [PART_FILL],
+        }
+    )
+
+    order = _run(MARKET_BUY, post)
+
+    assert order.state is OrderState.CANCELLED
+    assert order.cum_qty == Decimal("0.00008")

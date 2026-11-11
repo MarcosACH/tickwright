@@ -428,10 +428,15 @@ class HyperliquidExchange:
                 # reported. A read still short after its retries leaves the saga
                 # open for reconcile.
                 if filled == total_sz and _shrunk(
-                    reduce_only=order.reduce_only, asked=order.quantity, filled=filled
+                    reduce_only=order.reduce_only,
+                    ioc=self._wire_tif(order) == "Ioc",
+                    asked=order.quantity,
+                    filled=filled,
                 ):
                     await self._bus.publish(
-                        self._end_shrunk(cloid=order.cloid, symbol=order.symbol)
+                        self._end_shrunk(
+                            cloid=order.cloid, symbol=order.symbol, reduce_only=order.reduce_only
+                        )
                     )
             case unreachable:
                 # An adjudication the reader can produce and this cannot carry
@@ -663,14 +668,19 @@ class HyperliquidExchange:
         if (
             record.state is OrderState.FILLED
             and ref.quantity is not None
-            and _shrunk(reduce_only=record.reduce_only, asked=ref.quantity, filled=filled)
+            and _shrunk(
+                reduce_only=record.reduce_only, ioc=False, asked=ref.quantity, filled=filled
+            )
             and self._fills_settled(ref.cloid, filled, seen=seen)
         ):
             # The venue answers `filled` for an order it shrank, and a FILLED
             # report moves no saga. The cut part ends CANCELLED, as it does
             # when the fills read at placement works (ADR-0057).
             status = self._end_shrunk(
-                cloid=ref.cloid, symbol=record.coin, venue_oid=str(record.oid)
+                cloid=ref.cloid,
+                symbol=record.coin,
+                reduce_only=record.reduce_only,
+                venue_oid=str(record.oid),
             )
             return VenueOrderView(status=status, fills=tuple(fills))
         status = self._status_report(
@@ -679,7 +689,7 @@ class HyperliquidExchange:
         return VenueOrderView(status=status, fills=tuple(fills))
 
     def _end_shrunk(
-        self, *, cloid: str, symbol: str, venue_oid: str | None = None
+        self, *, cloid: str, symbol: str, reduce_only: bool, venue_oid: str | None = None
     ) -> OrderStatusReport:
         """The CANCELLED that ends a shrunk order's cut part (ADR-0057).
 
@@ -693,7 +703,7 @@ class HyperliquidExchange:
             symbol=symbol,
             status=OrderState.CANCELLED,
             venue_oid=venue_oid,
-            reason="reduce-only shrink",
+            reason="reduce-only shrink" if reduce_only else "ioc remainder",
         )
 
     def _fills_settled(
@@ -1014,7 +1024,7 @@ def _placed_before(record: "_OrderRecord", *, created_ts_ns: int | None) -> bool
     return record.timestamp < created_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
 
 
-def _shrunk(*, reduce_only: bool, asked: Decimal, filled: Decimal) -> bool:
+def _shrunk(*, reduce_only: bool, ioc: bool, asked: Decimal, filled: Decimal) -> bool:
     """Whether the venue shrank a reduce-only order: the order is done, yet it
     filled less than the saga asked for (ADR-0057).
 
@@ -1022,7 +1032,7 @@ def _shrunk(*, reduce_only: bool, asked: Decimal, filled: Decimal) -> bool:
     holds every fill, and that proof differs. Placement has the venue's own
     ``totalSz``. Reconcile waits for the total to hold (``_fills_settled``).
     """
-    return reduce_only and filled < asked
+    return (reduce_only or ioc) and filled < asked
 
 
 def _fill_total(fills: Sequence[FillReport]) -> Decimal:
