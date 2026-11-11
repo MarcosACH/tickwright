@@ -5,11 +5,12 @@ called by the adapter's own suite: ``seam_claims`` for a claim per member,
 ``feed_contract`` for the mark a feed owes, ``lifecycle_contract`` for going
 quiet once stopped, and ``exchange_contract`` for how an exchange ends an
 order. The last is owed once per ``OrderEnd`` case (#632). Every one of them
-is real on the adapters that call it and blind to an adapter that does not. A third venue that shipped a feed, an
-exchange, a config and a suite that never imported ``_support`` was green on
-the whole merge gate while asserting none of it (#303). ``docs/extending.md``
-carried the obligation as a checklist, which is the instrument #227 already
-found insufficient for the mark.
+is real on the adapters that call it and blind to an adapter that does not.
+A third venue that shipped a feed, an exchange, a config and a suite that
+never imported ``_support`` was green on the whole merge gate while asserting
+none of it (#303). ``docs/extending.md`` carried the obligation as a
+checklist, which is the instrument #227 already found insufficient for the
+mark.
 
 **What is discovered is the config, not the tree.** ``AppConfig.feed`` and
 ``AppConfig.exchange`` are closed ``Literal``s, and an adapter not named there
