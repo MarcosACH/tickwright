@@ -302,7 +302,9 @@ class Reconciler:
             if not isinstance(entry, VenueOpenOrder):
                 continue
             order = self._cache.get_order(entry.cloid)
-            if order is None or not order.is_terminal:
+            # A DENIED saga never sent its place, so a venue order under that
+            # cloid is not ours. It is an external order, and we never touch it.
+            if order is None or not order.is_terminal or order.state is OrderState.DENIED:
                 continue
             with operation(cloid=order.cloid):
                 view = await self._exchange.fetch_order(OrderRef.of(order))

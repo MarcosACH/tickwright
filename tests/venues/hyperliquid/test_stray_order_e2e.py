@@ -13,6 +13,7 @@ open-order cycle finds it and cancels it, and the saga stays terminal
 import asyncio
 from decimal import Decimal
 
+import pytest
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -29,6 +30,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     ExecutionReport,
     InstrumentSpec,
+    Order,
     OrderState,
     OrderType,
     PlaceSignal,
@@ -154,3 +156,81 @@ def test_an_order_the_venue_accepts_after_the_saga_failed_is_cancelled() -> None
     assert len(strays) == 1
     assert strays[0]["saga_state"] == OrderState.FAILED.value
     assert strays[0]["venue_oid"] == str(STRAY_OID)
+
+
+def _one_open_order_pass(state: OrderState) -> tuple[FakeExchangeApi, PassResult, list[dict]]:
+    """One open-order pass over a saga in ``state`` while the venue rests its cloid."""
+    signal = _signal()
+    cloid = derive_cloid(signal.signal_id)
+
+    async def main() -> tuple[FakeExchangeApi, PassResult]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=(LANDED_MS + 30_000) * 1_000_000)
+        post = FakeExchangeApi(
+            {
+                "orderStatus": order_status_response(
+                    cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS
+                ),
+                "userFillsByTime": [],
+                "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": cloid}],
+                "cancel": {
+                    "status": "ok",
+                    "response": {"type": "cancel", "data": {"statuses": ["success"]}},
+                },
+            }
+        )
+        exchange = _make_exchange(post, bus, clock)
+        store = SQLiteStore(":memory:")
+        saga = Order(
+            cloid=cloid,
+            strategy_id=signal.strategy_id,
+            signal_id=signal.signal_id,
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=signal.quantity,
+            order_type=OrderType.LIMIT,
+            state=state,
+            created_ts_ns=SENT_MS * 1_000_000,
+        )
+        store.checkpoint(saga, ts_ns=SENT_MS * 1_000_000)
+        checks = checkpointer(store, clock=clock)
+        checks.cache.rebuild()
+        reconciler = Reconciler(
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=checks.cache,
+            config=ReconcileConfig(),
+        )
+        return post, await reconciler.reconcile_open_orders()
+
+    with capture_events() as events:
+        post, result = asyncio.run(main())
+    cancels = [
+        q["action"]["cancels"] for url, q in post.requests if request_type(url, q) == "cancel"
+    ]
+    return (
+        post,
+        result,
+        [*cancels, *(e for e in events if e["event"] == "reconcile.stray_cancelled")],
+    )
+
+
+@pytest.mark.parametrize("state", [OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED])
+def test_an_order_resting_under_any_sent_terminal_saga_is_cancelled(state: OrderState) -> None:
+    # The saga reached the venue, so a resting order under its cloid is ours.
+    _, result, seen = _one_open_order_pass(state)
+
+    assert result is PassResult.PROVED
+    cancel, stray = seen
+    assert cancel == [{"a": 3, "o": STRAY_OID}]
+    assert stray["saga_state"] == state.value
+
+
+def test_an_order_under_a_denied_cloid_is_external_and_not_cancelled() -> None:
+    # A DENIED saga never left the engine, so the venue order is not ours to cancel.
+    _, result, seen = _one_open_order_pass(OrderState.DENIED)
+
+    assert result is PassResult.PROVED
+    assert seen == []
