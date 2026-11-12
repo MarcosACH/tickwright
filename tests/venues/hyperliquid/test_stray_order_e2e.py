@@ -158,19 +158,27 @@ def test_an_order_the_venue_accepts_after_the_saga_failed_is_cancelled() -> None
     assert strays[0]["venue_oid"] == str(STRAY_OID)
 
 
-def _one_open_order_pass(state: OrderState) -> tuple[FakeExchangeApi, PassResult, list[dict]]:
-    """One open-order pass over a saga in ``state`` while the venue rests its cloid."""
+def _one_open_order_pass(
+    state: OrderState, *, status: str = "open"
+) -> tuple[FakeExchangeApi, PassResult, list[dict]]:
+    """One open-order pass over a saga in ``state`` while the venue lists its cloid.
+
+    ``status`` is what the confirm read by the saga's own ref answers.
+    """
     signal = _signal()
     cloid = derive_cloid(signal.signal_id)
+    confirm = (
+        {"status": "unknownOid"}
+        if status == "unknownOid"
+        else order_status_response(cloid=cloid, status=status, oid=STRAY_OID, placed_ms=LANDED_MS)
+    )
 
     async def main() -> tuple[FakeExchangeApi, PassResult]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=(LANDED_MS + 30_000) * 1_000_000)
         post = FakeExchangeApi(
             {
-                "orderStatus": order_status_response(
-                    cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS
-                ),
+                "orderStatus": confirm,
                 "userFillsByTime": [],
                 "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": cloid}],
                 "cancel": {
@@ -231,6 +239,16 @@ def test_an_order_resting_under_any_sent_terminal_saga_is_cancelled(state: Order
 def test_an_order_under_a_denied_cloid_is_external_and_not_cancelled() -> None:
     # A DENIED saga never left the engine, so the venue order is not ours to cancel.
     _, result, seen = _one_open_order_pass(OrderState.DENIED)
+
+    assert result is PassResult.PROVED
+    assert seen == []
+
+
+@pytest.mark.parametrize("status", ["filled", "canceled", "unknownOid"])
+def test_no_cancel_when_the_confirm_read_says_the_order_no_longer_rests(status: str) -> None:
+    # The list is a snapshot and can be stale by the time we act on it. The
+    # confirm read is the proof, so an order it says is gone gets no cancel.
+    _, result, seen = _one_open_order_pass(OrderState.FAILED, status=status)
 
     assert result is PassResult.PROVED
     assert seen == []
