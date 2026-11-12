@@ -379,15 +379,17 @@ class _SlowSendExchange(VenueLink):
     land, like the slow testnet POST of #640. A network boundary is the one
     place a double is allowed."""
 
-    def __init__(self, venue: PaperExchange) -> None:
+    def __init__(self, venue: PaperExchange, *, delivers: bool = True) -> None:
         super().__init__(venue)
+        self._delivers = delivers
         self.sending = asyncio.Event()
         self.land = asyncio.Event()
 
     async def place(self, order: PlaceOrder) -> None:
         self.sending.set()
         await self.land.wait()
-        await self._venue.place(order)
+        if self._delivers:
+            await self._venue.place(order)
 
 
 async def _let_cadences_run() -> None:
@@ -395,45 +397,52 @@ async def _let_cadences_run() -> None:
         await asyncio.sleep(0)
 
 
+def _slow_send_engine(
+    tmp_path: Path, *, delivers: bool
+) -> tuple[Engine, ManualClock, InMemoryBus, _SlowSendExchange]:
+    """An engine whose strategy places one resting BUY at t=1, through a send
+    the test holds open. The saga store is ``tmp_path / "saga.db"``."""
+    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
+    bus = InMemoryBus()
+    clock = ManualClock()
+    venue = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=lambda cloid: (),
+        resting_orders=list,
+    )
+    link = _SlowSendExchange(venue, delivers=delivers)
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(tmp_path / "saga.db"),
+        exchange=link,
+        feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        config=EngineConfig(reconcile=ReconcileConfig()),
+    )
+    strategy = SingleShotLimitStrategy(
+        emitter=engine.emitter_for("trivial"),
+        portfolio=engine.portfolio_for("trivial"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),  # rests below the 42000 print
+        ),
+    )
+    engine.register(strategy, symbols={"BTC"})
+    return engine, clock, bus, link
+
+
 def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> None:
     """#640: the venue accepted an order 15.3 s after the send began, and the
     in-flight pass had already called it ``FAILED`` after three empty reads. A
     "no record" read while the send is open is not proof the send failed."""
-    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
-    db = tmp_path / "saga.db"
 
     async def main() -> list[OrderEvent]:
-        bus = InMemoryBus()
-        clock = ManualClock()
-        venue = PaperExchange(
-            bus=bus,
-            clock=clock,
-            fill_model=ImmediateFillModel(),
-            genesis_collateral=GENESIS,
-            account_net=dict,
-            applied_fills=lambda cloid: (),
-            resting_orders=list,
-        )
-        link = _SlowSendExchange(venue)
-        engine = Engine(
-            bus=bus,
-            clock=clock,
-            store=SQLiteStore(db),
-            exchange=link,
-            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
-            config=EngineConfig(reconcile=ReconcileConfig()),
-        )
-        strategy = SingleShotLimitStrategy(
-            emitter=engine.emitter_for("trivial"),
-            portfolio=engine.portfolio_for("trivial"),
-            settings=SingleShotLimitStrategy.Settings(
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
-                price=Decimal("41000"),  # rests below the 42000 print
-            ),
-        )
-        engine.register(strategy, symbols={"BTC"})
-
+        engine, clock, bus, link = _slow_send_engine(tmp_path, delivers=True)
         events: list[OrderEvent] = []
         live = asyncio.Event()
 
@@ -460,10 +469,54 @@ def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> 
     events = asyncio.run(main())
 
     assert not any(isinstance(ev, OrderFailed) for ev in events)
-    reopened = SQLiteStore(db)
+    reopened = SQLiteStore(tmp_path / "saga.db")
     try:
         order = reopened.get_order(_CLOID)
         assert order is not None
         assert order.state is OrderState.LIVE
     finally:
         reopened.close()
+
+
+def test_a_send_that_returned_with_no_record_still_fails_after_the_budget(
+    tmp_path: Path,
+) -> None:
+    """The other half of #640: the budget waits for the send, but it still
+    ends. Here the send returns at t=12 and the venue never got the order. The
+    three misses count from the reads at t=16, 21 and 26."""
+
+    async def main() -> list[OrderEvent]:
+        engine, clock, bus, link = _slow_send_engine(tmp_path, delivers=False)
+        events: list[OrderEvent] = []
+        failed = asyncio.Event()
+
+        async def record(event: OrderEvent) -> None:
+            events.append(event)
+            if isinstance(event, OrderFailed):
+                failed.set()
+
+        bus.subscribe(OrderEvent, record)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(link.sending.wait(), timeout=5)
+        for t in (6, 11):
+            clock.advance_to(t * _NS)
+            await _let_cadences_run()
+        clock.advance_to(12 * _NS)
+        link.land.set()
+        await _let_cadences_run()
+        for t in (16, 21, 26):
+            clock.advance_to(t * _NS)
+            await _let_cadences_run()
+        await asyncio.wait_for(failed.wait(), timeout=5)
+        await engine.stop()
+        await run
+        return events
+
+    events = asyncio.run(main())
+
+    (verdict,) = [ev for ev in events if isinstance(ev, OrderFailed)]
+    assert verdict.reconciliation
+    # The third miss after the send ended. Misses during the send would
+    # have failed it at t=16.
+    assert verdict.ts_event == 26 * _NS
