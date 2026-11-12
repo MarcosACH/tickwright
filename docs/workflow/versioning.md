@@ -150,3 +150,11 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   oracle rejects for up to 5 minutes (#619). The README warns that a custom entrypoint drops
   `tini` (#625). Runtime bumps: `aiokafka` 0.15.0 and `websockets` 17.4. Bump PR backed by
   #626.
+- **v0.8.1** (2026-11-11). Fixes from the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. Hyperliquid now ends an IOC order it fills
+  only in part, so the strategy no longer stalls (#629). A Hyperliquid IOC order that matches
+  nothing now ends `CANCELLED`, not `REJECTED`, the same as paper (#632). A shared test now fails
+  when two venues end the same order differently (#632). Flatten logs a wait for a verdict. It
+  waits at least 5 minutes for one. Then it gives up after 3 more passes and ends `stopped`, so
+  it no longer waits forever (#630). A hung `ci` job stops after 30 minutes, and an `image` job after 15 (#634). Bump PR
+  backed by #637.
