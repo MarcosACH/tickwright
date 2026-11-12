@@ -167,6 +167,8 @@ is one call that a venue can send as one batch (ADR-0055).
 Since #478 the ref also carries the size the saga asked for. A venue that shrank a reduce-only
 order reports it `filled` for less, and only the asked size shows the cut part (ADR-0057).
 Since #629 an IOC order the venue filled only in part reads the same way.
+Since #642 the Reconciler also sends on it, to cancel a [[Stray order]]. That cancel writes no
+saga, so the [[ExecutionManager]] stays the one saga writer.
 Since #468 `fetch_open_orders()` lists every order resting in the account, ours or not. Paper
 answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
@@ -412,6 +414,22 @@ with a single verdict — protected, waiting, or [[Ghost|ghost]]. A pure decisio
 clock, or telemetry) composing the grace-window tracker, so the "is it a ghost yet?" timing rule
 reads in one place rather than smeared across the reconciler. See ADR-0011.
 _Avoid_: throttle, filter (too generic — this is the specific two-phase ghost-timing rule).
+
+**Stray order**:
+A venue order that rests under a cloid whose saga is terminal, any terminal but `DENIED`. It is
+the opposite of a [[Ghost]]: the venue works an order the books call finished. A late send can
+make one, for example a send from a previous life that lands after boot resolved it `FAILED`.
+The open-order cycle finds it and cancels it by oid. The saga stays terminal, and its fills are
+logged but never booked. [[Ledger reconciliation]] books any position it left as unattributed
+(#642).
+_Avoid_: orphan, stale order, zombie order.
+
+**External order**:
+A venue order the engine did not place. Its cloid is unknown to the books, or its record is older
+than the saga that holds the same cloid (invariant 12). A `DENIED` saga's cloid on the venue is
+external too, since that saga never sent. The engine logs it and never acts on it. Only an
+operator `cancel-all` or `flatten` may cancel it. See ADR-0011, ADR-0052.
+_Avoid_: foreign order, unknown order.
 
 **Synthetic event**:
 A lifecycle [[Event]] the reconciler generates (a healed fill, a ghost rejection) rather than
