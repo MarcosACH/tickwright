@@ -70,6 +70,10 @@ from .ghost_gate import GhostGate, GhostVerdict
 # cycle reads the domain's ``WORKING_STATES``.
 _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
 
+# The unreadable span's key for the account's open-order list. It shares the
+# per-cloid window, and a cloid is a 0x hex string, so the two never collide.
+_ACCOUNT_LIST_KEY = "account:open_orders"
+
 
 class _FreezeScope(Enum):
     """How much of a pass one failed read froze (ADR-0049) — the ``scope`` field
@@ -310,8 +314,10 @@ class Reconciler:
             case VenueReadFailure.RATE_LIMITED_IP:
                 self._freeze(_FreezeScope.CYCLE)
                 return PassResult.RATE_LIMITED
-            case VenueReadFailure():
+            case VenueReadFailure.UNREADABLE_BODY:
+                self._charge_unreadable_list()
                 return PassResult.FAILED
+        self._unreadable_run.record_present(_ACCOUNT_LIST_KEY)
         for entry in listed:
             if isinstance(entry, ExternalOrderRef):
                 # No cloid at all, so placed by hand or by another client.
@@ -510,6 +516,26 @@ class Reconciler:
             f"{self._config.unreadable_grace_seconds}s: the condition is durable "
             "and no later pass can resolve it — see the exchange.request_failed "
             "reads for this cloid, each quoting the body"
+        )
+
+    def _charge_unreadable_list(self) -> None:
+        """Hold one unreadable open-order list against the account's span, as
+        ``_charge_unreadable`` does for one order (ADR-0049).
+
+        It freezes the whole cycle, since no entry in the list was read. Past
+        the span it faults. A pass that never reads the list never sees a
+        stray order again, and only an operator can fix a durable condition.
+        """
+        if not self._unreadable_run.record_absent(
+            _ACCOUNT_LIST_KEY, now_ns=self._clock.timestamp_ns()
+        ):
+            self._freeze(_FreezeScope.CYCLE)
+            return
+        raise VenueReadUnresolvable(
+            f"venue open order list continuously unreadable across "
+            f"{self._config.unreadable_grace_seconds}s: the condition is durable "
+            "and no later pass can resolve it. See the exchange.request_failed "
+            "reads for frontendOpenOrders, each quoting the body"
         )
 
     def _freeze(self, scope: "_FreezeScope") -> None:

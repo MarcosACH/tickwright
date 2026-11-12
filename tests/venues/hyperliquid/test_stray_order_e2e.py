@@ -37,6 +37,7 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     TimeInForce,
+    VenueReadUnresolvable,
     derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
@@ -169,6 +170,7 @@ def _open_order_passes(
     fills: list[dict] | None = None,
     passes: int = 1,
     open_orders: object = None,
+    interval_seconds: int = 0,
 ) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
 
@@ -176,7 +178,8 @@ def _open_order_passes(
     saga's own ref answers with, and ``fills`` its fill history. The listed
     order carries the saga's cloid, unless ``listed_cloid`` names another one.
     An empty string lists it with no cloid at all, as an order placed by hand.
-    ``open_orders`` replaces the list answer, such as with a failure.
+    ``open_orders`` replaces the list answer, such as with a failure. The clock
+    moves ``interval_seconds`` after each pass, as the cadence would.
 
     Returns the saga as stored after the passes, each pass result, and the
     cancels sent followed by the stray, external and frozen log lines.
@@ -228,7 +231,11 @@ def _open_order_passes(
             cache=checks.cache,
             config=ReconcileConfig(),
         )
-        return store, post, [await reconciler.reconcile_open_orders() for _ in range(passes)]
+        results = []
+        for _ in range(passes):
+            results.append(await reconciler.reconcile_open_orders())
+            clock.advance_to(clock.timestamp_ns() + interval_seconds * 1_000_000_000)
+        return store, post, results
 
     with capture_events() as events:
         store, post, results = asyncio.run(main())
@@ -337,6 +344,50 @@ def test_a_failed_list_read_freezes_the_pass(failure: Exception, expected: PassR
     [frozen] = seen
     assert (frozen["event"], frozen["scope"]) == ("reconcile.frozen", "cycle")
     assert saga is not None and saga.state is OrderState.FAILED
+
+
+UNREADABLE_LIST = {"error": "not a list"}
+"""A list answer the adapter cannot read, as a truncated or changed response."""
+
+
+def test_a_list_unreadable_across_the_span_faults_the_engine() -> None:
+    # One unreadable list may be a truncated response. A list unreadable for
+    # the whole 90s span is durable, and only an operator can resolve it. Left
+    # alone, the engine would never see a stray order again (ADR-0049).
+    saga, results, seen = _open_order_passes(
+        OrderState.FAILED, open_orders=UNREADABLE_LIST, passes=3, interval_seconds=30
+    )
+
+    # Passes at 0s, 30s and 60s: frozen, not yet faulted.
+    assert results == [PassResult.FAILED] * 3
+    assert [(e["event"], e["scope"]) for e in seen] == [("reconcile.frozen", "cycle")] * 3
+    assert saga is not None and saga.state is OrderState.FAILED
+
+    # The pass at 90s spends the span.
+    with pytest.raises(VenueReadUnresolvable, match="open order list"):
+        _open_order_passes(
+            OrderState.FAILED, open_orders=UNREADABLE_LIST, passes=4, interval_seconds=30
+        )
+
+
+def test_a_readable_list_restarts_the_unreadable_span() -> None:
+    # The span counts continuous unreadable time. A list read in between
+    # proves the condition passed, so the clock starts again from the next one.
+    listed = [{"coin": "BTC", "oid": STRAY_OID, "cloid": None}]
+    answers = answers_in_turn(UNREADABLE_LIST, UNREADABLE_LIST, listed, UNREADABLE_LIST)
+
+    _, results, _ = _open_order_passes(
+        OrderState.FAILED, open_orders=answers, passes=5, interval_seconds=30
+    )
+
+    # Unreadable at 0s and 30s, read at 60s, unreadable again from 90s.
+    assert results == [
+        PassResult.FAILED,
+        PassResult.FAILED,
+        PassResult.PROVED,
+        PassResult.FAILED,
+        PassResult.FAILED,
+    ]
 
 
 def test_an_earlier_lifes_order_is_logged_once_across_passes() -> None:
