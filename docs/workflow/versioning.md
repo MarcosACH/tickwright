@@ -155,6 +155,6 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   only in part, so the strategy no longer stalls (#629). A Hyperliquid IOC order that matches
   nothing now ends `CANCELLED`, not `REJECTED`, the same as paper (#632). A shared test now fails
   when two venues end the same order differently (#632). Flatten logs a wait for a verdict. It
-  gives up after 3 passes with no verdict and ends `stopped`, so it no longer waits forever
-  (#630). A hung `ci` job stops after 30 minutes, and an `image` job after 15 (#634). Bump PR
+  waits at least 5 minutes for one. Then it gives up after 3 more passes and ends `stopped`, so
+  it no longer waits forever (#630). A hung `ci` job stops after 30 minutes, and an `image` job after 15 (#634). Bump PR
   backed by #637.
