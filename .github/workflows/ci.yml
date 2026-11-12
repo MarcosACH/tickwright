@@ -39,9 +39,9 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    # A run takes 3 to 7 minutes. GitHub can lose a finished run's state and then
-    # refuse to cancel it. That lost run holds the concurrency group, so the next
-    # run waits for the 360-minute default. This cap bounds the wait (issue #634).
+    # A run takes 3 to 7 minutes. A job that hangs would otherwise hold the branch's
+    # concurrency group for the 360-minute default. The cap does not help a run that
+    # GitHub leaves in `queued`, because no job is running to stop (issue #634).
     timeout-minutes: 30
 
     # Mirrors the `postgres` service in docker-compose.yml — same image tag and

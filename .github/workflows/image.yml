@@ -30,9 +30,9 @@ permissions:
 jobs:
   image:
     runs-on: ubuntu-latest
-    # A run takes 1 to 3 minutes. A lost pull request run holds its concurrency
-    # group, so the next run waits for the 360-minute default. This cap bounds
-    # the wait (issue #634).
+    # A run takes 1 to 3 minutes. A job that hangs would otherwise hold its pull
+    # request concurrency group for the 360-minute default. The cap does not help a
+    # run that GitHub leaves in `queued`, because no job is running to stop (#634).
     timeout-minutes: 15
     permissions:
       contents: read
