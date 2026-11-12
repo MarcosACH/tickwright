@@ -27,10 +27,13 @@ from tickwright.domain import (
     ComponentState,
     MarketTick,
     OrderEvent,
+    OrderFailed,
     OrderFilled,
+    OrderLive,
     OrderRef,
     OrderRejected,
     OrderState,
+    PlaceOrder,
     Side,
     VenueOrderView,
     VenueReadFailure,
@@ -369,3 +372,98 @@ def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) ->
     # It escalated rather than freezing forever: the budget's freezes are there,
     # bounded by it, and never a fourth cycle's.
     assert len([log for log in logs if log["event"] == "reconcile.frozen"]) == 2
+
+
+class _SlowSendExchange(VenueLink):
+    """A venue whose place request stays on the wire until the test lets it
+    land, like the slow testnet POST of #640. A network boundary is the one
+    place a double is allowed."""
+
+    def __init__(self, venue: PaperExchange) -> None:
+        super().__init__(venue)
+        self.sending = asyncio.Event()
+        self.land = asyncio.Event()
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.sending.set()
+        await self.land.wait()
+        await self._venue.place(order)
+
+
+async def _let_cadences_run() -> None:
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> None:
+    """#640: the venue accepted an order 15.3 s after the send began, and the
+    in-flight pass had already called it ``FAILED`` after three empty reads. A
+    "no record" read while the send is open is not proof the send failed."""
+    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
+    db = tmp_path / "saga.db"
+
+    async def main() -> list[OrderEvent]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        venue = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+            resting_orders=list,
+        )
+        link = _SlowSendExchange(venue)
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=link,
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+            config=EngineConfig(reconcile=ReconcileConfig()),
+        )
+        strategy = SingleShotLimitStrategy(
+            emitter=engine.emitter_for("trivial"),
+            portfolio=engine.portfolio_for("trivial"),
+            settings=SingleShotLimitStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),  # rests below the 42000 print
+            ),
+        )
+        engine.register(strategy, symbols={"BTC"})
+
+        events: list[OrderEvent] = []
+        live = asyncio.Event()
+
+        async def record(event: OrderEvent) -> None:
+            events.append(event)
+            if isinstance(event, OrderLive):
+                live.set()
+
+        bus.subscribe(OrderEvent, record)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(link.sending.wait(), timeout=5)
+        # Five in-flight deadlines pass with the send still open. The default
+        # budget is three reads, so the old engine gave up at the third.
+        for t in (6, 11, 16, 21, 26):
+            clock.advance_to(t * _NS)
+            await _let_cadences_run()
+        link.land.set()
+        await asyncio.wait_for(live.wait(), timeout=5)
+        await engine.stop()
+        await run
+        return events
+
+    events = asyncio.run(main())
+
+    assert not any(isinstance(ev, OrderFailed) for ev in events)
+    reopened = SQLiteStore(db)
+    try:
+        order = reopened.get_order(_CLOID)
+        assert order is not None
+        assert order.state is OrderState.LIVE
+    finally:
+        reopened.close()

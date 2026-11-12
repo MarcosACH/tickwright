@@ -348,12 +348,19 @@ class ExecutionManager:
         self._checkpointer.checkpoint(order)
         await self._announce(self._event(OrderPlaced, order))
 
-        submitted = self._event(OrderSubmitted, order)
-        order.apply(submitted)
-        await self._announce(submitted)
+        # Marked before SUBMITTED is announced. The announce yields, and an
+        # in-flight pass that runs then must already see the send as open.
+        cache = self._checkpointer.cache
+        cache.mark_sending(order.cloid)
+        try:
+            submitted = self._event(OrderSubmitted, order)
+            order.apply(submitted)
+            await self._announce(submitted)
 
-        # Built from the saga, so the row holds exactly the terms the venue got.
-        await self._exchange.place(place_order_of(order))
+            # Built from the saga, so the row holds exactly the terms the venue got.
+            await self._exchange.place(place_order_of(order))
+        finally:
+            cache.mark_sent(order.cloid)
         # SUBMITTED is checkpointed only after the send returns: until then the
         # durable record stays PENDING, so a crash anywhere in the send window
         # recovers through reconcile-by-cloid (ADR-0008 rule 2). Its timestamp
