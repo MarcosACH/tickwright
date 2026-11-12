@@ -130,7 +130,12 @@ def test_an_unreadable_body_stops_its_own_order_and_not_the_ones_behind_it() -> 
         cache = Cache(store=store)
         cache.rebuild()
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=cache,
+            config=ReconcileConfig(),
         )
 
         reports: list[ExecutionReport] = []
@@ -187,6 +192,7 @@ def test_a_durably_unreadable_body_escalates_once_its_span_is_spent() -> None:
             bus=bus,
             clock=clock,
             exchange=exchange,
+            account=exchange,
             cache=cache,
             config=ReconcileConfig(
                 open_order_interval_seconds=interval_seconds,
@@ -228,7 +234,12 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
         cache = Cache(store=store)
         cache.rebuild()
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=cache,
+            config=ReconcileConfig(),
         )
 
         reports: list[ExecutionReport] = []
@@ -264,7 +275,12 @@ def test_a_read_refused_for_the_ip_rate_limit_stops_the_pass_and_marks_no_order(
         cache = Cache(store=store)
         cache.rebuild()
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=cache,
+            config=ReconcileConfig(),
         )
 
         reports: list[ExecutionReport] = []
@@ -319,7 +335,12 @@ def test_a_permanent_refusal_leaves_the_cycle_instead_of_spending_the_span() -> 
         cache = Cache(store=store)
         cache.rebuild()
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=cache,
+            config=ReconcileConfig(),
         )
         await reconciler.reconcile_inflight()
 

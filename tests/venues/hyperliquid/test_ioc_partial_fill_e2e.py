@@ -120,7 +120,12 @@ def _run(
         bus.subscribe(ExecutionReport, manager.on_execution_report)
         await manager.on_signal(signal)
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=config
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=checks.cache,
+            config=config,
         )
         if inflight:
             assert await reconciler.reconcile_inflight() is PassResult.PROVED
@@ -210,6 +215,7 @@ def test_reconcile_ends_a_market_order_filled_in_part_once_two_passes_read_the_s
                 tif="Ioc",
             ),
             "userFillsByTime": [PART_FILL],
+            "frontendOpenOrders": [],
         }
     )
 
@@ -241,6 +247,7 @@ def test_a_gtc_order_the_venue_calls_filled_stays_open_while_its_fills_read_shor
                 tif="Gtc",
             ),
             "userFillsByTime": [PART_FILL],
+            "frontendOpenOrders": [],
         }
     )
 

@@ -98,6 +98,9 @@ class NamedEvent(StrEnum):
     # the pass reconciled normally (ADR-0049). Both carry the cloid, so the field
     # is the only thing telling an outage from a venue contract change.
     RECONCILE_FROZEN = "reconcile.frozen"
+    # A cancel sent for an order that rests on the venue under a terminal saga
+    # (ADR-0063). The saga stays terminal, so this line is the only record.
+    RECONCILE_STRAY_CANCELLED = "reconcile.stray_cancelled"
 
     # One completed account-grain cycle (``LedgerReconciliation``, ADR-0034).
     # Emitted on every pass, agreeing or not: the cycle is the *only* evidence
@@ -326,6 +329,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: frozenset(),
     NamedEvent.GHOST_RECONCILED: frozenset({"resolution"}),
     NamedEvent.RECONCILE_FROZEN: frozenset({"scope"}),
+    NamedEvent.RECONCILE_STRAY_CANCELLED: frozenset({"saga_state", "venue_oid"}),
     NamedEvent.ACCOUNT_RECONCILED: frozenset(
         {"tier_1", "tier_2", "unvalued", "suppressed", "deferred", "unconfirmed", "unpriced"}
     ),

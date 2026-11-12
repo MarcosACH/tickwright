@@ -42,6 +42,7 @@ from enum import Enum
 
 from tickwright.domain import (
     WORKING_STATES,
+    AccountAnchor,
     Clock,
     EventBus,
     Order,
@@ -49,6 +50,7 @@ from tickwright.domain import (
     OrderRef,
     OrderState,
     OrderStatusReport,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     VenueReadUnresolvable,
@@ -203,6 +205,7 @@ class Reconciler:
         bus: EventBus,
         clock: Clock,
         exchange: OrderAnchor,
+        account: AccountAnchor,
         cache: Cache,
         config: ReconcileConfig,
     ) -> None:
@@ -212,6 +215,10 @@ class Reconciler:
         # back what the manager sent, on the same grain and the same key, and
         # the account is a different anchor with its own cycle (ADR-0034).
         self._exchange = exchange
+        # Read for one thing only: the list of every order resting in the
+        # account. A terminal saga has no per-cloid read left, so the list is
+        # the only way to see an order the venue still works for it (ADR-0063).
+        self._account = account
         self._cache = cache
         # Required, not defaulted: the Engine resolves the one ReconcileConfig
         # and paces the cadence loops off the same intervals — a second default
@@ -273,7 +280,44 @@ class Reconciler:
         the same answer shapes and must resolve them the same way (inv 3), so
         there is one resolver and not a per-phase copy of it.
         """
-        return await self._drive("open_order", WORKING_STATES, self._adopt)
+        result = await self._drive("open_order", WORKING_STATES, self._adopt)
+        if result is not PassResult.PROVED:
+            return result
+        with operation(cycle="open_order"):
+            return await self._cancel_strays()
+
+    async def _cancel_strays(self) -> PassResult:
+        """Cancel every order the venue still works under a terminal saga
+        (ADR-0063).
+
+        The saga is never reopened. The strategy already got its terminal and
+        may have replaced the order, so adopting it could double the exposure.
+        The list alone is not proof, so each candidate is read again by the
+        saga's own ref. The cancel goes by the oid that read returns.
+        """
+        listed = await self._account.fetch_open_orders()
+        if isinstance(listed, VenueReadFailure):
+            return PassResult.FAILED
+        for entry in listed:
+            if not isinstance(entry, VenueOpenOrder):
+                continue
+            order = self._cache.get_order(entry.cloid)
+            if order is None or not order.is_terminal:
+                continue
+            with operation(cloid=order.cloid):
+                view = await self._exchange.fetch_order(OrderRef.of(order))
+                if isinstance(view, VenueReadFailure):
+                    return PassResult.FAILED
+                if view.status is None or view.status.status not in WORKING_STATES:
+                    continue
+                venue_oid = view.status.venue_oid
+                await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])
+                named_event(
+                    NamedEvent.RECONCILE_STRAY_CANCELLED,
+                    saga_state=order.state.value,
+                    venue_oid=venue_oid,
+                )
+        return PassResult.PROVED
 
     async def _drive(
         self,
