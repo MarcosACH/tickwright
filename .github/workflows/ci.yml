@@ -39,6 +39,7 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     # Mirrors the `postgres` service in docker-compose.yml — same image tag and
     # same credentials, so CI and local dev exercise one server, not two. The
