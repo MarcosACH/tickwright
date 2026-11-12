@@ -138,7 +138,8 @@ ADR-0009).
   15.3 s after the send began, when the old budget of 3 reads at 5 s had already resolved it
   `FAILED`. A record seen during the send is still adopted at once. The open send is held in
   memory, so a restart has none and the budget counts from boot. A send from the previous life
-  that lands after that budget is not covered here. #642 tracks it. [#640]**)**
+  that lands after that budget is not covered here. Neither is a send that timed out on our
+  side but that the venue accepts after the budget. #642 tracks both. [#640]**)**
 - An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
   cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
   preserved) from `PARTIALLY_FILLED` (ADR-0010).
