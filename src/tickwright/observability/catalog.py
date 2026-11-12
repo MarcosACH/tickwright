@@ -79,6 +79,9 @@ class NamedEvent(StrEnum):
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
     GUARD_KILL_SWITCH_RESET = "guard.kill_switch_reset"
+    # A boot that loads a tripped switch from the store. Without it, a halt set in
+    # an earlier process stays silent until the first denied order (#639).
+    GUARD_KILL_SWITCH_RESTORED = "guard.kill_switch_restored"
 
     # Strategy containment (``StrategyHost``).
     STRATEGY_ERROR = "strategy.error"
@@ -316,6 +319,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.FLATTEN_VERDICT_WAIT: frozenset({"symbol"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
     NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),
+    NamedEvent.GUARD_KILL_SWITCH_RESTORED: frozenset({"reason", "tripped_at"}),
     NamedEvent.STRATEGY_ERROR: frozenset({"strategy_id", "event_id", "error"}),
     NamedEvent.STRATEGY_SNAPSHOT_INCOMPATIBLE: frozenset({"strategy_id", "error"}),
     NamedEvent.INFLIGHT_RECONCILED: frozenset({"resolution"}),
@@ -351,3 +355,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: frozenset({"coin", "oid"}),
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: frozenset({"symbol", "mode", "leverage"}),
 }
+
+
+# The events logged at ``warning``. Every other event is ``info``. The level
+# belongs to the event, not the call site, so one name always has one level.
+# An event lands here when the engine keeps running but an operator must act.
+WARNINGS: frozenset[NamedEvent] = frozenset({NamedEvent.GUARD_KILL_SWITCH_RESTORED})

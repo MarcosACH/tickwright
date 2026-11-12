@@ -13,6 +13,7 @@ refusal and a flatten with no key.
 - `se-cancel-all` `cancel-all` exits 0, the resting buy ends `cancelled`, and the long stays.
 - `se-flatten` `flatten` exits 0, every partition reads flat, and the kill switch is tripped.
 - `se-halted` a restarted engine has its first order denied. The venue gets nothing.
+- `se-restored` that restarted engine logs `guard.kill_switch_restored` at `warning` at boot.
 - `se-reset` after `USR2`, the next life trades a round trip and ends flat.
 - `se-redaction` the signing key appears nowhere in the evidence.
 - `se-lock` on paper, `cancel-all` while the engine runs exits 2 with `exit.refused`.
@@ -24,8 +25,8 @@ refusal and a flatten with no key.
 - Stop the engine with `TERM`. Then run `uv run tickwright cancel-all` or
   `uv run tickwright flatten` with the same `.env`. Each one ends by itself. Exit code 0 means
   done, 1 means it stopped partway, 2 means it never booted.
-- After a flatten, start the engine as usual. It boots with the kill switch tripped. `kill -USR2`
-  resets it.
+- After a flatten, start the engine as usual. It boots with the kill switch tripped and logs
+  `guard.kill_switch_restored` at `warning`. `kill -USR2` resets it.
 
 ## Driving it with verify
 
@@ -61,6 +62,7 @@ Preconditions:
   Send `$V signal safe-exit halted USR2` and `$V await safe-exit halted --event guard.kill_switch_reset`.
   Then `$V signal safe-exit halted TERM`, `$V await safe-exit halted --exit`, `$V dump safe-exit halted`.
   Check `$V check safe-exit halted se-halted --event order.denied --expect 1`,
+  `$V check safe-exit halted se-restored --event guard.kill_switch_restored --expect 1`,
   `$V check safe-exit halted se-halted --sql "select count(*) from orders where strategy_id='margin_watch' and venue_oid is not null" --expect 0`,
   `$V check safe-exit halted se-reset --sql "select tripped from kill_switch" --expect 0`.
 - **Reset.** Run `$V start safe-exit reset --preset testnet --forward-key --strategy round_trip_then_flat --param QUANTITY=0.001 --param HOLD_TICKS=1 --param WAIT_SECONDS=10`,

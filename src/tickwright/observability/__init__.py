@@ -5,7 +5,8 @@ an ``event`` field — distinct from free-text logs. The catalog (``NamedEvent``
 is a contract: a state-affecting path with no named event is a defect, and a name
 outside the catalog raises rather than emitting a silent record. Each name
 declares its field set (``FIELDS``, #338), and a call whose fields differ raises
-the same way. Emission rides structlog, so records are structured in production
+the same way. An event in ``WARNINGS`` logs at ``warning``, every other one at
+``info``. Emission rides structlog, so records are structured in production
 and capturable in tests via ``structlog.testing.capture_logs``.
 
 Correlation ids (a per-process run id, a per-operation ``cloid``/``signal_id``/
@@ -18,7 +19,7 @@ own.
 
 import structlog
 
-from .catalog import FIELDS, NamedEvent
+from .catalog import FIELDS, WARNINGS, NamedEvent
 
 _log = structlog.get_logger("tickwright")
 
@@ -53,7 +54,10 @@ def named_event(name: NamedEvent | str, /, **fields: object) -> None:
             f"named event {name!r} declares fields {sorted(declared)} "
             f"but was given {sorted(fields)}: change FIELDS (ADR-0020) or the call site"
         )
-    _log.info(str(name), **fields)
+    if name in WARNINGS:
+        _log.warning(str(name), **fields)
+    else:
+        _log.info(str(name), **fields)
 
 
 __all__ = ["NamedEvent", "named_event"]

@@ -460,6 +460,13 @@ def _drive_kill_switch(*, reset: bool) -> Callable[[], None]:
     return scenario
 
 
+def _drive_kill_switch_restored() -> None:
+    # A second guard on the same store is a restart: it loads the halt.
+    store = SQLiteStore(":memory:")
+    RealGuard(specs={"BTC": _SPEC}, store=store, clock=ManualClock()).trip_kill_switch("halt")
+    RealGuard(specs={"BTC": _SPEC}, store=store, clock=ManualClock())
+
+
 def _drive_strategy_error() -> None:
     bus = InMemoryBus()
     store = SQLiteStore(":memory:")
@@ -1326,6 +1333,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.FLATTEN_VERDICT_WAIT: _drive_flatten_verdict_wait,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
+    NamedEvent.GUARD_KILL_SWITCH_RESTORED: _drive_kill_switch_restored,
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
     NamedEvent.STRATEGY_SNAPSHOT_INCOMPATIBLE: _drive_snapshot_incompatible,
     NamedEvent.INFLIGHT_RECONCILED: _drive_inflight_reconciled,

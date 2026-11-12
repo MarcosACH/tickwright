@@ -340,6 +340,46 @@ def test_trip_and_reset_emit_named_events() -> None:
     assert tripped["reason"] == "market data looks wrong"
 
 
+def test_a_guard_restored_tripped_warns_with_the_stored_reason_and_time() -> None:
+    # Issue #639: a halt from an earlier process was silent in the new one, so an
+    # engine looked healthy and denied every order for 9 hours. The boot log must
+    # say the switch is tripped, why, and since when.
+    store = SQLiteStore(":memory:")
+    tripped_ns = 1_794_453_664_123_456_789  # 2026-11-12T03:21:04.123456789Z
+    RealGuard(specs={}, store=store, clock=ManualClock(start_ns=tripped_ns)).trip_kill_switch(
+        "flatten"
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        _guard(store=store)
+
+    restored = [log for log in logs if log["event"] == "guard.kill_switch_restored"]
+    assert restored == [
+        {
+            "event": "guard.kill_switch_restored",
+            "log_level": "warning",
+            "reason": "flatten",
+            # Same shape as the log line's own timestamp, so the two read alike.
+            "tripped_at": "2026-11-12T03:21:04.123456Z",
+        }
+    ]
+
+
+def test_a_guard_on_a_fresh_or_reset_store_says_nothing_about_the_switch() -> None:
+    # The warning means "this engine is halted". A false one on every boot would
+    # teach an operator to ignore it.
+    reset_store = SQLiteStore(":memory:")
+    first = _guard(store=reset_store)
+    first.trip_kill_switch("halt")
+    first.reset_kill_switch()
+
+    with structlog.testing.capture_logs() as logs:
+        _guard(store=SQLiteStore(":memory:"))
+        _guard(store=reset_store)
+
+    assert [log for log in logs if log["event"].startswith("guard.kill_switch")] == []
+
+
 def test_check_for_an_unspecced_symbol_fails_fast() -> None:
     # A RealGuard is wired with a spec per traded symbol at startup (ADR-0031). A
     # PlaceSignal for a symbol it has no spec for is a composition-root wiring bug:

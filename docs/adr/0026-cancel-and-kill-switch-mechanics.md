@@ -88,6 +88,11 @@ a rejection storm) is deferred: those encode a *risk policy*, and a reference co
 kill-switch mechanism, not an opinionated trip policy that ADR-0017 already fenced off as
 not-a-RiskEngine.
 
+**(Extended by [#639](https://github.com/MarcosACH/tickwright/issues/639):** a guard that loads a
+tripped switch from the store emits `guard.kill_switch_restored` at `warning`. It carries the
+stored `reason` and `tripped_at`, the trip time in UTC. Before this, a halt from an earlier process
+said nothing in the new one. A soak engine denied every order for 9 hours before anyone saw it.**)**
+
 **The kill-switch is durable (sticky).** Its state is persisted to the `Store` and restored during
 recovery **before the feed starts** (ADR-0024), and it is cleared **only** by an explicit
 `reset_kill_switch()`. This is fail-safe: an operator who halts trading because something is wrong

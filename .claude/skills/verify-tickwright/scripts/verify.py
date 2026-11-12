@@ -694,6 +694,8 @@ ALARM_EVENTS = (
     "order.rejected",
     "order.denied",
     "order.failed",
+    # A halted engine whose strategy never places logs no order.denied (#639).
+    "guard.kill_switch_restored",
     "ghost.reconciled",
     "reconcile.frozen",
     "account.reconcile_frozen",

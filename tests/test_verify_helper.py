@@ -326,6 +326,26 @@ class TestReport:
         assert "order.filled" not in alarms
         assert "first: -9" in text.split("## Exit codes")[1]
 
+    def test_report_names_a_boot_on_a_tripped_kill_switch(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        # Issue #639: a halted engine whose strategy never places logs no
+        # order.denied. The boot warning is then the only sign it is halted.
+        run("init", "r1", "--feature", "kill-switch")
+        _finished_life(
+            helper,
+            "r1",
+            "halted",
+            exit_code=0,
+            events=[{"event": "guard.kill_switch_restored", "reason": "flatten"}],
+            orders=[],
+        )
+
+        run("report", "r1")
+        text = (helper.evidence("r1") / "REPORT.md").read_text()
+
+        assert "guard.kill_switch_restored" in text.split("## Alarm events")[1].split("##")[0]
+
     def test_report_with_no_checks_says_so(
         self, helper: ModuleType, run: Callable[..., tuple[int, str]]
     ) -> None:

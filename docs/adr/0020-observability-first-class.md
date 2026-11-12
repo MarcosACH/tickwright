@@ -66,6 +66,11 @@ per-order rejection with the price sent, and for a MARKET the trade and mark its
 `exchange.order_unmatched` is a fourth. It has the same fields as `exchange.order_rejected`. It
 names an IOC order that matched nothing, which now ends `CANCELLED` (ADR-0007). Without it, the log
 would show only the cancel and not the prices behind it.**)**
+**(Extended by [#639](https://github.com/MarcosACH/tickwright/issues/639):** the guard family
+adds `guard.kill_switch_restored` (ADR-0026). The catalog also pins a level now. An event in
+`observability.catalog.WARNINGS` logs at `warning`, and every other event logs at `info`. The level
+belongs to the name, so one event never logs at two levels. An event goes in `WARNINGS` when the
+engine keeps running but an operator must act. `guard.kill_switch_restored` is the first.**)**
 
 ## Coverage requirement
 
