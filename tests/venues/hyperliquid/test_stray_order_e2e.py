@@ -18,6 +18,7 @@ from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
     answers_in_turn,
+    fill_entry,
     order_status_response,
     request_type,
 )
@@ -164,27 +165,31 @@ def _open_order_passes(
     status: str = "open",
     placed_ms: int = LANDED_MS,
     listed_cloid: str | None = None,
+    fills: list[dict] | None = None,
     passes: int = 1,
-) -> tuple[FakeExchangeApi, list[PassResult], list[dict]]:
+) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
 
     ``status`` and ``placed_ms`` shape the record the confirm read by the
-    saga's own ref answers with. The listed order carries the saga's cloid,
-    unless ``listed_cloid`` names another one. An empty string lists it with
-    no cloid at all, as an order placed by hand.
+    saga's own ref answers with, and ``fills`` its fill history. The listed
+    order carries the saga's cloid, unless ``listed_cloid`` names another one.
+    An empty string lists it with no cloid at all, as an order placed by hand.
+
+    Returns the saga as stored after the passes, each pass result, and the
+    cancels sent followed by the stray and external log lines.
     """
     signal = _signal()
     cloid = derive_cloid(signal.signal_id)
     confirm = order_status_response(cloid=cloid, status=status, oid=STRAY_OID, placed_ms=placed_ms)
     listed = cloid if listed_cloid is None else (listed_cloid or None)
 
-    async def main() -> tuple[FakeExchangeApi, list[PassResult]]:
+    async def main() -> tuple[SQLiteStore, FakeExchangeApi, list[PassResult]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=(LANDED_MS + 30_000) * 1_000_000)
         post = FakeExchangeApi(
             {
                 "orderStatus": confirm,
-                "userFillsByTime": [],
+                "userFillsByTime": fills or [],
                 "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": listed}],
                 "cancel": {
                     "status": "ok",
@@ -216,15 +221,37 @@ def _open_order_passes(
             cache=checks.cache,
             config=ReconcileConfig(),
         )
-        return post, [await reconciler.reconcile_open_orders() for _ in range(passes)]
+        return store, post, [await reconciler.reconcile_open_orders() for _ in range(passes)]
 
     with capture_events() as events:
-        post, results = asyncio.run(main())
+        store, post, results = asyncio.run(main())
     cancels = [
         q["action"]["cancels"] for url, q in post.requests if request_type(url, q) == "cancel"
     ]
     named = ("reconcile.stray_cancelled", "reconcile.external_order")
-    return post, results, [*cancels, *(e for e in events if e["event"] in named)]
+    return store.get_order(cloid), results, [*cancels, *(e for e in events if e["event"] in named)]
+
+
+def test_a_strays_fills_are_logged_with_its_cancel_and_never_booked() -> None:
+    # The stray rested long enough to trade 0.2 of its 0.5. Booking that fill
+    # would move a terminal saga, an illegal transition that faults the engine.
+    # Ledger reconciliation books the position as unattributed instead.
+    fills = [
+        fill_entry(oid=STRAY_OID, tid=9001, px="42000", sz="0.2", fee="1.68", time=LANDED_MS),
+        fill_entry(oid=STRAY_OID, tid=9002, px="42000", sz="0.1", fee="0.84", time=LANDED_MS),
+    ]
+    saga, [result], seen = _open_order_passes(OrderState.FAILED, fills=fills)
+
+    assert result is PassResult.PROVED
+    _, stray = seen
+    unbooked = {k: v for k, v in stray.items() if k.startswith("unbooked_")}
+    assert unbooked == {
+        "unbooked_trade_ids": "9001,9002",
+        "unbooked_quantity": "0.3",
+        "unbooked_fee": "2.52",
+    }
+    assert saga is not None
+    assert (saga.state, saga.cum_qty) == (OrderState.FAILED, Decimal("0"))
 
 
 @pytest.mark.parametrize("state", [OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED])

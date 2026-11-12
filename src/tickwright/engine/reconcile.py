@@ -38,6 +38,7 @@ an order whose body was never read.
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from enum import Enum
 
 from tickwright.domain import (
@@ -331,10 +332,18 @@ class Reconciler:
                     continue
                 venue_oid = view.status.venue_oid
                 await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])
+                # Its fills are never booked. Booking one would move a terminal
+                # saga, which faults the engine. Ledger reconciliation books the
+                # position as unattributed, and this line names the fills behind it.
+                # Totals and ids, not a list: a log field stays a scalar so it
+                # greps the same in every output.
                 named_event(
                     NamedEvent.RECONCILE_STRAY_CANCELLED,
                     saga_state=order.state.value,
                     venue_oid=venue_oid,
+                    unbooked_trade_ids=",".join(fill.trade_id for fill in view.fills),
+                    unbooked_quantity=str(sum((f.quantity for f in view.fills), Decimal(0))),
+                    unbooked_fee=str(sum((f.fee for f in view.fills), Decimal(0))),
                 )
         return PassResult.PROVED
 

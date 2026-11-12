@@ -332,7 +332,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: frozenset(),
     NamedEvent.GHOST_RECONCILED: frozenset({"resolution"}),
     NamedEvent.RECONCILE_FROZEN: frozenset({"scope"}),
-    NamedEvent.RECONCILE_STRAY_CANCELLED: frozenset({"saga_state", "venue_oid"}),
+    NamedEvent.RECONCILE_STRAY_CANCELLED: frozenset(
+        {"saga_state", "venue_oid", "unbooked_trade_ids", "unbooked_quantity", "unbooked_fee"}
+    ),
     NamedEvent.RECONCILE_EXTERNAL_ORDER: frozenset({"venue_oid"}),
     NamedEvent.ACCOUNT_RECONCILED: frozenset(
         {"tier_1", "tier_2", "unvalued", "suppressed", "deferred", "unconfirmed", "unpriced"}
