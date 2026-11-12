@@ -62,6 +62,10 @@ as a field of their own.**)**
 **(Extended by [#601](https://github.com/MarcosACH/tickwright/issues/601):**
 `exchange.order_rejected` is a third adapter event that carries `cloid` as a field. It names a
 per-order rejection with the price sent, and for a MARKET the trade and mark its bound used.**)**
+**(Extended by [#632](https://github.com/MarcosACH/tickwright/issues/632):**
+`exchange.order_unmatched` is a fourth. It has the same fields as `exchange.order_rejected`. It
+names an IOC order that matched nothing, which now ends `CANCELLED` (ADR-0007). Without it, the log
+would show only the cancel and not the prices behind it.**)**
 
 ## Coverage requirement
 

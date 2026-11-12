@@ -90,6 +90,12 @@ _ADDRESS_LIMIT_PREFIX = "Too many cumulative requests"
 # Evidence: docs/research/hyperliquid-oracle-price-band.md.
 _ORACLE_REJECT = "too far from oracle"
 
+# How the venue words an IOC order that matched nothing, lower case. The docs say
+# "Order could not immediately match against any resting orders." (iocCancelRejected).
+# Testnet added " asset=78" after it, so this matches a part of the text.
+# Evidence: docs/research/hyperliquid-reduce-only-cancel-market-probes.md.
+_IOC_NO_MATCH = "could not immediately match"
+
 
 class _MissingPrice(Exception):
     """A market order has no price to bound it, so it cannot be sent."""
@@ -110,7 +116,8 @@ class _BoundPrices:
 @dataclass(frozen=True, slots=True)
 class _Pricing:
     """The price an order is sent at, and for a MARKET the prices its bound
-    came from. A LIMIT has none. A rejection logs them all (#601)."""
+    came from. A LIMIT has none. A rejected or unmatched order logs them all
+    (#601, #632)."""
 
     price: Decimal
     bound_prices: _BoundPrices | None = None
@@ -351,38 +358,37 @@ class HyperliquidExchange:
         the guard covers is a *pure* reading of the body, and nothing else.
         """
         match adjudication:
-            case _ActionError(message=message):
+            case _ActionError(message=message, address_limited=address_limited):
                 # The venue refused the whole action (bad nonce/signature/
                 # rate-limit) — the order never entered the book. Name it,
                 # emitting no terminal: a transient refusal must leave the order
                 # resendable, and reconcile-by-cloid resolves it (ADR-0008
                 # rule 2).
                 self._action_rejected("place", message, cloid=order.cloid, oid=None)
-                if message.startswith(_ADDRESS_LIMIT_PREFIX):
+                if address_limited:
                     await self._refused(order, OrderRefusal.RATE_LIMITED_ADDRESS)
                 else:
                     await self._refused(order, OrderRefusal.REFUSED)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
-            case _Rejected(reason=reason):
+            case _Unmatched(reason=reason):
+                # The saga only says CANCELLED. A market order mostly matches
+                # nothing when its bound was off, so the log keeps the prices (#632).
+                _log_priced(NamedEvent.EXCHANGE_ORDER_UNMATCHED, order, reason, pricing)
+                await self._bus.publish(
+                    self._status_report(
+                        cloid=order.cloid, symbol=order.symbol, status=OrderState.CANCELLED
+                    )
+                )
+            case _Rejected(reason=reason, price_band=price_band):
                 # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
                 # the order was sent and judged, and the venue's reason rides along.
                 # The reason alone cannot say why a price was refused, so the
                 # prices go in the log beside it (#601).
-                bound_prices = pricing.bound_prices
-                named_event(
-                    NamedEvent.EXCHANGE_ORDER_REJECTED,
-                    cloid=order.cloid,
-                    reason=reason,
-                    price=_wire_decimal(pricing.price),
-                    last_trade=(
-                        None if bound_prices is None else _wire_decimal(bound_prices.last_trade)
-                    ),
-                    mark=None if bound_prices is None else _wire_decimal(bound_prices.mark),
-                )
+                _log_priced(NamedEvent.EXCHANGE_ORDER_REJECTED, order, reason, pricing)
                 # Flatten waits out an oracle reject instead of counting it (ADR-0056).
                 # The engine never reads venue text, so the kind goes in a report.
-                if _ORACLE_REJECT in reason.lower():
+                if price_band:
                     await self._refused(order, OrderRefusal.PRICE_BAND)
                 await self._bus.publish(
                     self._status_report(
@@ -1042,12 +1048,19 @@ def _order_state(status: str) -> OrderState:
     The venue's taxonomy is a long list of specific causes, but every entry
     resolves by suffix: ``…Rejected`` refusals, ``…Canceled`` / ``…Cancel``
     removals (``canceled``, ``marginCanceled``, ``scheduledCancel``, …).
+    One entry is named before the suffixes: ``iocCancelRejected`` is not a
+    refusal (#632).
     """
     match status:
         case "open":
             return OrderState.LIVE
         case "filled":
             return OrderState.FILLED
+        case "iocCancelRejected":
+            # An IOC order that matched nothing. The venue names it a reject,
+            # but nothing was refused. It ends CANCELLED, as it does when
+            # placement reads the answer (_Unmatched, ADR-0007, #632).
+            return OrderState.CANCELLED
         case _ if status.endswith(("anceled", "ancel")):
             return OrderState.CANCELLED
         case _ if status.endswith("ejected"):
@@ -1061,9 +1074,13 @@ class _ActionError:
     envelope): the whole order/cancel action was rejected before adjudication —
     a bad nonce or signature, an action rate-limit — distinct from a per-order
     ``error`` status and never a transport failure. ``message`` is the venue's
-    reason string, for the operator's triage."""
+    reason string, for the operator's triage.
+
+    ``address_limited`` is whether the venue refused it over the address limit.
+    The reader decides it from the text, so no caller reads venue wording."""
 
     message: str
+    address_limited: bool
 
 
 def _action_outcome(response: object) -> list[Any] | _ActionError:
@@ -1082,7 +1099,8 @@ def _action_outcome(response: object) -> list[Any] | _ActionError:
         case {"status": "ok", "response": {"data": {"statuses": list(statuses)}}}:
             return statuses
         case {"status": "err", "response": message}:
-            return _ActionError(str(message))
+            text = str(message)
+            return _ActionError(text, address_limited=text.startswith(_ADDRESS_LIMIT_PREFIX))
     raise ValueError(f"unrecognized Hyperliquid action response: {response!r}")
 
 
@@ -1099,7 +1117,24 @@ class _Resting:
 
 @dataclass(frozen=True, slots=True)
 class _Rejected:
-    """The venue judged the order and refused it, with its own reason."""
+    """The venue judged the order and refused it, with its own reason.
+
+    ``price_band`` is whether it refused the price as too far from its oracle.
+    Flatten waits that out instead of counting it (ADR-0056).
+    """
+
+    reason: str
+    price_band: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Unmatched:
+    """An IOC order that matched nothing, so nothing filled.
+
+    The venue answers it with an error, but it refused nothing. So it is not a
+    ``_Rejected``. It ends as an unfilled IOC order ends on every venue
+    (ADR-0007, #632). ``reason`` is the venue's text, kept for the log.
+    """
 
     reason: str
 
@@ -1119,11 +1154,12 @@ class _Filled:
     total_sz: Decimal
 
 
-# One placement adjudication, read. Four members for the three per-order
-# statuses the venue documents plus the action-level refusal that precedes
-# adjudication — a union rather than one record with optional fields, so a
+# One placement adjudication, read. The three per-order statuses the venue
+# documents, plus the action-level refusal that precedes adjudication. An
+# ``error`` status splits in two, because an unmatched IOC order is not a
+# refusal. A union rather than one record with optional fields, so a
 # combination the venue cannot produce is one this adapter cannot represent.
-_Adjudication = _ActionError | _Resting | _Rejected | _Filled
+_Adjudication = _ActionError | _Resting | _Rejected | _Unmatched | _Filled
 
 
 class _CancelVerdict(Enum):
@@ -1152,6 +1188,9 @@ def _placement_adjudication(response: object) -> _Adjudication:
     about a placement body is decided in here, so the caller's guard can cover
     exactly this and never the publishing that follows it (ADR-0048 §4).
 
+    The venue's wording is read here too, and nowhere after. The caller gets
+    a typed answer and matches on it, so a new kind fails the type checker.
+
     Any shape outside the three documented adjudications raises into
     ``UNREADABLE``. It used to fall out of the reporting silently, which is the
     one outcome inv 1 forbids outright: a venue that started adjudicating a
@@ -1164,7 +1203,10 @@ def _placement_adjudication(response: object) -> _Adjudication:
     if "resting" in status:
         return _Resting(oid=int(status["resting"]["oid"]))
     if "error" in status:
-        return _Rejected(reason=str(status["error"]))
+        reason = str(status["error"])
+        if _IOC_NO_MATCH in reason.lower():
+            return _Unmatched(reason=reason)
+        return _Rejected(reason=reason, price_band=_ORACLE_REJECT in reason.lower())
     if "filled" in status:
         filled = status["filled"]
         return _Filled(oid=int(filled["oid"]), total_sz=figure(filled["totalSz"]))
@@ -1293,6 +1335,23 @@ def _fee_settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     if token != "USDC":
         refuse_non_usdc(reported=f"fill fee settled in {token!r}, not USDC", row="fill")
     return figure(entry["fee"])
+
+
+def _log_priced(event: NamedEvent, order: PlaceOrder, reason: str, pricing: _Pricing) -> None:
+    """Log an order the venue did not take, with the venue's text and our prices.
+
+    The text alone cannot say why a price missed. So the price sent goes beside
+    it, and for a MARKET the trade and mark its bound came from (#601).
+    """
+    bound_prices = pricing.bound_prices
+    named_event(
+        event,
+        cloid=order.cloid,
+        reason=reason,
+        price=_wire_decimal(pricing.price),
+        last_trade=None if bound_prices is None else _wire_decimal(bound_prices.last_trade),
+        mark=None if bound_prices is None else _wire_decimal(bound_prices.mark),
+    )
 
 
 def _wire_decimal(value: Decimal) -> str:

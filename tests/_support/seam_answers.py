@@ -1,14 +1,16 @@
 """The gate over whether every configured adapter answered the seam gates.
 
-The three shared gates over the adapter seams are opt-in imports, and each is
+The four shared gates over the adapter seams are opt-in imports, and each is
 called by the adapter's own suite: ``seam_claims`` for a claim per member,
 ``feed_contract`` for the mark a feed owes, ``lifecycle_contract`` for going
-quiet once stopped. Every one of them is real on the adapters that call it and
-blind to an adapter that does not. A third venue that shipped a feed, an
-exchange, a config and a suite that never imported ``_support`` was green on
-the whole merge gate while asserting none of it (#303). ``docs/extending.md``
-carried the obligation as a checklist, which is the instrument #227 already
-found insufficient for the mark.
+quiet once stopped, and ``exchange_contract`` for how an exchange ends an
+order. The last is owed once per ``OrderEnd`` case (#632). Every one of them
+is real on the adapters that call it and blind to an adapter that does not.
+A third venue that shipped a feed, an exchange, a config and a suite that
+never imported ``_support`` was green on the whole merge gate while asserting
+none of it (#303). ``docs/extending.md`` carried the obligation as a
+checklist, which is the instrument #227 already found insufficient for the
+mark.
 
 **What is discovered is the config, not the tree.** ``AppConfig.feed`` and
 ``AppConfig.exchange`` are closed ``Literal``s, and an adapter not named there
@@ -42,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from closed_sets import assert_covers_exactly
+from exchange_contract import OrderEnd
 
 from tickwright.domain import Exchange, MarketFeed
 
@@ -69,19 +72,30 @@ class _Gate:
     the claims gate, whose call names the Protocol positionally and the suite
     by ``Path(__file__).parent``, so being in the mapped directory is the whole
     of what it can say.
+
+    ``case`` is set for a gate owed once per case. The call must then pass
+    ``case=OrderEnd.<case>``, so one call cannot answer every case.
     """
 
     function: str
     keyword: str | None
+    case: str | None = None
+
+    @property
+    def label(self) -> str:
+        return self.function if self.case is None else f"{self.function}(case={self.case})"
 
 
 _CLAIMS = _Gate("assert_every_member_is_claimed", keyword=None)
 _MARKED = _Gate("assert_every_traded_symbol_is_marked", keyword="feed")
 _QUIET = _Gate("assert_quiet_once_stopped", keyword="name")
+_ENDS = tuple(
+    _Gate("assert_order_ends", keyword="name", case=f"OrderEnd.{end.name}") for end in OrderEnd
+)
 
 _OWED: Mapping[type, tuple[_Gate, ...]] = {
     MarketFeed: (_CLAIMS, _MARKED, _QUIET),
-    Exchange: (_CLAIMS, _QUIET),
+    Exchange: (_CLAIMS, _QUIET, *_ENDS),
 }
 
 
@@ -106,7 +120,7 @@ def assert_every_adapter_answers_its_gates(
     for value in sorted(answers):
         answered = answers[value]
         unanswered = [
-            gate.function
+            gate.label
             for gate in _OWED[seam]
             if not _answers(answered, gate, protocol=seam.__name__)
         ]
@@ -130,10 +144,20 @@ def _answers(answered: Answered, gate: _Gate, *, protocol: str) -> bool:
                 if node.args and _name_of(node.args[0]) == protocol:
                     return True
                 continue
-            for kw in node.keywords:
-                if kw.arg == gate.keyword and _literal(kw.value) == answered.adapter:
-                    return True
+            named = {kw.arg: kw.value for kw in node.keywords}
+            subject = named.get(gate.keyword)
+            if subject is None or _literal(subject) != answered.adapter:
+                continue
+            if gate.case is None or _dotted(named.get("case")) == gate.case:
+                return True
     return False
+
+
+def _dotted(node: ast.expr | None) -> str | None:
+    """``OrderEnd.X`` as written at the call, so the case is read by its name."""
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        return f"{node.value.id}.{node.attr}"
+    return None
 
 
 def _name_of(node: ast.expr) -> str | None:

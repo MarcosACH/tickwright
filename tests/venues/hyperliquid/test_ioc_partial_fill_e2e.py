@@ -5,15 +5,20 @@ with only the HTTP transport fake.
 The venue drops the part an IOC order could not fill and answers `filled`. A
 `filled` report moves no saga, so without an explicit end the saga stays
 PARTIALLY_FILLED forever and the strategy waits on it.
+
+An IOC order that matches nothing ends here too (issue #632). The venue
+answers it with an error, but nothing was refused, so it ends CANCELLED.
 """
 
 import asyncio
 from dataclasses import replace
 from decimal import Decimal
 
+from exchange_contract import OrderEnd, assert_order_ends
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    error_response,
     fill_entry,
     filled_response,
     order_status_response,
@@ -74,7 +79,9 @@ MARKET_BUY = PlaceSignal(
 PART_FILL = fill_entry(oid=91, tid=556, px="104000.0", sz="0.00008", time=FILL_MS)
 
 
-def _run(signal: PlaceSignal, post: FakeExchangeApi, *, passes: int = 0) -> Order:
+def _run(
+    signal: PlaceSignal, post: FakeExchangeApi, *, passes: int = 0, inflight: bool = False
+) -> Order:
     async def main() -> Order:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=NS)
@@ -115,6 +122,8 @@ def _run(signal: PlaceSignal, post: FakeExchangeApi, *, passes: int = 0) -> Orde
         reconciler = Reconciler(
             bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=config
         )
+        if inflight:
+            assert await reconciler.reconcile_inflight() is PassResult.PROVED
         for _ in range(passes):
             clock.advance_to(
                 clock.timestamp_ns() + int(config.open_order_interval_seconds * 1_000_000_000)
@@ -137,8 +146,50 @@ def test_a_market_order_filled_in_part_ends_cancelled_at_placement() -> None:
 
     order = _run(MARKET_BUY, post)
 
-    assert order.state is OrderState.CANCELLED
-    assert order.cum_qty == Decimal("0.00008")
+    assert_order_ends(
+        order,
+        case=OrderEnd.IOC_PARTIAL_FILL,
+        filled=Decimal("0.00008"),
+        name="HyperliquidExchange",
+    )
+
+
+def test_a_market_order_that_matches_nothing_ends_cancelled() -> None:
+    # The venue answers an IOC order with no match as an error, in the wording a
+    # testnet probe saw. The order was valid, so it ends as paper ends it (#632).
+    no_match = "Order could not immediately match against any resting orders. asset=3"
+    post = FakeExchangeApi({"order": error_response(no_match)})
+
+    order = _run(MARKET_BUY, post)
+
+    assert_order_ends(
+        order, case=OrderEnd.IOC_NO_MATCH, filled=Decimal("0"), name="HyperliquidExchange"
+    )
+
+
+def test_reconcile_ends_a_market_order_that_matched_nothing_cancelled_too() -> None:
+    # The send fails, so placement never reads the venue's answer. Reconcile
+    # finds the record by cloid, with the venue's status for this case. It must
+    # end the order as placement does, or the end depends on the send (#632).
+    post = FakeExchangeApi(
+        {
+            "order": ConnectionError("connection refused"),
+            "orderStatus": order_status_response(
+                cloid=derive_cloid(MARKET_BUY.signal_id),
+                status="iocCancelRejected",
+                oid=91,
+                placed_ms=ACK_MS,
+                tif="Ioc",
+            ),
+            "userFillsByTime": [],
+        }
+    )
+
+    order = _run(MARKET_BUY, post, inflight=True)
+
+    assert_order_ends(
+        order, case=OrderEnd.IOC_NO_MATCH, filled=Decimal("0"), name="HyperliquidExchange"
+    )
 
 
 def test_reconcile_ends_a_market_order_filled_in_part_once_two_passes_read_the_same_fills() -> None:
