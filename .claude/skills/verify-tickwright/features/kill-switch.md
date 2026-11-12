@@ -8,6 +8,8 @@ alone. The halt is written to the store, so it survives a restart, and only `USR
 - `ks-trip` `USR1` logs `guard.kill_switch_tripped` and writes `kill_switch.tripped = 1`.
 - `ks-deny` a strategy in a later life gets `order.denied` with reason `kill switch tripped`.
 - `ks-durable` the denial happens in a fresh process on the same store.
+- `ks-restored` that fresh process logs `guard.kill_switch_restored` at `warning` at boot, with
+  the trip's `reason` and `tripped_at`.
 - `ks-reset` `USR2` logs `guard.kill_switch_reset` and writes `tripped = 0`.
 
 ## How to get to it (user POV)
@@ -34,11 +36,12 @@ Preconditions:
 - **Reset.** Run `$V signal ks denied USR2`, `$V await ks denied --event guard.kill_switch_reset`,
   `$V signal ks denied TERM`, `$V await ks denied --exit`, `$V dump ks denied`.
 - **Check denied.** Run `$V check ks denied ks-deny --event order.denied --expect 1`,
+  `$V check ks denied ks-restored --event guard.kill_switch_restored --expect 1`,
   `$V check ks denied ks-durable --sql "select state from orders" --expect denied`,
   `$V check ks denied ks-durable --sql "select count(*) from positions" --expect 0`,
   `$V check ks denied ks-reset --event guard.kill_switch_reset --expect 1`,
   `$V check ks denied ks-reset --sql "select tripped from kill_switch" --expect 0`.
-- **Report.** Run `$V report ks`. Expected verdict: `PASS (0 of 8 checks failed)`.
+- **Report.** Run `$V report ks`. Expected verdict: `PASS (0 of 9 checks failed)`.
 - **Cleanup.** Run `$V cleanup ks`.
 
 ## Gotchas
@@ -48,3 +51,5 @@ Preconditions:
   strategy and let the durable row do the work in the next life, as above.
 - `guard.kill_switch_tripped` and `guard.kill_switch_reset` carry no `run_id`. They are emitted
   from the signal handler, outside the run's context. Do not grep them by run id.
+- `guard.kill_switch_restored` carries no `run_id` either. The guard is built before the run
+  binds its id.

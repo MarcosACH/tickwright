@@ -16,6 +16,7 @@ outlives a crash and is cleared only by an explicit reset.
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum, auto
 from typing import Final
@@ -115,6 +116,7 @@ class PreTradeLimits:
 
 NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class _OrderKind(Enum):
@@ -147,6 +149,14 @@ def _shrinks(before: Decimal, after: Decimal) -> bool:
     return abs(after) < abs(before) and (after == 0 or same_side)
 
 
+def _utc_iso(ts_ns: int) -> str:
+    """``ts_ns`` in the shape of the log line's own timestamp, to the microsecond.
+
+    Integer arithmetic, because a float of epoch seconds loses the microseconds."""
+    instant = _EPOCH + timedelta(microseconds=ts_ns // 1_000)
+    return instant.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 class RealGuard:
     """The real pre-trade boundary: quantize, min-notional, caps, durable kill switch."""
 
@@ -169,6 +179,14 @@ class RealGuard:
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
         self._tripped = restored.tripped if restored is not None else False
+        if restored is not None and restored.tripped:
+            # Without this line a halt from an earlier process is silent until the
+            # first denied order, and an engine can look healthy for hours (#639).
+            named_event(
+                NamedEvent.GUARD_KILL_SWITCH_RESTORED,
+                reason=restored.reason,
+                tripped_at=_utc_iso(restored.ts_ns),
+            )
         # The times of approved placements inside the rate cap's window. It
         # lives in memory, so a restart starts it empty (ADR-0051).
         self._approved_ns: deque[int] = deque()
