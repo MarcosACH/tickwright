@@ -45,6 +45,7 @@ from tickwright.domain import (
     AccountAnchor,
     Clock,
     EventBus,
+    ExternalOrderRef,
     Order,
     OrderAnchor,
     OrderRef,
@@ -249,6 +250,10 @@ class Reconciler:
                 config.recent_order_protection_seconds, name="recent_order_protection_seconds"
             ),
         )
+        # Every external order already logged in this process life. The
+        # open-order pass sees the same one each cycle for as long as it rests,
+        # and the operator needs to hear of it once (ADR-0063).
+        self._externals_logged: set[str] = set()
 
     async def reconcile_startup(self) -> bool:
         """One mass-rebuild pass over every non-terminal saga; ``True`` on success.
@@ -299,12 +304,17 @@ class Reconciler:
         if isinstance(listed, VenueReadFailure):
             return PassResult.FAILED
         for entry in listed:
-            if not isinstance(entry, VenueOpenOrder):
+            if isinstance(entry, ExternalOrderRef):
+                # No cloid at all, so placed by hand or by another client.
+                self._log_external(entry)
                 continue
             order = self._cache.get_order(entry.cloid)
             # A DENIED saga never sent its place, so a venue order under that
-            # cloid is not ours. It is an external order, and we never touch it.
-            if order is None or not order.is_terminal or order.state is OrderState.DENIED:
+            # cloid did not come from us, just as one under an unknown cloid.
+            if order is None or order.state is OrderState.DENIED:
+                self._log_external(entry)
+                continue
+            if not order.is_terminal:
                 continue
             with operation(cloid=order.cloid):
                 view = await self._exchange.fetch_order(OrderRef.of(order))
@@ -315,7 +325,7 @@ class Reconciler:
                     # ref finds no record of it. An order we cancelled or
                     # filled would still answer with its record. So this one
                     # is not the saga's, most often an earlier life's (#354).
-                    named_event(NamedEvent.RECONCILE_EXTERNAL_ORDER, venue_oid=entry.venue_oid)
+                    self._log_external(entry)
                     continue
                 if view.status.status not in WORKING_STATES:
                     continue
@@ -327,6 +337,19 @@ class Reconciler:
                     venue_oid=venue_oid,
                 )
         return PassResult.PROVED
+
+    def _log_external(self, entry: VenueOpenOrder | ExternalOrderRef) -> None:
+        """Log an order no saga of ours sent, once per process life. The engine
+        never acts on it. Only an operator ``cancel-all`` or ``flatten`` may
+        (ADR-0052)."""
+        ids = {"cloid": entry.cloid} if isinstance(entry, VenueOpenOrder) else {}
+        # Paper assigns no oid, so the cloid stands in for it there.
+        key = entry.venue_oid or ids["cloid"]
+        if key in self._externals_logged:
+            return
+        self._externals_logged.add(key)
+        with operation(**ids):
+            named_event(NamedEvent.RECONCILE_EXTERNAL_ORDER, venue_oid=entry.venue_oid)
 
     async def _drive(
         self,

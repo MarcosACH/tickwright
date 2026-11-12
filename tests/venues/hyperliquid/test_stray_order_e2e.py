@@ -158,26 +158,34 @@ def test_an_order_the_venue_accepts_after_the_saga_failed_is_cancelled() -> None
     assert strays[0]["venue_oid"] == str(STRAY_OID)
 
 
-def _one_open_order_pass(
-    state: OrderState, *, status: str = "open", placed_ms: int = LANDED_MS
-) -> tuple[FakeExchangeApi, PassResult, list[dict]]:
-    """One open-order pass over a saga in ``state`` while the venue lists its cloid.
+def _open_order_passes(
+    state: OrderState,
+    *,
+    status: str = "open",
+    placed_ms: int = LANDED_MS,
+    listed_cloid: str | None = None,
+    passes: int = 1,
+) -> tuple[FakeExchangeApi, list[PassResult], list[dict]]:
+    """Open-order passes over a saga in ``state`` while the venue lists one order.
 
     ``status`` and ``placed_ms`` shape the record the confirm read by the
-    saga's own ref answers with.
+    saga's own ref answers with. The listed order carries the saga's cloid,
+    unless ``listed_cloid`` names another one. An empty string lists it with
+    no cloid at all, as an order placed by hand.
     """
     signal = _signal()
     cloid = derive_cloid(signal.signal_id)
     confirm = order_status_response(cloid=cloid, status=status, oid=STRAY_OID, placed_ms=placed_ms)
+    listed = cloid if listed_cloid is None else (listed_cloid or None)
 
-    async def main() -> tuple[FakeExchangeApi, PassResult]:
+    async def main() -> tuple[FakeExchangeApi, list[PassResult]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=(LANDED_MS + 30_000) * 1_000_000)
         post = FakeExchangeApi(
             {
                 "orderStatus": confirm,
                 "userFillsByTime": [],
-                "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": cloid}],
+                "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": listed}],
                 "cancel": {
                     "status": "ok",
                     "response": {"type": "cancel", "data": {"statuses": ["success"]}},
@@ -208,21 +216,21 @@ def _one_open_order_pass(
             cache=checks.cache,
             config=ReconcileConfig(),
         )
-        return post, await reconciler.reconcile_open_orders()
+        return post, [await reconciler.reconcile_open_orders() for _ in range(passes)]
 
     with capture_events() as events:
-        post, result = asyncio.run(main())
+        post, results = asyncio.run(main())
     cancels = [
         q["action"]["cancels"] for url, q in post.requests if request_type(url, q) == "cancel"
     ]
     named = ("reconcile.stray_cancelled", "reconcile.external_order")
-    return post, result, [*cancels, *(e for e in events if e["event"] in named)]
+    return post, results, [*cancels, *(e for e in events if e["event"] in named)]
 
 
 @pytest.mark.parametrize("state", [OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED])
 def test_an_order_resting_under_any_sent_terminal_saga_is_cancelled(state: OrderState) -> None:
     # The saga reached the venue, so a resting order under its cloid is ours.
-    _, result, seen = _one_open_order_pass(state)
+    _, [result], seen = _open_order_passes(state)
 
     assert result is PassResult.PROVED
     cancel, stray = seen
@@ -232,17 +240,19 @@ def test_an_order_resting_under_any_sent_terminal_saga_is_cancelled(state: Order
 
 def test_an_order_under_a_denied_cloid_is_external_and_not_cancelled() -> None:
     # A DENIED saga never left the engine, so the venue order is not ours to cancel.
-    _, result, seen = _one_open_order_pass(OrderState.DENIED)
+    _, [result], seen = _open_order_passes(OrderState.DENIED)
 
     assert result is PassResult.PROVED
-    assert seen == []
+    [external] = seen
+    assert external["event"] == "reconcile.external_order"
+    assert external["venue_oid"] == str(STRAY_OID)
 
 
 @pytest.mark.parametrize("status", ["filled", "canceled"])
 def test_no_cancel_when_the_confirm_read_says_the_order_no_longer_rests(status: str) -> None:
     # The list is a snapshot and can be stale by the time we act on it. The
     # confirm read is the proof, so an order it says is gone gets no cancel.
-    _, result, seen = _one_open_order_pass(OrderState.FAILED, status=status)
+    _, [result], seen = _open_order_passes(OrderState.FAILED, status=status)
 
     assert result is PassResult.PROVED
     assert seen == []
@@ -252,9 +262,32 @@ def test_a_listed_order_placed_before_the_saga_is_external_and_not_cancelled() -
     # The cloid matches, but the venue placed this order 5 minutes before the
     # saga existed. It belongs to an earlier life, not to this saga (#354).
     before_saga_ms = SENT_MS - 300_000
-    _, result, seen = _one_open_order_pass(OrderState.FAILED, placed_ms=before_saga_ms)
+    _, [result], seen = _open_order_passes(OrderState.FAILED, placed_ms=before_saga_ms)
 
     assert result is PassResult.PROVED
     [external] = seen
     assert external["event"] == "reconcile.external_order"
     assert external["venue_oid"] == str(STRAY_OID)
+
+
+@pytest.mark.parametrize(
+    "listed_cloid",
+    ["0x00000000000000000000000000000abc", ""],
+    ids=["unknown-cloid", "no-cloid"],
+)
+def test_an_order_we_never_placed_is_logged_once_and_never_cancelled(listed_cloid: str) -> None:
+    # Three passes see the same order. The operator needs to hear of it once,
+    # not on every pass for as long as it rests.
+    _, results, seen = _open_order_passes(OrderState.FAILED, listed_cloid=listed_cloid, passes=3)
+
+    assert results == [PassResult.PROVED] * 3
+    [external] = seen
+    assert external["event"] == "reconcile.external_order"
+    assert external["venue_oid"] == str(STRAY_OID)
+
+
+def test_an_earlier_lifes_order_is_logged_once_across_passes() -> None:
+    before_saga_ms = SENT_MS - 300_000
+    _, _, seen = _open_order_passes(OrderState.FAILED, placed_ms=before_saga_ms, passes=3)
+
+    assert [e["event"] for e in seen] == ["reconcile.external_order"]
