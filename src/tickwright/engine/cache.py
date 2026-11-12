@@ -5,6 +5,10 @@ A write-through projection of the ``Store``, **never** the source of truth:
 are direct method calls — pull-then-subscribe, because startup events predate
 any strategy's subscription. Writes flow only through the ``ExecutionManager``'s
 checkpoint path.
+
+One exception holds no store state. The ``ExecutionManager`` marks a place call
+open and returned directly here. That mark lives only in memory, so it has no
+checkpoint to go through (#640).
 """
 
 from tickwright.domain import Order, SignalId, Store
