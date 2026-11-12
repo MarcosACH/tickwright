@@ -365,6 +365,21 @@ def test_a_guard_restored_tripped_warns_with_the_stored_reason_and_time() -> Non
     ]
 
 
+def test_a_guard_on_a_fresh_or_reset_store_says_nothing_about_the_switch() -> None:
+    # The warning means "this engine is halted". A false one on every boot would
+    # teach an operator to ignore it.
+    reset_store = SQLiteStore(":memory:")
+    first = _guard(store=reset_store)
+    first.trip_kill_switch("halt")
+    first.reset_kill_switch()
+
+    with structlog.testing.capture_logs() as logs:
+        _guard(store=SQLiteStore(":memory:"))
+        _guard(store=reset_store)
+
+    assert [log for log in logs if log["event"].startswith("guard.kill_switch")] == []
+
+
 def test_check_for_an_unspecced_symbol_fails_fast() -> None:
     # A RealGuard is wired with a spec per traded symbol at startup (ADR-0031). A
     # PlaceSignal for a symbol it has no spec for is a composition-root wiring bug:
