@@ -132,6 +132,14 @@ ADR-0009).
   the common choice (resolving never-acked submits to `REJECTED`) because our ADR-0010
   taxonomy has a dedicated `FAILED` terminal that expresses this honestly; `REJECTED` is
   reserved for an actual venue refusal.
+  **(Amended by #640 — a read during the send is not proof:**
+  a "no record" read counts toward the budget only after the place call has returned in this
+  session. While the send is open, the venue can still accept the order. On testnet it did so
+  15.3 s after the send began, when the old budget of 3 reads at 5 s had already resolved it
+  `FAILED`. A record seen during the send is still adopted at once. The open send is held in
+  memory, so a restart has none and the budget counts from boot. A send from the previous life
+  that lands after that budget is not covered here. Neither is a send that timed out on our
+  side but that the venue accepts after the budget. #642 tracks both. [#640]**)**
 - An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
   cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
   preserved) from `PARTIALLY_FILLED` (ADR-0010).

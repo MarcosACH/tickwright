@@ -335,12 +335,17 @@ class Reconciler:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record
         proves the send landed → adopt it. No record is not yet proof — the send
         may still be on the wire in this very life — so only the budget-exhausting
-        consecutive miss resolves ``FAILED``, never a blind resend. That budget
+        consecutive miss resolves ``FAILED``, never a blind resend. A miss counts
+        only once the place call has returned (#640). That budget
         stays under the ghost grace window, so a retried order can never be
         ghosted (ADR-0008/0011)."""
         if view.has_record:
             self._inflight_run.record_present(order.cloid)
             await self._adopt(order, view)
+            return
+        if self._cache.is_sending(order.cloid):
+            # The venue can still accept a send that has not returned, so this
+            # miss does not count. The budget starts when the send ends (#640).
             return
         if self._inflight_run.record_absent(order.cloid):
             await self._bus.publish(self._failed_verdict(order))

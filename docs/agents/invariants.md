@@ -164,6 +164,8 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    abandoned with real exposure behind it, against a slower first ghost. Unchanged, and a
    different resolution: a `PENDING`/`SUBMITTED` saga the venue positively has no record of
    resolves `FAILED`.* (ADR-0011 inv 3, ADR-0010)
+   A read taken while the order's place call is still open is not positive proof. It never
+   counts toward that `FAILED` verdict. (ADR-0011 Resolutions, #640)
 12. **A venue read or cancel goes by the oid once the saga holds one.** A cloid is derived from
    the signal id, and the venue remembers every cloid ever placed on the account. A fresh store
    restarts the seq at 1, so a second life places the same cloid again, and a read by cloid can

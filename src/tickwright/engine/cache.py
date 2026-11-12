@@ -5,6 +5,10 @@ A write-through projection of the ``Store``, **never** the source of truth:
 are direct method calls — pull-then-subscribe, because startup events predate
 any strategy's subscription. Writes flow only through the ``ExecutionManager``'s
 checkpoint path.
+
+One exception holds no store state. The ``ExecutionManager`` marks a place call
+open and returned directly here. That mark lives only in memory, so it has no
+checkpoint to go through (#640).
 """
 
 from tickwright.domain import Order, SignalId, Store
@@ -26,6 +30,10 @@ class Cache:
         # The seqs the emitter sent and a handled cancel all consumed (ADR-0016,
         # ADR-0055). No saga may record them, so the seq high-water fold reads them here.
         self._seq_records: dict[str, int] = {}
+        # The cloids whose place call has not returned in this session. While a
+        # send is open, a "no record" read is not proof it failed (#640). A
+        # restart has no open sends, so ``rebuild`` keeps nothing here.
+        self._sending: set[str] = set()
 
     def raise_seq(self, strategy_id: str, seq: int) -> None:
         """Write through: durably raise ``strategy_id``'s seq record, then project it.
@@ -109,6 +117,18 @@ class Cache:
         ``None`` if it has not been written since the last ``rebuild`` — the
         recency the ghost cycle reads to protect a just-acked order (ADR-0011)."""
         return self._last_event_ns.get(cloid)
+
+    def mark_sending(self, cloid: str) -> None:
+        """Record that the place call for ``cloid`` has started."""
+        self._sending.add(cloid)
+
+    def mark_sent(self, cloid: str) -> None:
+        """Record that the place call for ``cloid`` has returned or raised."""
+        self._sending.discard(cloid)
+
+    def is_sending(self, cloid: str) -> bool:
+        """Whether the place call for ``cloid`` is still open in this session."""
+        return cloid in self._sending
 
     def open_orders(
         self, *, strategy_id: str | None = None, symbol: str | None = None
