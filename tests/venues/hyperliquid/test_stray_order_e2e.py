@@ -47,6 +47,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 BTC_SPEC = InstrumentSpec(
     symbol="BTC",
@@ -167,6 +168,7 @@ def _open_order_passes(
     listed_cloid: str | None = None,
     fills: list[dict] | None = None,
     passes: int = 1,
+    open_orders: object = None,
 ) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
 
@@ -174,9 +176,10 @@ def _open_order_passes(
     saga's own ref answers with, and ``fills`` its fill history. The listed
     order carries the saga's cloid, unless ``listed_cloid`` names another one.
     An empty string lists it with no cloid at all, as an order placed by hand.
+    ``open_orders`` replaces the list answer, such as with a failure.
 
     Returns the saga as stored after the passes, each pass result, and the
-    cancels sent followed by the stray and external log lines.
+    cancels sent followed by the stray, external and frozen log lines.
     """
     signal = _signal()
     cloid = derive_cloid(signal.signal_id)
@@ -190,7 +193,11 @@ def _open_order_passes(
             {
                 "orderStatus": confirm,
                 "userFillsByTime": fills or [],
-                "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": listed}],
+                "frontendOpenOrders": (
+                    [{"coin": "BTC", "oid": STRAY_OID, "cloid": listed}]
+                    if open_orders is None
+                    else open_orders
+                ),
                 "cancel": {
                     "status": "ok",
                     "response": {"type": "cancel", "data": {"statuses": ["success"]}},
@@ -228,7 +235,7 @@ def _open_order_passes(
     cancels = [
         q["action"]["cancels"] for url, q in post.requests if request_type(url, q) == "cancel"
     ]
-    named = ("reconcile.stray_cancelled", "reconcile.external_order")
+    named = ("reconcile.stray_cancelled", "reconcile.external_order", "reconcile.frozen")
     return store.get_order(cloid), results, [*cancels, *(e for e in events if e["event"] in named)]
 
 
@@ -311,6 +318,25 @@ def test_an_order_we_never_placed_is_logged_once_and_never_cancelled(listed_cloi
     [external] = seen
     assert external["event"] == "reconcile.external_order"
     assert external["venue_oid"] == str(STRAY_OID)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (TimeoutError("list read timed out"), PassResult.FAILED),
+        (IpRateLimited("429 from the venue"), PassResult.RATE_LIMITED),
+    ],
+    ids=["send-failed", "rate-limited"],
+)
+def test_a_failed_list_read_freezes_the_pass(failure: Exception, expected: PassResult) -> None:
+    # Without the list the pass cannot tell a stray from nothing at all. An
+    # outage must never read as "no order rests" (ADR-0011 inv 1).
+    saga, [result], seen = _open_order_passes(OrderState.FAILED, open_orders=failure)
+
+    assert result is expected
+    [frozen] = seen
+    assert (frozen["event"], frozen["scope"]) == ("reconcile.frozen", "cycle")
+    assert saga is not None and saga.state is OrderState.FAILED
 
 
 def test_an_earlier_lifes_order_is_logged_once_across_passes() -> None:

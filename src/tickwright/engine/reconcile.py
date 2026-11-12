@@ -302,8 +302,16 @@ class Reconciler:
         saga's own ref. The cancel goes by the oid that read returns.
         """
         listed = await self._account.fetch_open_orders()
-        if isinstance(listed, VenueReadFailure):
-            return PassResult.FAILED
+        match listed:
+            case VenueReadFailure.SEND_FAILED:
+                # Without the list a stray and an empty account look the same.
+                self._freeze(_FreezeScope.CYCLE)
+                return PassResult.FAILED
+            case VenueReadFailure.RATE_LIMITED_IP:
+                self._freeze(_FreezeScope.CYCLE)
+                return PassResult.RATE_LIMITED
+            case VenueReadFailure():
+                return PassResult.FAILED
         for entry in listed:
             if isinstance(entry, ExternalOrderRef):
                 # No cloid at all, so placed by hand or by another client.
