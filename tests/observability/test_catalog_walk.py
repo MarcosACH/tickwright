@@ -252,6 +252,13 @@ class _StrayVenue(VenueDouble):
         return [VenueOpenOrder(symbol="BTC", cloid="0xabc", venue_oid="77")]
 
 
+class _ExternalVenue(_StrayVenue):
+    """A venue that lists ``0xabc`` but has no record of it for the saga's ref."""
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        return VenueOrderView(status=None)
+
+
 class _Strategy(NeverWakes):
     """A minimal strategy whose handlers raise, to exercise containment."""
 
@@ -565,6 +572,11 @@ def _drive_frozen() -> None:
 
 def _drive_stray_cancelled() -> None:
     reconciler = _reconciler(OrderState.FAILED, _StrayVenue(), ReconcileConfig())
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
+
+
+def _drive_external_order() -> None:
+    reconciler = _reconciler(OrderState.FAILED, _ExternalVenue(), ReconcileConfig())
     assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
 
 
@@ -1368,6 +1380,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.RECONCILE_STRAY_CANCELLED: _drive_stray_cancelled,
+    NamedEvent.RECONCILE_EXTERNAL_ORDER: _drive_external_order,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_MODE_UNVERIFIED: _drive_account_mode_unverified,

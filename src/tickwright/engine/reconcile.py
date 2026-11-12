@@ -310,7 +310,14 @@ class Reconciler:
                 view = await self._exchange.fetch_order(OrderRef.of(order))
                 if isinstance(view, VenueReadFailure):
                     return PassResult.FAILED
-                if view.status is None or view.status.status not in WORKING_STATES:
+                if view.status is None:
+                    # The venue lists this cloid, yet a read by the saga's own
+                    # ref finds no record of it. An order we cancelled or
+                    # filled would still answer with its record. So this one
+                    # is not the saga's, most often an earlier life's (#354).
+                    named_event(NamedEvent.RECONCILE_EXTERNAL_ORDER, venue_oid=entry.venue_oid)
+                    continue
+                if view.status.status not in WORKING_STATES:
                     continue
                 venue_oid = view.status.venue_oid
                 await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])

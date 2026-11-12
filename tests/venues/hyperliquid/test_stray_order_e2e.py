@@ -159,19 +159,16 @@ def test_an_order_the_venue_accepts_after_the_saga_failed_is_cancelled() -> None
 
 
 def _one_open_order_pass(
-    state: OrderState, *, status: str = "open"
+    state: OrderState, *, status: str = "open", placed_ms: int = LANDED_MS
 ) -> tuple[FakeExchangeApi, PassResult, list[dict]]:
     """One open-order pass over a saga in ``state`` while the venue lists its cloid.
 
-    ``status`` is what the confirm read by the saga's own ref answers.
+    ``status`` and ``placed_ms`` shape the record the confirm read by the
+    saga's own ref answers with.
     """
     signal = _signal()
     cloid = derive_cloid(signal.signal_id)
-    confirm = (
-        {"status": "unknownOid"}
-        if status == "unknownOid"
-        else order_status_response(cloid=cloid, status=status, oid=STRAY_OID, placed_ms=LANDED_MS)
-    )
+    confirm = order_status_response(cloid=cloid, status=status, oid=STRAY_OID, placed_ms=placed_ms)
 
     async def main() -> tuple[FakeExchangeApi, PassResult]:
         bus = InMemoryBus()
@@ -218,11 +215,8 @@ def _one_open_order_pass(
     cancels = [
         q["action"]["cancels"] for url, q in post.requests if request_type(url, q) == "cancel"
     ]
-    return (
-        post,
-        result,
-        [*cancels, *(e for e in events if e["event"] == "reconcile.stray_cancelled")],
-    )
+    named = ("reconcile.stray_cancelled", "reconcile.external_order")
+    return post, result, [*cancels, *(e for e in events if e["event"] in named)]
 
 
 @pytest.mark.parametrize("state", [OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED])
@@ -244,7 +238,7 @@ def test_an_order_under_a_denied_cloid_is_external_and_not_cancelled() -> None:
     assert seen == []
 
 
-@pytest.mark.parametrize("status", ["filled", "canceled", "unknownOid"])
+@pytest.mark.parametrize("status", ["filled", "canceled"])
 def test_no_cancel_when_the_confirm_read_says_the_order_no_longer_rests(status: str) -> None:
     # The list is a snapshot and can be stale by the time we act on it. The
     # confirm read is the proof, so an order it says is gone gets no cancel.
@@ -252,3 +246,15 @@ def test_no_cancel_when_the_confirm_read_says_the_order_no_longer_rests(status: 
 
     assert result is PassResult.PROVED
     assert seen == []
+
+
+def test_a_listed_order_placed_before_the_saga_is_external_and_not_cancelled() -> None:
+    # The cloid matches, but the venue placed this order 5 minutes before the
+    # saga existed. It belongs to an earlier life, not to this saga (#354).
+    before_saga_ms = SENT_MS - 300_000
+    _, result, seen = _one_open_order_pass(OrderState.FAILED, placed_ms=before_saga_ms)
+
+    assert result is PassResult.PROVED
+    [external] = seen
+    assert external["event"] == "reconcile.external_order"
+    assert external["venue_oid"] == str(STRAY_OID)
