@@ -215,6 +215,9 @@ durable too. A halt outlives a crash and is cleared only by an explicit reset.
 | `SIGUSR1` | Trip the kill switch. New orders are denied. Resting orders stay. |
 | `SIGUSR2` | Reset the kill switch. |
 
+A boot on a tripped kill switch logs `guard.kill_switch_restored` at `warning`. The line carries
+the trip's `reason` and `tripped_at`. Every order is denied until a `SIGUSR2` resets the switch.
+
 A stop during boot starts no strategy and no feed. It ends the boot at once, even while the engine
 waits on a venue outage. The next boot recovers from where it stopped, as it would after a crash.
 
