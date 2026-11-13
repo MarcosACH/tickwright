@@ -258,6 +258,10 @@ class Reconciler:
         # The same span for the account's open-order list (ADR-0063). Its own
         # window, since the list is not an order.
         self._unreadable_list_run = GraceWindow(span_ns=unreadable_span_ns)
+        # The same span for the stray check's confirm reads (ADR-0063). Its own
+        # window, since a saga ends without a read. A run left open from the
+        # saga's working life would fault its first unreadable confirm read.
+        self._unreadable_stray_run = GraceWindow(span_ns=unreadable_span_ns)
         self._ghost_gate = GhostGate(
             grace_span_ns=duration_ns(config.ghost_grace_seconds, name="ghost_grace_seconds"),
             protection_span_ns=duration_ns(
@@ -341,11 +345,14 @@ class Reconciler:
             if order.is_terminal:
                 sagas[order.cloid] = order
                 listed_under.setdefault(order.cloid, []).append(entry)
+        # A stray the list no longer names is over, and so is its unreadable
+        # run. If it is listed again, its next unreadable read starts a new one.
+        self._unreadable_stray_run.retain(sagas.keys())
 
         async def cancel_stray(order: Order, view: VenueOrderView) -> None:
             await self._cancel_stray(order, view, listed_under[order.cloid])
 
-        return await self._read_each(sagas.values(), cancel_stray)
+        return await self._read_each(sagas.values(), cancel_stray, self._unreadable_stray_run)
 
     async def _cancel_stray(
         self, order: Order, view: VenueOrderView, listed: list[VenueOpenOrder]
@@ -419,12 +426,13 @@ class Reconciler:
                 for order in self._cache.open_orders()
                 if states is None or order.state in states
             )
-            return await self._read_each(orders, handle)
+            return await self._read_each(orders, handle, self._unreadable_run)
 
     async def _read_each(
         self,
         orders: Iterable[Order],
         handle: Callable[[Order, VenueOrderView], Awaitable[None]],
+        unreadable: GraceWindow,
     ) -> PassResult:
         """Read each saga in ``orders`` by its own ref and let ``handle`` resolve
         the answer. Every per-order read in a pass goes through here, the
@@ -432,7 +440,8 @@ class Reconciler:
         connectivity guard here and nowhere else (ADR-0011 inv 1). ``PROVED``
         only on a pass that proved **every** order it looked at.
         ``RATE_LIMITED`` when a read was refused for the IP limit, and
-        ``FAILED`` when any other read failed.
+        ``FAILED`` when any other read failed. An unreadable body is charged
+        to ``unreadable``, keyed by cloid.
 
         **How much a failed read costs turns on whether the venue answered**
         (ADR-0049). A dead send says nothing about this order in particular — the
@@ -455,10 +464,10 @@ class Reconciler:
                     case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
                         return self._stop_pass(view)
                     case VenueReadFailure.UNREADABLE_BODY:
-                        self._charge_unreadable(order)
+                        self._charge_unreadable(order, unreadable)
                         proved_all = False
                     case _:
-                        self._unreadable_run.record_present(order.cloid)
+                        unreadable.record_present(order.cloid)
                         await handle(order, view)
         return PassResult.PROVED if proved_all else PassResult.FAILED
 
@@ -521,9 +530,10 @@ class Reconciler:
         await self._bus.publish(self._verdict(order, status, reason))
         named_event(NamedEvent.GHOST_RECONCILED, resolution=status.value)
 
-    def _charge_unreadable(self, order: Order) -> None:
-        """Hold one unreadable read against ``order``'s span and freeze it — or
-        escalate, once the span says the condition is durable (ADR-0049).
+    def _charge_unreadable(self, order: Order, unreadable: GraceWindow) -> None:
+        """Hold one unreadable read against ``order``'s span in ``unreadable``
+        and freeze it — or escalate, once the span says the condition is
+        durable (ADR-0049).
 
         A single unreadable body is transient by assumption and stays one: the
         order is skipped, the pass carries on, and the next cycle re-reads it.
@@ -540,7 +550,7 @@ class Reconciler:
         each of these reads against this cloid with the body it could not read,
         so the refusal names the order and leaves the evidence where it is.
         """
-        if not self._unreadable_run.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
+        if not unreadable.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
             self._freeze(_FreezeScope.ORDER)
             return
         raise VenueReadUnresolvable(

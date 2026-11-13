@@ -33,6 +33,7 @@ from tickwright.domain import (
     InstrumentSpec,
     Order,
     OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceSignal,
     Side,
@@ -410,6 +411,9 @@ def test_a_failed_confirm_read_freezes_and_sends_no_cancel(
 UNREADABLE_LIST = {"error": "not a list"}
 """A list answer the adapter cannot read, as a truncated or changed response."""
 
+UNREADABLE_STATUS = {"error": "not an order status"}
+"""An order status answer the adapter cannot read."""
+
 
 def test_a_list_unreadable_across_the_span_faults_the_engine() -> None:
     # One unreadable list may be a truncated response. A list unreadable for
@@ -479,3 +483,95 @@ def test_an_earlier_lifes_order_is_logged_once_across_passes() -> None:
     _, _, seen = _open_order_passes(OrderState.FAILED, placed_ms=before_saga_ms, passes=3)
 
     assert [e["event"] for e in seen] == ["reconcile.external_order"]
+
+
+def test_a_list_without_the_stray_restarts_its_unreadable_span() -> None:
+    # The confirm read is unreadable at 0s. At 60s the list no longer names
+    # the order, so that run is over. At 120s the order is listed again, and
+    # its unreadable confirm read is the first of a new run (ADR-0049).
+    listed = [{"coin": "BTC", "oid": STRAY_OID, "cloid": derive_cloid(_signal().signal_id)}]
+    answers = answers_in_turn(listed, [], listed)
+
+    _, results, _ = _open_order_passes(
+        OrderState.FAILED,
+        open_orders=answers,
+        confirm_answer=UNREADABLE_STATUS,
+        passes=3,
+        interval_seconds=60,
+    )
+
+    assert results == [PassResult.FAILED, PassResult.PROVED, PassResult.FAILED]
+
+
+def test_an_unreadable_read_from_the_sagas_working_life_never_faults_its_stray_check() -> None:
+    # One unreadable read while the saga was LIVE starts its span. Then a push
+    # ends the saga, with no read in between. Long after, the venue lists an
+    # order under its cloid. One unreadable confirm read is still only one
+    # sample, so it freezes and never faults (ADR-0049).
+    signal = _signal()
+    cloid = derive_cloid(signal.signal_id)
+    config = ReconcileConfig()
+
+    async def main() -> list[PassResult]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=(LANDED_MS + 30_000) * 1_000_000)
+        post = FakeExchangeApi(
+            {
+                "orderStatus": UNREADABLE_STATUS,
+                "userFillsByTime": [],
+                "frontendOpenOrders": [{"coin": "BTC", "oid": STRAY_OID, "cloid": cloid}],
+            }
+        )
+        exchange = _make_exchange(post, bus, clock)
+        store = SQLiteStore(":memory:")
+        store.checkpoint(
+            Order(
+                cloid=cloid,
+                strategy_id=signal.strategy_id,
+                signal_id=signal.signal_id,
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=signal.quantity,
+                order_type=OrderType.LIMIT,
+                state=OrderState.LIVE,
+                created_ts_ns=SENT_MS * 1_000_000,
+            ),
+            ts_ns=SENT_MS * 1_000_000,
+        )
+        checks = checkpointer(store, clock=clock)
+        checks.cache.rebuild()
+        manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
+        bus.subscribe(ExecutionReport, manager.on_execution_report)
+        reconciler = Reconciler(
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=checks.cache,
+            config=config,
+        )
+
+        working = await reconciler.reconcile_open_orders()
+        now = clock.timestamp_ns()
+        await bus.publish(
+            OrderStatusReport(
+                ts_event=now,
+                ts_init=now,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.CANCELLED,
+                venue_oid=str(STRAY_OID),
+            )
+        )
+        cancelled = store.get_order(cloid)
+        assert cancelled is not None and cancelled.state is OrderState.CANCELLED
+
+        clock.advance_to(now + (int(config.unreadable_grace_seconds) + 30) * 1_000_000_000)
+        return [working, await reconciler.reconcile_open_orders()]
+
+    with capture_events() as events:
+        results = asyncio.run(main())
+
+    assert results == [PassResult.FAILED, PassResult.FAILED]
+    frozen = [e["scope"] for e in events if e["event"] == "reconcile.frozen"]
+    assert frozen == ["order", "order"]

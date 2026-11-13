@@ -31,7 +31,8 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
   - No longer resting: do nothing.
   - Read failed: as in the per-order passes (ADR-0049). A failed send freezes the cycle. A rate
     limit freezes it and returns `RATE_LIMITED`. An unreadable body skips that order and charges
-    its own unreadable span.
+    its own unreadable span. That span is kept apart from the saga's working life, so a run left
+    open there never counts. A list read that no longer names the order ends its run.
 - **The Reconciler cancels directly.** It sends the cancel on its `OrderAnchor`, by the oid from
   the confirm read. No saga is written. The pass keeps no memory, so a lost cancel is sent again
   on the next pass.
