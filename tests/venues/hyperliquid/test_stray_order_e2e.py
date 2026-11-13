@@ -174,6 +174,7 @@ def _open_order_passes(
     confirm_answer: object = None,
     interval_seconds: int = 0,
     booked_trade_id: str | None = None,
+    saga_oid: int | None = None,
 ) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
 
@@ -185,6 +186,7 @@ def _open_order_passes(
     ``confirm_answer`` replaces the confirm read's answer the same way. The clock
     moves ``interval_seconds`` after each pass, as the cadence would.
     ``booked_trade_id`` books a 0.2 fill on the saga before it went terminal.
+    ``saga_oid`` gives the saga the oid an ack would have stored.
 
     Returns the saga as stored after the passes, each pass result, and the
     cancels sent followed by the stray, external and frozen log lines.
@@ -224,6 +226,7 @@ def _open_order_passes(
             order_type=OrderType.LIMIT,
             state=OrderState.LIVE if booked_trade_id else state,
             created_ts_ns=SENT_MS * 1_000_000,
+            venue_oid=None if saga_oid is None else str(saga_oid),
         )
         if booked_trade_id:
             saga.record_fill(
@@ -514,6 +517,36 @@ def test_two_listed_orders_that_both_pass_the_age_check_are_both_cancelled() -> 
     assert lines == [
         ("reconcile.stray_cancelled", str(STRAY_OID)),
         ("reconcile.stray_cancelled", str(earlier_oid)),
+    ]
+
+
+def test_a_saga_with_an_oid_cancels_only_its_own_and_logs_the_other_listed_order() -> None:
+    # The saga holds an oid, so one read by it names its order. The other oid
+    # under its cloid is external, even though it would pass the age check.
+    # Were each listed oid read instead, both orders would be cancelled.
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+    earlier = order_status_response(cloid=cloid, oid=earlier_oid, placed_ms=SENT_MS - 30_000)
+
+    def by_oid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else earlier
+
+    _, [result], seen = _open_order_passes(
+        OrderState.CANCELLED, open_orders=listed, confirm_answer=by_oid, saga_oid=STRAY_OID
+    )
+
+    assert result is PassResult.PROVED
+    cancels = [s for s in seen if isinstance(s, list)]
+    assert cancels == [[{"a": 3, "o": STRAY_OID}]]
+    lines = [(e["event"], e["venue_oid"]) for e in seen if isinstance(e, dict)]
+    assert lines == [
+        ("reconcile.external_order", str(earlier_oid)),
+        ("reconcile.stray_cancelled", str(STRAY_OID)),
     ]
 
 
