@@ -87,6 +87,16 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
 - **Check on every cadence and at boot.** Rejected. The open-order cadence is the one that already
   reads resting orders. One more list read per pass is cheap.
 
+**(Amended by #652 — the listed oid stays a field on `OrderRef`:**
+`OrderRef` names what the saga holds, and the saga does not hold a listed oid. So the review of
+PR #653 tried a `fetch_order(ref, *, listed_oid=None)` argument instead. Rejected. mypy then
+reported 264 errors in 36 files, and all but `app/build.py` were tests. The field's risk is small.
+Only `fetch_order` reads it. A ref that carried it into `cancel` would cancel by cloid. That is how
+an unacked saga's cancel already works. No caller builds such a ref, since the stray cancel builds
+a fresh ref from the saga. The `OrderRef` docstring states this. Revisit this if a method other than
+`fetch_order` ever needs the field.
+[#653](https://github.com/MarcosACH/tickwright/pull/653)**)**
+
 ## Consequences
 
 - A stray rests for at most one open-order interval (30 s by default) after the venue lists it,
