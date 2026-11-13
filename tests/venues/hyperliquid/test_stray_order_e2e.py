@@ -486,6 +486,37 @@ def test_two_listed_orders_under_one_cloid_get_one_cancel_and_one_external_line(
     ]
 
 
+def test_two_listed_orders_that_both_pass_the_age_check_are_both_cancelled() -> None:
+    # An earlier life placed the same cloid 30s before this saga existed. The
+    # age check allows 60s of clock skew, so that order passes it too, and the
+    # reads cannot tell which order is ours. A cancel never adds exposure, so
+    # both are cancelled rather than leaving our own stray to fill.
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+    earlier = order_status_response(cloid=cloid, oid=earlier_oid, placed_ms=SENT_MS - 30_000)
+
+    def by_oid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else earlier
+
+    _, [result], seen = _open_order_passes(
+        OrderState.FAILED, open_orders=listed, confirm_answer=by_oid
+    )
+
+    assert result is PassResult.PROVED
+    cancels = [s for s in seen if isinstance(s, list)]
+    assert cancels == [[{"a": 3, "o": STRAY_OID}], [{"a": 3, "o": earlier_oid}]]
+    lines = [(e["event"], e["venue_oid"]) for e in seen if isinstance(e, dict)]
+    assert lines == [
+        ("reconcile.stray_cancelled", str(STRAY_OID)),
+        ("reconcile.stray_cancelled", str(earlier_oid)),
+    ]
+
+
 def test_an_earlier_lifes_order_is_logged_once_across_passes() -> None:
     before_saga_ms = SENT_MS - 300_000
     _, _, seen = _open_order_passes(OrderState.FAILED, placed_ms=before_saga_ms, passes=3)
