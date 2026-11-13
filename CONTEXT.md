@@ -152,9 +152,9 @@ _Avoid_: broker, venue client, gateway (fine informally).
 **Order anchor** / `OrderAnchor` *(Protocol)*:
 The half of [[Exchange]] keyed by [[Client order id|cloid]] — `place`, `cancel`, `fetch_order` —
 and the seam the order grain is constructed against: the [[ExecutionManager]] sends on it, the
-[[Reconciliation|Reconciler]] reads back on it, and neither touches the account. Commands and a
-query together rather than split again, because a placement's outcome is *learned by reading it
-back*: one anchor, two halves of one loop. See ADR-0011, ADR-0015, ADR-0034.
+[[Reconciliation|Reconciler]] reads back on it, and the ExecutionManager never touches the
+account. Commands and a query together rather than split again, because a placement's outcome is
+*learned by reading it back*: one anchor, two halves of one loop. See ADR-0011, ADR-0015, ADR-0034.
 Since #242 `fetch_order` takes an `OrderRef` rather than a bare cloid. The ref adds the symbol,
 the venue's oid, and the ack time, which the read needs once the venue has dropped the order
 record and only the fill history is left (ADR-0011 inv 2).
@@ -167,6 +167,9 @@ is one call that a venue can send as one batch (ADR-0055).
 Since #478 the ref also carries the size the saga asked for. A venue that shrank a reduce-only
 order reports it `filled` for less, and only the asked size shows the cut part (ADR-0057).
 Since #629 an IOC order the venue filled only in part reads the same way.
+Since #642 the Reconciler also sends on it, to cancel a [[Stray order]]. That cancel writes no
+saga, so the [[ExecutionManager]] stays the one saga writer. To find a stray, the Reconciler reads
+the open-order list on the [[Account anchor]].
 Since #468 `fetch_open_orders()` lists every order resting in the account, ours or not. Paper
 answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
@@ -412,6 +415,26 @@ with a single verdict — protected, waiting, or [[Ghost|ghost]]. A pure decisio
 clock, or telemetry) composing the grace-window tracker, so the "is it a ghost yet?" timing rule
 reads in one place rather than smeared across the reconciler. See ADR-0011.
 _Avoid_: throttle, filter (too generic — this is the specific two-phase ghost-timing rule).
+
+**Stray order**:
+A venue order that rests under a cloid whose saga is terminal, any terminal but `DENIED`. It is
+the opposite of a [[Ghost]]: the venue works an order the books call finished. A late send can
+make one, for example a send from a previous life that lands after boot resolved it `FAILED`.
+The open-order cycle finds it and cancels it by oid. The saga stays terminal, and its fills are
+logged but never booked. [[Ledger reconciliation]] books any position it left as unattributed
+(ADR-0063, #642).
+_Avoid_: orphan, stale order, zombie order.
+
+**External order**:
+A venue order the engine did not place. Its cloid is unknown to the books, or it is an earlier
+life's order under a cloid a saga holds. That shows as a record older than the saga (invariant
+12). A saga with an oid reads by it, so any other oid listed under its cloid is external (#354).
+A saga with no oid reads each listed oid, and the age check runs on each read (#652). An earlier
+life's order placed within the skew allowance passes that check, so it is cancelled as a stray.
+A `DENIED` saga's cloid on
+the venue is external too, since that saga never sent. The engine logs it and never acts on it. Only an
+operator `cancel-all` or `flatten` may cancel it. See ADR-0011, ADR-0052, ADR-0063.
+_Avoid_: foreign order, unknown order.
 
 **Synthetic event**:
 A lifecycle [[Event]] the reconciler generates (a healed fill, a ghost rejection) rather than

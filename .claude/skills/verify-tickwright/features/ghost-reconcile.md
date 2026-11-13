@@ -5,15 +5,18 @@ one empty read. It arms a 90 second grace window. The open-order cadence re-read
 seconds, and an order absent for the whole window ends `rejected` as a ghost. Since #484, paper
 rebuilds its book from the store at boot, so a plain restart no longer makes a ghost. This file
 proves that a restart keeps the order, on both clocks. The helper cannot make a real ghost today.
+The same pass also lists the venue's open orders (ADR-0063). On a clean restart it cancels no
+stray and logs no external order.
 
 ## Sub-features
 
-- `ghost-keep-replay` on the replay feed, a restart keeps the resting order `LIVE` and ghosts
-  nothing.
-- `ghost-keep-wall-clock` on the Hyperliquid feed, the order is still `LIVE` two minutes after
-  `engine.barrier_cleared`. That is past the 90 second window.
+- `ghost-keep-replay` on the replay feed, a restart keeps the resting order `LIVE`, ghosts
+  nothing, and the open-order pass finds no stray and no external order.
+- `ghost-keep-wall-clock` on the Hyperliquid feed, the order is still `LIVE` 150 seconds after
+  `engine.barrier_cleared`. That is past the 90 second window plus one 30 second pass.
 - `ghost-reject` verified-unreachable. A ghost needs an order the venue has no record of. Paper
-  now keeps every resting order, and no helper verb removes an order from a venue.
+  now keeps every resting order. `cancel-all` removes an order from the venue, but it also
+  writes `cancelled` to the store, so it makes no ghost.
   `tests/engine/test_reconcile.py` proves the window and the reject in process.
   `tests/engine/test_execution_manager.py` proves the reason
   `reconciliation: ghost: vanished from the venue`.
@@ -36,12 +39,14 @@ Preconditions:
   `$V await ghostlive first --order $($V cloid rester:BTC:1)=LIVE --timeout 90`,
   `$V signal ghostlive first TERM`, `$V await ghostlive first --exit`.
 - **Wall clock, keep.** Run the same `start` with life `second`,
-  `$V await ghostlive second --event engine.barrier_cleared --timeout 60`, then wait two
-  minutes. Then `TERM`, `--exit`, `dump`. Check:
+  `$V await ghostlive second --event engine.barrier_cleared --timeout 60`, then wait 150
+  seconds. Then `TERM`, `--exit`, `dump`. Check:
   `$V check ghostlive second ghost-keep-wall-clock --sql "select state from orders" --expect live`,
   `$V check ghostlive second ghost-keep-wall-clock --event ghost.reconciled --expect 0`,
-  `$V check ghostlive second ghost-keep-wall-clock --event order.placed --expect 0`.
-  Then `$V report ghostlive`, expected `PASS (0 of 3 checks failed)`, and `$V cleanup ghostlive`.
+  `$V check ghostlive second ghost-keep-wall-clock --event order.placed --expect 0`,
+  `$V check ghostlive second ghost-keep-wall-clock --event reconcile.stray_cancelled --expect 0`,
+  `$V check ghostlive second ghost-keep-wall-clock --event reconcile.external_order --expect 0`.
+  Then `$V report ghostlive`, expected `PASS (0 of 5 checks failed)`, and `$V cleanup ghostlive`.
 - **Replay, rest.** Run `$V init ghost --feature ghost-reconcile`,
   `$V ticks ghost first --row ETH:2500@0`,
   `$V ticks ghost second --base 2024-01-01T00:00:05+00:00 --row ETH:2502@0 --row ETH:2501@2m`,
@@ -52,8 +57,10 @@ Preconditions:
   clock starts at 0, and the first row jumps it to 2024, so the 90 second window is spent at
   once. The second row gives reconcile two more minutes. Then `TERM`, `--exit`, `dump`. Check:
   `$V check ghost second ghost-keep-replay --sql "select state from orders" --expect live`,
-  `$V check ghost second ghost-keep-replay --event ghost.reconciled --expect 0`.
-- **Report.** Run `$V report ghost`. Expected verdict: `PASS (0 of 2 checks failed)`.
+  `$V check ghost second ghost-keep-replay --event ghost.reconciled --expect 0`,
+  `$V check ghost second ghost-keep-replay --event reconcile.stray_cancelled --expect 0`,
+  `$V check ghost second ghost-keep-replay --event reconcile.external_order --expect 0`.
+- **Report.** Run `$V report ghost`. Expected verdict: `PASS (0 of 4 checks failed)`.
 - **Cleanup.** Run `$V cleanup ghost`.
 
 ## Gotchas

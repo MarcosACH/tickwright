@@ -76,6 +76,7 @@ from tickwright.domain import (
     PreTradeGuard,
     Side,
     Signal,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     derive_cloid,
@@ -233,6 +234,31 @@ class _DarkVenue(VenueDouble):
         return VenueReadFailure.SEND_FAILED
 
 
+class _StrayVenue(VenueDouble):
+    """A venue that still works ``0xabc`` with oid 77, whatever the saga says."""
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("the stray walk never places")
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        return None
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        return VenueOrderView(
+            status=replace(_status(OrderState.LIVE, cloid=ref.cloid), venue_oid="77")
+        )
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
+        return [VenueOpenOrder(symbol="BTC", cloid="0xabc", venue_oid="77")]
+
+
+class _ExternalVenue(_StrayVenue):
+    """A venue that lists ``0xabc`` but has no record of it for the saga's ref."""
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        return VenueOrderView(status=None)
+
+
 class _Strategy(NeverWakes):
     """A minimal strategy whose handlers raise, to exercise containment."""
 
@@ -290,6 +316,7 @@ def _reconciler(state: OrderState, venue: Exchange, config: ReconcileConfig) -> 
         bus=InMemoryBus(),
         clock=clock,
         exchange=venue,
+        account=venue,
         cache=cache,
         config=config,
     )
@@ -507,6 +534,7 @@ def _drive_recency_skipped() -> None:
         bus=InMemoryBus(),
         clock=clock,
         exchange=_ForgetfulVenue(),
+        account=_ForgetfulVenue(),
         cache=cache,
         config=ReconcileConfig(recent_order_protection_seconds=30.0, ghost_grace_seconds=90.0),
     )
@@ -523,6 +551,7 @@ def _drive_ghost_reconciled() -> None:
         bus=InMemoryBus(),
         clock=clock,
         exchange=_ForgetfulVenue(),
+        account=_ForgetfulVenue(),
         cache=cache,
         config=ReconcileConfig(ghost_grace_seconds=90.0),
     )
@@ -539,6 +568,16 @@ def _drive_ghost_reconciled() -> None:
 def _drive_frozen() -> None:
     reconciler = _reconciler(OrderState.SUBMITTED, _DarkVenue(), ReconcileConfig())
     assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.FAILED
+
+
+def _drive_stray_cancelled() -> None:
+    reconciler = _reconciler(OrderState.FAILED, _StrayVenue(), ReconcileConfig())
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
+
+
+def _drive_external_order() -> None:
+    reconciler = _reconciler(OrderState.FAILED, _ExternalVenue(), ReconcileConfig())
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
 
 
 def _drive_exchange_request_failed() -> None:
@@ -1310,6 +1349,9 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_REJECTED: _drive_status(OrderState.REJECTED),
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
+    NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL: _drive_status(
+        OrderState.CANCELLED, OrderState.LIVE
+    ),
     NamedEvent.POSITION_OPENED: _drive_position_changes(closing=False),
     NamedEvent.POSITION_CHANGED: _drive_position_changed,
     NamedEvent.POSITION_CLOSED: _drive_position_changes(closing=True),
@@ -1340,6 +1382,8 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: _drive_recency_skipped,
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
+    NamedEvent.RECONCILE_STRAY_CANCELLED: _drive_stray_cancelled,
+    NamedEvent.RECONCILE_EXTERNAL_ORDER: _drive_external_order,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_MODE_UNVERIFIED: _drive_account_mode_unverified,

@@ -300,6 +300,7 @@ def test_reconcile_after_a_restart_books_the_rest_of_a_flatten_order_by_the_same
             bus=second.bus,
             clock=clock,
             exchange=venue,
+            account=venue,
             cache=second.checks.cache,
             config=ReconcileConfig(),
         )

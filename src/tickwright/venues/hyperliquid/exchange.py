@@ -546,7 +546,8 @@ class HyperliquidExchange:
             send=self._send_action,
             normalize=functools.partial(_cancel_adjudications, count=len(refs)),
             # A failure names every order in the batch. Each may still rest, and
-            # reconciliation never resends a cancel (ADR-0055).
+            # reconciliation never resends a saga's cancel (ADR-0055). Only a
+            # stray's cancel is sent again, on the next pass (ADR-0063).
             cloids=[ref.cloid for ref in refs if isinstance(ref, OrderRef)],
         )
         if isinstance(adjudications, VenueReadFailure):
@@ -770,8 +771,13 @@ class HyperliquidExchange:
         per life of the account, so a read by cloid can answer with an earlier
         life's order. An oid names exactly one (#354). The venue takes either
         key under the same field. The cloid still names the saga in the log.
+
+        A saga with no oid can be read by an oid the open-order list named under
+        its cloid (#652). The saga does not hold that oid, so ``fetch_order``
+        still refuses a record placed before the saga.
         """
-        key: int | str = ref.cloid if ref.venue_oid is None else int(ref.venue_oid)
+        oid = ref.venue_oid or ref.listed_oid
+        key: int | str = ref.cloid if oid is None else int(oid)
         return await read(
             request="orderStatus",
             query={"type": "orderStatus", "user": self._user_address, "oid": key},

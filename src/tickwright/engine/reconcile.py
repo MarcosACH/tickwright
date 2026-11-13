@@ -8,7 +8,9 @@ against the account materialisation that precedes it (``barrier.py``).
 *Continuous*: two cycles thereafter — a fast in-flight check resolving
 ``SUBMITTED`` orders that never acked, and a slower open-order/ghost reconcile
 in which only continuous absence across the grace window (with a fill-history
-cross-check on every read) resolves a resting order terminally.
+cross-check on every read) resolves a resting order terminally. The open-order
+cycle then lists the account's open orders and cancels any the venue still
+works under a terminal saga, a stray order (ADR-0063).
 
 **The grace window is not a runtime-only rule** (ADR-0011 inv 3, as amended):
 startup puts an absent resting order to the same ``GhostGate``, so boot *arms*
@@ -36,19 +38,24 @@ reads prove the condition durable, rather than inventing a terminal state for
 an order whose body was never read.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from enum import Enum
+from functools import partial
 
 from tickwright.domain import (
     WORKING_STATES,
+    AccountAnchor,
     Clock,
     EventBus,
+    ExternalOrderRef,
     Order,
     OrderAnchor,
     OrderRef,
     OrderState,
     OrderStatusReport,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     VenueReadUnresolvable,
@@ -65,6 +72,10 @@ from .ghost_gate import GhostGate, GhostVerdict
 # Startup filters nothing — it reconciles every non-terminal saga. The open-order
 # cycle reads the domain's ``WORKING_STATES``.
 _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
+
+# The one key in the open-order list's unreadable span. The span is keyed
+# because it shares its type with the per-cloid one.
+_LIST_KEY = "open_orders"
 
 
 class _FreezeScope(Enum):
@@ -195,7 +206,10 @@ class ReconcileConfig:
 
 
 class Reconciler:
-    """Compares local non-terminal sagas against venue truth and heals the gap."""
+    """Compares local non-terminal sagas against venue truth and heals the gap.
+
+    The open-order pass also cancels a stray order, one the venue still works
+    under a terminal saga (ADR-0063)."""
 
     def __init__(
         self,
@@ -203,15 +217,20 @@ class Reconciler:
         bus: EventBus,
         clock: Clock,
         exchange: OrderAnchor,
+        account: AccountAnchor,
         cache: Cache,
         config: ReconcileConfig,
     ) -> None:
         self._bus = bus
         self._clock = clock
         # The **cloid** anchor and not the whole ``Exchange``: this cycle reads
-        # back what the manager sent, on the same grain and the same key, and
-        # the account is a different anchor with its own cycle (ADR-0034).
+        # back what the manager sent, on the same grain and the same key
+        # (ADR-0034). It also cancels a stray order on it (ADR-0063).
         self._exchange = exchange
+        # Read for one thing only: the list of every order resting in the
+        # account. A terminal saga has no per-cloid read left, so the list is
+        # the only way to see an order the venue still works for it (ADR-0063).
+        self._account = account
         self._cache = cache
         # Required, not defaulted: the Engine resolves the one ReconcileConfig
         # and paces the cadence loops off the same intervals — a second default
@@ -233,15 +252,27 @@ class Reconciler:
         # barrier not on a cadence at all, so a read count would mean a
         # different amount of waiting under each of them (ADR-0049 §4).
         config = self._config
-        self._unreadable_run = GraceWindow(
-            span_ns=duration_ns(config.unreadable_grace_seconds, name="unreadable_grace_seconds")
+        unreadable_span_ns = duration_ns(
+            config.unreadable_grace_seconds, name="unreadable_grace_seconds"
         )
+        self._unreadable_run = GraceWindow(span_ns=unreadable_span_ns)
+        # The same span for the account's open-order list (ADR-0063). Its own
+        # window, since the list is not an order.
+        self._unreadable_list_run = GraceWindow(span_ns=unreadable_span_ns)
+        # The same span for the stray check's confirm reads (ADR-0063). Its own
+        # window, since a saga ends without a read. A run left open from the
+        # saga's working life would fault its first unreadable confirm read.
+        self._unreadable_stray_run = GraceWindow(span_ns=unreadable_span_ns)
         self._ghost_gate = GhostGate(
             grace_span_ns=duration_ns(config.ghost_grace_seconds, name="ghost_grace_seconds"),
             protection_span_ns=duration_ns(
                 config.recent_order_protection_seconds, name="recent_order_protection_seconds"
             ),
         )
+        # Every external order already logged in this process life. The
+        # open-order pass sees the same one each cycle for as long as it rests,
+        # and the operator needs to hear of it once (ADR-0063).
+        self._externals_logged: set[str] = set()
 
     async def reconcile_startup(self) -> bool:
         """One mass-rebuild pass over every non-terminal saga; ``True`` on success.
@@ -273,7 +304,112 @@ class Reconciler:
         the same answer shapes and must resolve them the same way (inv 3), so
         there is one resolver and not a per-phase copy of it.
         """
-        return await self._drive("open_order", WORKING_STATES, self._adopt)
+        result = await self._drive("open_order", WORKING_STATES, self._adopt)
+        if result is not PassResult.PROVED:
+            return result
+        with operation(cycle="open_order"):
+            return await self._cancel_strays()
+
+    async def _cancel_strays(self) -> PassResult:
+        """Cancel every order the venue still works under a terminal saga
+        (ADR-0063).
+
+        The saga is never reopened. The strategy already got its terminal and
+        may have replaced the order, so adopting it could double the exposure.
+        The list alone is not proof, so each candidate is read again. A saga
+        with no oid is read once per oid listed under its cloid (#652), any
+        other saga by its own ref. The cancel goes by the oid that read returns.
+        """
+        listed = await self._account.fetch_open_orders()
+        match listed:
+            case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
+                # Without the list a stray and an empty account look the same.
+                return self._stop_pass(listed)
+            case VenueReadFailure.UNREADABLE_BODY:
+                self._charge_unreadable_list()
+                return PassResult.FAILED
+        self._unreadable_list_run.record_present(_LIST_KEY)
+        # Every listed order under each terminal saga's cloid. A cloid can name
+        # more than one venue order (#354). ``_stray_reads`` picks the reads.
+        sagas: dict[str, Order] = {}
+        listed_under: dict[str, list[VenueOpenOrder]] = {}
+        for entry in listed:
+            if isinstance(entry, ExternalOrderRef):
+                # No cloid at all, so placed by hand or by another client.
+                self._log_external(entry)
+                continue
+            order = self._cache.get_order(entry.cloid)
+            # A DENIED saga never sent its place, so a venue order under that
+            # cloid did not come from us, just as one under an unknown cloid.
+            if order is None or order.state is OrderState.DENIED:
+                self._log_external(entry)
+                continue
+            if order.is_terminal:
+                sagas[order.cloid] = order
+                listed_under.setdefault(order.cloid, []).append(entry)
+        reads = [
+            (ref, partial(self._cancel_stray, order, judged))
+            for order in sagas.values()
+            for ref, judged in _stray_reads(order, listed_under[order.cloid])
+        ]
+        # A stray the list no longer names is over, and so is its unreadable
+        # run. If it is listed again, its next unreadable read starts a new one.
+        self._unreadable_stray_run.retain({_span_key(ref) for ref, _ in reads})
+        return await self._read_each(reads, self._unreadable_stray_run)
+
+    async def _cancel_stray(
+        self, order: Order, listed: list[VenueOpenOrder], view: VenueOrderView
+    ) -> None:
+        """Cancel the saga's order if the confirm read says it still works.
+        Every other order in ``listed`` is external."""
+        if view.status is None:
+            # The venue lists this cloid, yet the confirm read finds no record
+            # the saga could own. An order we cancelled or filled would still
+            # answer with its record. So none of these is the saga's, most often
+            # an earlier life's (#354). A read by a listed oid that the age
+            # check refused lands here too, and judges only its own entry (#652).
+            for entry in listed:
+                self._log_external(entry)
+            return
+        venue_oid = view.status.venue_oid
+        for entry in listed:
+            # A read by the saga's own oid names its order. Another oid under
+            # the same cloid is an earlier life's order. A read by a listed oid
+            # judges only that entry, so nothing is logged here. Paper gives no
+            # oid to compare.
+            if None not in (entry.venue_oid, venue_oid) and entry.venue_oid != venue_oid:
+                self._log_external(entry)
+        if view.status.status not in WORKING_STATES:
+            return
+        await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])
+        # Its fills after the saga went terminal are never booked. Booking one
+        # would move a terminal saga, which faults the engine. Ledger
+        # reconciliation books the position as unattributed, and this line
+        # names the fills behind it. A fill booked before the terminal is in
+        # the books already, so it is left out. Totals and ids, not a list: a
+        # log field stays a scalar so it greps the same in every output.
+        unbooked = [fill for fill in view.fills if not order.has_booked(fill.trade_id)]
+        named_event(
+            NamedEvent.RECONCILE_STRAY_CANCELLED,
+            saga_state=order.state.value,
+            venue_oid=venue_oid,
+            unbooked_trade_ids=",".join(fill.trade_id for fill in unbooked),
+            unbooked_quantity=str(sum((f.quantity for f in unbooked), Decimal(0))),
+            unbooked_fee=str(sum((f.fee for f in unbooked), Decimal(0))),
+        )
+
+    def _log_external(self, entry: VenueOpenOrder | ExternalOrderRef) -> None:
+        """Log an order no saga of ours sent, once per process life. The engine
+        never acts on it. Only an operator ``cancel-all`` or ``flatten`` may
+        (ADR-0052)."""
+        ids = {"cloid": entry.cloid} if isinstance(entry, VenueOpenOrder) else {}
+        # Paper assigns no oid, so the cloid stands in for it there.
+        key = entry.venue_oid or ids["cloid"]
+        if key in self._externals_logged:
+            return
+        self._externals_logged.add(key)
+        with operation(**ids):
+            named_event(NamedEvent.RECONCILE_EXTERNAL_ORDER, venue_oid=entry.venue_oid)
 
     async def _drive(
         self,
@@ -283,11 +419,35 @@ class Reconciler:
     ) -> PassResult:
         """The one skeleton every cadence shares: over each non-terminal saga in
         ``states`` (all of them when ``None``), read venue truth by cloid and let
-        ``handle`` resolve the gap. A failed read trips the connectivity guard —
-        the whole pass freezes here and nowhere else, so ADR-0011 inv 1 lives in
-        exactly one place. ``PROVED`` only on a pass that proved **every** order
-        it looked at. ``RATE_LIMITED`` when a read was refused for the IP limit,
-        and ``FAILED`` when any other read failed.
+        ``handle`` resolve the gap. ``_read_each`` does the reading.
+        """
+        # The cycle id scopes the whole pass; the per-order cloid nests inside it
+        # (ADR-0020), so every reconcile record — a verdict or a freeze — is
+        # traceable to its cycle and its order without either being repeated as a
+        # field. Correlation binding lives here, at the one cadence chokepoint.
+        with operation(cycle=cycle):
+            # A generator, so each saga's state is checked when its turn comes.
+            reads = (
+                (OrderRef.of(order), partial(handle, order))
+                for order in self._cache.open_orders()
+                if states is None or order.state in states
+            )
+            return await self._read_each(reads, self._unreadable_run)
+
+    async def _read_each(
+        self,
+        reads: Iterable[tuple[OrderRef, Callable[[VenueOrderView], Awaitable[None]]]],
+        unreadable: GraceWindow,
+    ) -> PassResult:
+        """Read each ref in ``reads`` and let the resolver beside it act on the
+        answer. Every per-order read in a pass goes through here, the
+        per-saga cadences and the stray check alike. So a failed read trips the
+        connectivity guard here and nowhere else (ADR-0011 inv 1). ``PROVED``
+        only on a pass that proved **every** order it looked at.
+        ``RATE_LIMITED`` when a read was refused for the IP limit, and
+        ``FAILED`` when any other read failed. An unreadable body is charged
+        to ``unreadable``, keyed by the listed oid the ref reads by, else by
+        cloid.
 
         **How much a failed read costs turns on whether the venue answered**
         (ADR-0049). A dead send says nothing about this order in particular — the
@@ -302,34 +462,20 @@ class Reconciler:
         phase's contract intact (inv 5): a pass that could not prove one order
         never clears the ``StartupBarrier``, whichever way the read failed.
         """
-        # The cycle id scopes the whole pass; the per-order cloid nests inside it
-        # (ADR-0020), so every reconcile record — a verdict or a freeze — is
-        # traceable to its cycle and its order without either being repeated as a
-        # field. Correlation binding lives here, at the one cadence chokepoint.
-        with operation(cycle=cycle):
-            proved_all = True
-            for order in self._cache.open_orders():
-                if states is not None and order.state not in states:
-                    continue
-                with operation(cloid=order.cloid):
-                    view = await self._exchange.fetch_order(OrderRef.of(order))
-                    match view:
-                        case VenueReadFailure.SEND_FAILED:
-                            # Every other read in the pass would fail the same way.
-                            self._freeze(_FreezeScope.CYCLE)
-                            return PassResult.FAILED
-                        case VenueReadFailure.RATE_LIMITED_IP:
-                            # Every other read would be refused too, and would
-                            # spend more of the limit (ADR-0056).
-                            self._freeze(_FreezeScope.CYCLE)
-                            return PassResult.RATE_LIMITED
-                        case VenueReadFailure.UNREADABLE_BODY:
-                            self._charge_unreadable(order)
-                            proved_all = False
-                        case _:
-                            self._unreadable_run.record_present(order.cloid)
-                            await handle(order, view)
-            return PassResult.PROVED if proved_all else PassResult.FAILED
+        proved_all = True
+        for ref, resolve in reads:
+            with operation(cloid=ref.cloid):
+                view = await self._exchange.fetch_order(ref)
+                match view:
+                    case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
+                        return self._stop_pass(view)
+                    case VenueReadFailure.UNREADABLE_BODY:
+                        self._charge_unreadable(ref, unreadable)
+                        proved_all = False
+                    case _:
+                        unreadable.record_present(_span_key(ref))
+                        await resolve(view)
+        return PassResult.PROVED if proved_all else PassResult.FAILED
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record
@@ -390,9 +536,10 @@ class Reconciler:
         await self._bus.publish(self._verdict(order, status, reason))
         named_event(NamedEvent.GHOST_RECONCILED, resolution=status.value)
 
-    def _charge_unreadable(self, order: Order) -> None:
-        """Hold one unreadable read against ``order``'s span and freeze it — or
-        escalate, once the span says the condition is durable (ADR-0049).
+    def _charge_unreadable(self, ref: OrderRef, unreadable: GraceWindow) -> None:
+        """Hold one unreadable read against ``ref``'s span in ``unreadable``
+        and freeze it — or escalate, once the span says the condition is
+        durable (ADR-0049). A read by a listed oid has a span of its own.
 
         A single unreadable body is transient by assumption and stays one: the
         order is skipped, the pass carries on, and the next cycle re-reads it.
@@ -409,14 +556,46 @@ class Reconciler:
         each of these reads against this cloid with the body it could not read,
         so the refusal names the order and leaves the evidence where it is.
         """
-        if not self._unreadable_run.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
+        if not unreadable.record_absent(_span_key(ref), now_ns=self._clock.timestamp_ns()):
             self._freeze(_FreezeScope.ORDER)
             return
+        oid = "" if ref.listed_oid is None else f" oid {ref.listed_oid}"
         raise VenueReadUnresolvable(
-            f"venue body for cloid {order.cloid} continuously unreadable across "
+            f"venue body for cloid {ref.cloid}{oid} continuously unreadable across "
             f"{self._config.unreadable_grace_seconds}s: the condition is durable "
             "and no later pass can resolve it — see the exchange.request_failed "
             "reads for this cloid, each quoting the body"
+        )
+
+    def _stop_pass(self, failure: VenueReadFailure) -> PassResult:
+        """Freeze the rest of the pass on a read the venue never answered
+        (ADR-0049). After a failed send, every other read would fail the same
+        way. After a rate limit, every other read would be refused too and
+        spend more of the limit (ADR-0056). So no read behind this one runs.
+        """
+        self._freeze(_FreezeScope.CYCLE)
+        if failure is VenueReadFailure.RATE_LIMITED_IP:
+            return PassResult.RATE_LIMITED
+        return PassResult.FAILED
+
+    def _charge_unreadable_list(self) -> None:
+        """Hold one unreadable open-order list against the account's span, as
+        ``_charge_unreadable`` does for one order (ADR-0049).
+
+        It freezes the whole cycle, since no entry in the list was read. Past
+        the span it faults. A pass that never reads the list never sees a
+        stray order again, and only an operator can fix a durable condition.
+        """
+        if not self._unreadable_list_run.record_absent(
+            _LIST_KEY, now_ns=self._clock.timestamp_ns()
+        ):
+            self._freeze(_FreezeScope.CYCLE)
+            return
+        raise VenueReadUnresolvable(
+            f"venue open order list continuously unreadable across "
+            f"{self._config.unreadable_grace_seconds}s: the condition is durable "
+            "and no later pass can resolve it. See the exchange.request_failed "
+            "reads for frontendOpenOrders, each quoting the body"
         )
 
     def _freeze(self, scope: "_FreezeScope") -> None:
@@ -533,3 +712,29 @@ class Reconciler:
             reason=f"reconciliation: {reason}",
             reconciliation=True,
         )
+
+
+def _stray_reads(
+    order: Order, listed: list[VenueOpenOrder]
+) -> list[tuple[OrderRef, list[VenueOpenOrder]]]:
+    """The confirm reads for a terminal saga the open-order list names, each
+    with the listed orders its answer judges (ADR-0063).
+
+    A saga with an oid is read by it, since the oid names exactly one order.
+    That one read judges every order listed under the cloid. A saga with no
+    oid is read once per listed oid, and each read judges only its own order.
+    The venue keeps one order per cloid for each life of the account, and
+    which one a read by cloid answers with is not documented (#652). The read
+    by a listed oid still refuses an order placed before the saga. Paper lists
+    no oid, so it keeps the one read by the saga's own ref.
+    """
+    own = OrderRef.of(order)
+    if order.venue_oid is not None or any(entry.venue_oid is None for entry in listed):
+        return [(own, listed)]
+    return [(replace(own, listed_oid=entry.venue_oid), [entry]) for entry in listed]
+
+
+def _span_key(ref: OrderRef) -> str:
+    """The unreadable span a read is charged to. A read by a listed oid gets
+    its own, so a good read of one order never restarts another's (#652)."""
+    return ref.listed_oid or ref.cloid

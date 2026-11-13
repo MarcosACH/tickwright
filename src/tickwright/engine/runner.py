@@ -180,6 +180,7 @@ class Engine:
             bus=bus,
             clock=clock,
             exchange=exchange,
+            account=exchange,
             cache=self._checkpointer.cache,
             config=self._reconcile_config,
         )

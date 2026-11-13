@@ -128,7 +128,12 @@ def _second_life(
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+        bus=bus,
+        clock=clock,
+        exchange=exchange,
+        account=exchange,
+        cache=cache,
+        config=ReconcileConfig(),
     )
     return bus, cache, reconciler, events
 
@@ -368,7 +373,7 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
     cache.rebuild()
     venue = _DarkVenue()
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     with capture_events() as logs:
@@ -402,7 +407,7 @@ def test_backoff_is_capped_so_faulting_never_overshoots_the_window_by_much() -> 
     cache.rebuild()
     venue = _DarkVenue()
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     with pytest.raises(StartupReconciliationTimeout):
@@ -445,7 +450,7 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
     )
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=30.0))
@@ -499,7 +504,7 @@ def test_a_durably_unreadable_body_at_boot_still_gets_the_whole_startup_window()
     cache.rebuild()
     venue = _GarbledVenue()
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     with pytest.raises(StartupReconciliationTimeout):
@@ -532,7 +537,7 @@ def test_a_boot_time_garble_that_clears_inside_the_window_lets_the_barrier_clear
     manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=60.0))
@@ -636,7 +641,7 @@ def test_the_reconciler_reads_the_venue_by_the_saga_s_full_identity() -> None:
     cache = checks.cache
     cache.rebuild()
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
     asyncio.run(reconciler.reconcile_startup())
 
@@ -697,7 +702,7 @@ def test_a_record_returning_after_boot_restarts_the_window_it_armed() -> None:
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     async def scenario() -> None:
@@ -784,6 +789,7 @@ def test_a_boot_that_redrives_past_the_grace_window_ghosts_on_the_startup_pass()
         bus=bus,
         clock=clock,
         exchange=venue,
+        account=venue,
         cache=cache,
         config=ReconcileConfig(ghost_grace_seconds=90.0, unreadable_grace_seconds=600.0),
     )
@@ -865,6 +871,7 @@ def test_a_record_a_redriven_boot_finds_restarts_the_window_boot_armed() -> None
         bus=bus,
         clock=clock,
         exchange=venue,
+        account=venue,
         cache=cache,
         config=ReconcileConfig(ghost_grace_seconds=90.0, unreadable_grace_seconds=600.0),
     )
@@ -953,7 +960,7 @@ def test_a_boot_reading_fills_without_a_record_arms_the_window_too() -> None:
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     async def scenario() -> None:
@@ -1015,7 +1022,7 @@ def test_a_boot_reading_the_fills_that_finished_the_order_never_reaches_the_gate
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
 
     with capture_events() as logs:

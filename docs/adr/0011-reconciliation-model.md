@@ -80,6 +80,12 @@ ADR-0009).
    record. Its fills are never read. To the in-flight budget that is one miss, not a landing.
    A cancel before the ack still goes by cloid. Which order the venue cancels then is its
    choice, and reconciliation is the backstop. [#354]**)**
+   **(Amended by #652 — what the venue does with two resting orders under one cloid:**
+   A testnet probe placed a second order under a cloid whose first order still rested. The
+   venue accepted it, and both rested with their own oids. In two runs, `orderStatus` by cloid
+   and a cancel by cloid both went to the newer order. No venue doc states that rule, so the
+   engine does not rely on it. The stray check reads each listed oid instead (ADR-0063). The
+   runs are in `docs/research/hyperliquid-duplicate-cloid.md`. [#652]**)**
 3. **Grace window.** An order must be **continuously absent across the grace window** (default
    ~90s ≈ 3 missed slow cycles) before it is ghost-resolved. Plus a **recent-order protection
    window** (default ~30s ≈ one slow cycle): skip ghost evaluation for orders whose last saga
@@ -140,6 +146,14 @@ ADR-0009).
   memory, so a restart has none and the budget counts from boot. A send from the previous life
   that lands after that budget is not covered here. Neither is a send that timed out on our
   side but that the venue accepts after the budget. #642 tracks both. [#640]**)**
+  **(Amended by ADR-0063:** both late sends are now covered. The saga stays `FAILED`. If the
+  venue lists an order under its cloid, the open-order cycle reads it again by the saga's own ref
+  and cancels it by oid while it still rests. The same holds for every terminal but `DENIED`. Such
+  an order is a stray order. Its fills are logged and never booked.
+  [#642](https://github.com/MarcosACH/tickwright/issues/642)**)**
+  **(Amended by #652:** a `FAILED` saga from a timed-out send has no oid. So the cycle reads it
+  once per oid listed under its cloid, not by the saga's own ref. The age check still runs on
+  each read (ADR-0063). [#652](https://github.com/MarcosACH/tickwright/issues/652)**)**
 - An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
   cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
   preserved) from `PARTIALLY_FILLED` (ADR-0010).
@@ -157,6 +171,19 @@ This case cannot arise on the paper exchange; it is a live-path-only concern.
 cancel-all` and `tickwright flatten` cancel every resting order in the account, external orders
 included. The engine still never acts on an external order by itself. Decided in
 [#410](https://github.com/MarcosACH/tickwright/issues/410).**)**
+
+**(Amended by ADR-0063:** the open-order cycle now lists every open order in the account, so an
+external order is found each pass. It is logged once per oid per process life as
+`reconcile.external_order`. These count as external: an unknown cloid, no cloid, and the
+cloid of a `DENIED` saga, which never sent. So do a record older than the saga that holds its
+cloid (invariant 12), and an oid other than the one the saga's own read names (#354). Any other
+order under the cloid of a terminal saga is ours. It is a stray order, and the engine cancels it.
+[#642](https://github.com/MarcosACH/tickwright/issues/642)**)**
+
+**(Amended by #652:** for a saga with no oid, "the saga's own read" is one read per listed oid.
+A listed order is external when its own read is refused by the age check. Two listed orders
+that both pass it are both cancelled, even though one may be an earlier life's (ADR-0063).
+[#652](https://github.com/MarcosACH/tickwright/issues/652)**)**
 
 This reflects established live-reconciliation practice (startup mass-status + continuous in-flight
 monitoring, query-failure-vs-empty distinction, single-order re-query before terminal

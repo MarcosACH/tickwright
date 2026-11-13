@@ -10,7 +10,7 @@ our own classes.
 
 import asyncio
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -72,6 +72,7 @@ from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.portfolio import PortfolioProjection
+from tickwright.observability.testing import capture_events
 
 
 def _market_signal(seq: int = 1) -> PlaceSignal:
@@ -1039,6 +1040,62 @@ def test_a_late_cancel_ack_on_a_terminal_saga_is_an_idempotent_no_op() -> None:
     record = store.get_order(cloid)
     assert record is not None
     assert record.state is OrderState.FILLED
+
+
+def _late_report(cloid: str, status: OrderState, *, reconciliation: bool) -> OrderStatusReport:
+    return OrderStatusReport(
+        ts_event=2_000,
+        ts_init=2_000,
+        cloid=cloid,
+        symbol="BTC",
+        status=status,
+        venue_oid="77",
+        reconciliation=reconciliation,
+    )
+
+
+def _place_answer_lines(late: OrderStatusReport) -> tuple[Order | None, list[MutableMapping]]:
+    """Fill a resting order in full, then deliver ``late`` against its terminal saga."""
+    bus, _, store, _ = _harness()
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE
+        await bus.publish(_fill_report(late.cloid, trade_id="v1", quantity="0.5"))
+        await bus.publish(late)
+
+    with capture_events() as events:
+        asyncio.run(scenario())
+    lines = [e for e in events if e["event"] == "order.place_answer_after_terminal"]
+    return store.get_order(late.cloid), lines
+
+
+def test_a_place_answer_on_a_terminal_saga_is_logged_and_never_applied() -> None:
+    # The venue says it took the order, but the saga is already over. The saga
+    # stays terminal (ADR-0026), and the line tells the operator an order may
+    # rest that the engine no longer tracks. The stray pass cancels it (ADR-0063).
+    cloid = derive_cloid("trivial:BTC:1")
+    saga, lines = _place_answer_lines(_late_report(cloid, OrderState.LIVE, reconciliation=False))
+
+    assert saga is not None and saga.state is OrderState.FILLED
+    [line] = lines
+    assert (line["saga_state"], line["venue_oid"], line["cloid"]) == ("filled", "77", cloid)
+
+
+@pytest.mark.parametrize(
+    ("status", "reconciliation"),
+    [(OrderState.CANCELLED, False), (OrderState.LIVE, True)],
+    ids=["cancel-ack", "reconciler-verdict"],
+)
+def test_other_late_reports_on_a_terminal_saga_log_no_place_answer(
+    status: OrderState, reconciliation: bool
+) -> None:
+    # A cancel ack that lost the race to a fill, or a reconciler verdict
+    # crossing a venue push, is routine. Neither is a place answer.
+    cloid = derive_cloid("trivial:BTC:1")
+    _, lines = _place_answer_lines(_late_report(cloid, status, reconciliation=reconciliation))
+
+    assert lines == []
 
 
 def test_cancel_signal_for_an_unknown_order_is_a_benign_no_op() -> None:

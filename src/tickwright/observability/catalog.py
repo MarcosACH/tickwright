@@ -28,6 +28,10 @@ class NamedEvent(StrEnum):
     ORDER_REJECTED = "order.rejected"
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
+    # The venue took an order whose saga is already terminal. No saga moves,
+    # so this line is the only record that the order may rest. The open-order
+    # pass cancels it if it still does (ADR-0063).
+    ORDER_PLACE_ANSWER_AFTER_TERMINAL = "order.place_answer_after_terminal"
 
     # Position changes (``PortfolioProjection``, ADR-0045 §2). A position change
     # is an *output* derived from a fill already on the bus, so it is
@@ -98,6 +102,12 @@ class NamedEvent(StrEnum):
     # the pass reconciled normally (ADR-0049). Both carry the cloid, so the field
     # is the only thing telling an outage from a venue contract change.
     RECONCILE_FROZEN = "reconcile.frozen"
+    # A cancel sent for an order that rests on the venue under a terminal saga
+    # (ADR-0063). The saga stays terminal, so this line is the only record.
+    RECONCILE_STRAY_CANCELLED = "reconcile.stray_cancelled"
+    # An order resting on the venue that no saga of ours sent (ADR-0063). The
+    # engine never acts on it, so this line is how an operator learns of it.
+    RECONCILE_EXTERNAL_ORDER = "reconcile.external_order"
 
     # One completed account-grain cycle (``LedgerReconciliation``, ADR-0034).
     # Emitted on every pass, agreeing or not: the cycle is the *only* evidence
@@ -295,6 +305,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ORDER_REJECTED: frozenset({"reason"}),
     NamedEvent.ORDER_FAILED: frozenset({"reason"}),
     NamedEvent.ORDER_CANCELLED: frozenset(),
+    NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL: frozenset({"saga_state", "venue_oid"}),
     # One shape for the fill path and the funding-accrual path alike.
     NamedEvent.POSITION_OPENED: frozenset({"strategy_id", "symbol", "size", "funding"}),
     NamedEvent.POSITION_CHANGED: frozenset({"strategy_id", "symbol", "size", "funding"}),
@@ -326,6 +337,10 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: frozenset(),
     NamedEvent.GHOST_RECONCILED: frozenset({"resolution"}),
     NamedEvent.RECONCILE_FROZEN: frozenset({"scope"}),
+    NamedEvent.RECONCILE_STRAY_CANCELLED: frozenset(
+        {"saga_state", "venue_oid", "unbooked_trade_ids", "unbooked_quantity", "unbooked_fee"}
+    ),
+    NamedEvent.RECONCILE_EXTERNAL_ORDER: frozenset({"venue_oid"}),
     NamedEvent.ACCOUNT_RECONCILED: frozenset(
         {"tier_1", "tier_2", "unvalued", "suppressed", "deferred", "unconfirmed", "unpriced"}
     ),

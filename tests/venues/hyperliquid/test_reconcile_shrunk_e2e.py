@@ -102,6 +102,7 @@ def _shrunk_venue(
                 cloid=CLOID, status="filled", oid=91, placed_ms=ACK_MS, reduce_only=True
             ),
             "userFillsByTime": reconcile_fills or list(fills),
+            "frontendOpenOrders": [],
         }
     )
 
@@ -137,7 +138,12 @@ def _place_then_reconcile(
         bus.subscribe(OrderEvent, collect)
         await manager.on_signal(signal)
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=config
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=checks.cache,
+            config=config,
         )
         for _ in range(passes):
             # Paced like the open-order cadence: one interval, then a pass.
@@ -241,6 +247,7 @@ def test_a_resting_order_the_venue_shrank_ends_cancelled_once_it_fills() -> None
             "order": resting_response(oid=91),
             "orderStatus": order_status,
             "userFillsByTime": fills,
+            "frontendOpenOrders": [],
         }
     )
 
