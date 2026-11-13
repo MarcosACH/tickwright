@@ -250,7 +250,7 @@ def _second_life(
 
     bus.subscribe(OrderEvent, record)
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+        bus=bus, clock=clock, exchange=venue, account=venue, cache=cache, config=ReconcileConfig()
     )
     return bus, reconciler, events, store
 

@@ -32,6 +32,8 @@ Both are deliberately in-memory: a restart resets them, and the startup pass
 re-proves every saga against venue truth before anything places (ADR-0009).
 """
 
+from collections.abc import Collection
+
 
 class ConsecutiveMisses:
     """Counts consecutive absent observations per key; resets on presence.
@@ -84,6 +86,11 @@ class GraceWindow:
     def record_present(self, key: str) -> None:
         """A record is back (or never left) for ``key``: the grace clock resets."""
         self._first_absent_ns.pop(key, None)
+
+    def retain(self, keys: Collection[str]) -> None:
+        """End the run of every key not in ``keys``, as if each read present."""
+        for key in self._first_absent_ns.keys() - set(keys):
+            del self._first_absent_ns[key]
 
     def record_absent(self, key: str, *, now_ns: int) -> bool:
         """Record absence for ``key`` at ``now_ns``; ``True`` once the span has

@@ -134,7 +134,12 @@ def test_a_fill_behind_a_dropped_record_heals_the_saga_instead_of_rejecting_it()
 
         bus.subscribe(OrderEvent, collect)
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=checks.cache,
+            config=ReconcileConfig(),
         )
         assert await reconciler.reconcile_startup() is True
         return store, events, post
@@ -190,6 +195,7 @@ def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_
                 "userFillsByTime": [
                     fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", time=FILL_MS)
                 ],
+                "frontendOpenOrders": [],
             }
         )
         exchange = _make_exchange(post, bus, clock)
@@ -211,7 +217,12 @@ def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_
         assert placed.acked_ts_ns == ACK_MS * 1_000_000
 
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            account=exchange,
+            cache=checks.cache,
+            config=ReconcileConfig(),
         )
         assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         return store, events, post
@@ -225,6 +236,7 @@ def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_
         "userFills",
         "orderStatus",
         "userFillsByTime",
+        "frontendOpenOrders",
     ]
     assert post.requests[3][1]["startTime"] == ACK_MS - 60_000
 

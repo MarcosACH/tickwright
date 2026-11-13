@@ -546,7 +546,8 @@ class HyperliquidExchange:
             send=self._send_action,
             normalize=functools.partial(_cancel_adjudications, count=len(refs)),
             # A failure names every order in the batch. Each may still rest, and
-            # reconciliation never resends a cancel (ADR-0055).
+            # reconciliation never resends a saga's cancel (ADR-0055). Only a
+            # stray's cancel is sent again, on the next pass (ADR-0063).
             cloids=[ref.cloid for ref in refs if isinstance(ref, OrderRef)],
         )
         if isinstance(adjudications, VenueReadFailure):

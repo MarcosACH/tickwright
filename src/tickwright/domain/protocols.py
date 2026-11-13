@@ -527,12 +527,13 @@ class OrderAnchor(Protocol):
     cancel also takes an ``ExternalOrderRef``, an order the engine did not
     place. It has no cloid, so it goes by its oid (ADR-0052, ADR-0055).
 
-    Declared separately because two engine components read it and **neither
-    reads anything else on the seam**: the ``ExecutionManager`` places and
-    cancels, the ``Reconciler`` reads back. Both are constructed against this
+    Declared separately because two engine components use it: the
+    ``ExecutionManager`` places and cancels, and the ``Reconciler`` reads back
+    and cancels a stray order (ADR-0063). Both are constructed against this
     rather than the composite, so what each must know is what it uses, and a
     double standing in for the venue in their suites implements three members
-    rather than ten.
+    rather than ten. The ``Reconciler`` also takes the ``AccountAnchor``, for
+    one read only: the open-order list.
 
     Commands and a query together, against the instinct to split them: the
     reconciler exists precisely because a placement's outcome is learned by
@@ -590,12 +591,13 @@ class OrderAnchor(Protocol):
         record while it still holds the fills. The oid and ack time on the ref
         are what a venue reads its fill history by then (ADR-0011 inv 2).
 
-        The failure carries **which way** it failed, and this is the one read
-        with a caller that acts on the difference: the reconciler drives a
-        worklist, so it must know whether the venue answered at all before
-        deciding whether one order's failure should cost the orders behind it
-        (ADR-0049). ``AccountAnchor.fetch_account_state`` reads a single grain
-        and collapses the two."""
+        The failure carries **which way** it failed, and the caller acts on the
+        difference: the reconciler drives a worklist, so it must know whether
+        the venue answered at all before deciding whether one order's failure
+        should cost the orders behind it (ADR-0049). The reconciler reads
+        ``AccountAnchor.fetch_open_orders`` the same way (ADR-0063).
+        ``AccountAnchor.fetch_account_state`` reads a single grain and collapses
+        the two."""
         ...
 
 
@@ -620,7 +622,9 @@ class AccountAnchor(Protocol):
 
     Operator cancel all and flatten are two more callers, on both paths. They read
     ``fetch_open_orders`` and ``fetch_positions``, which answer for the whole
-    account (ADR-0052, ADR-0054).
+    account (ADR-0052, ADR-0054). The ``Reconciler`` is a fourth, on both paths.
+    It reads ``fetch_open_orders`` on each open-order pass to find a stray order
+    (ADR-0063).
 
     The two account-cycle members are answered by **both** adapters even so. The account cycle is
     constructed on every path and scheduled on one (``engine/runner.py``), so
@@ -640,8 +644,9 @@ class AccountAnchor(Protocol):
         its first perp dex.
 
         Operator cancel all reads it for its list and again for its final check.
-        A failed read returns a ``VenueReadFailure`` and never an empty list,
-        because an empty list says the account holds no order (ADR-0011 inv 1).
+        The reconciler reads it on each open-order pass (ADR-0063). A failed
+        read returns a ``VenueReadFailure`` and never an empty list, because an
+        empty list says the account holds no order (ADR-0011 inv 1).
         """
         ...
 

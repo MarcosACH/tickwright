@@ -139,6 +139,7 @@ def _wire(
         bus=bus,
         clock=clock,
         exchange=exchange,
+        account=exchange,
         cache=cache,
         config=config if config is not None else ReconcileConfig(),
     )
