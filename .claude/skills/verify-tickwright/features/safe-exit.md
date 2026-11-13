@@ -111,8 +111,8 @@ Preconditions:
 
 ## Gotchas
 
-- Every life shares one store, and `check --sql` reads it as it is now. Run each life's checks
-  before the next life starts, or they read a later state.
+- Every life but `external` shares one store, and `check --sql` reads it as it is now. Run each
+  life's checks before the next life starts, or they read a later state.
 - **Wait for the first mark.** On Hyperliquid, a market order sent before the first mark arrives
   is never sent. It ends `failed` with reason `no mark cached for 'BTC'`, and the engine keeps
   running ([#509](https://github.com/MarcosACH/tickwright/issues/509)). The checks need the order
