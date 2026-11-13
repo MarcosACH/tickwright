@@ -42,6 +42,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
+from functools import partial
 
 from tickwright.domain import (
     WORKING_STATES,
@@ -329,7 +330,7 @@ class Reconciler:
                 return PassResult.FAILED
         self._unreadable_list_run.record_present(_LIST_KEY)
         # Every listed order under each terminal saga's cloid. A cloid can name
-        # more than one venue order (#354), and the saga is read once for all.
+        # more than one venue order (#354). ``_stray_reads`` picks the reads.
         sagas: dict[str, Order] = {}
         listed_under: dict[str, list[VenueOpenOrder]] = {}
         for entry in listed:
@@ -347,22 +348,17 @@ class Reconciler:
                 sagas[order.cloid] = order
                 listed_under.setdefault(order.cloid, []).append(entry)
         reads = [
-            (order, ref) for order in sagas.values() for ref in _stray_refs(order, listed_under)
+            (ref, partial(self._cancel_stray, order, judged))
+            for order in sagas.values()
+            for ref, judged in _stray_reads(order, listed_under[order.cloid])
         ]
         # A stray the list no longer names is over, and so is its unreadable
         # run. If it is listed again, its next unreadable read starts a new one.
-        self._unreadable_stray_run.retain({_span_key(ref) for _, ref in reads})
-
-        async def cancel_stray(order: Order, ref: OrderRef, view: VenueOrderView) -> None:
-            listed = listed_under[order.cloid]
-            if ref.listed_oid is not None:
-                listed = [entry for entry in listed if entry.venue_oid == ref.listed_oid]
-            await self._cancel_stray(order, view, listed)
-
-        return await self._read_each(reads, cancel_stray, self._unreadable_stray_run)
+        self._unreadable_stray_run.retain({_span_key(ref) for ref, _ in reads})
+        return await self._read_each(reads, self._unreadable_stray_run)
 
     async def _cancel_stray(
-        self, order: Order, view: VenueOrderView, listed: list[VenueOpenOrder]
+        self, order: Order, listed: list[VenueOpenOrder], view: VenueOrderView
     ) -> None:
         """Cancel the saga's order if the confirm read says it still works.
         Every other order in ``listed`` is external."""
@@ -429,24 +425,19 @@ class Reconciler:
         with operation(cycle=cycle):
             # A generator, so each saga's state is checked when its turn comes.
             reads = (
-                (order, OrderRef.of(order))
+                (OrderRef.of(order), partial(handle, order))
                 for order in self._cache.open_orders()
                 if states is None or order.state in states
             )
-
-            async def by_saga(order: Order, _ref: OrderRef, view: VenueOrderView) -> None:
-                await handle(order, view)
-
-            return await self._read_each(reads, by_saga, self._unreadable_run)
+            return await self._read_each(reads, self._unreadable_run)
 
     async def _read_each(
         self,
-        reads: Iterable[tuple[Order, OrderRef]],
-        handle: Callable[[Order, OrderRef, VenueOrderView], Awaitable[None]],
+        reads: Iterable[tuple[OrderRef, Callable[[VenueOrderView], Awaitable[None]]]],
         unreadable: GraceWindow,
     ) -> PassResult:
-        """Read each saga in ``reads`` by the ref beside it and let ``handle``
-        resolve the answer. Every per-order read in a pass goes through here, the
+        """Read each ref in ``reads`` and let the resolver beside it act on the
+        answer. Every per-order read in a pass goes through here, the
         per-saga cadences and the stray check alike. So a failed read trips the
         connectivity guard here and nowhere else (ADR-0011 inv 1). ``PROVED``
         only on a pass that proved **every** order it looked at.
@@ -469,8 +460,8 @@ class Reconciler:
         never clears the ``StartupBarrier``, whichever way the read failed.
         """
         proved_all = True
-        for order, ref in reads:
-            with operation(cloid=order.cloid):
+        for ref, resolve in reads:
+            with operation(cloid=ref.cloid):
                 view = await self._exchange.fetch_order(ref)
                 match view:
                     case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
@@ -480,7 +471,7 @@ class Reconciler:
                         proved_all = False
                     case _:
                         unreadable.record_present(_span_key(ref))
-                        await handle(order, ref, view)
+                        await resolve(view)
         return PassResult.PROVED if proved_all else PassResult.FAILED
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
@@ -720,21 +711,24 @@ class Reconciler:
         )
 
 
-def _stray_refs(order: Order, listed_under: dict[str, list[VenueOpenOrder]]) -> list[OrderRef]:
-    """The confirm reads for a terminal saga the open-order list names (ADR-0063).
+def _stray_reads(
+    order: Order, listed: list[VenueOpenOrder]
+) -> list[tuple[OrderRef, list[VenueOpenOrder]]]:
+    """The confirm reads for a terminal saga the open-order list names, each
+    with the listed orders its answer judges (ADR-0063).
 
     A saga with an oid is read by it, since the oid names exactly one order.
-    A saga with no oid is read once per listed oid. The venue keeps one order
-    per cloid for each life of the account, and which one a read by cloid
-    answers with is not documented (#652). The read by a listed oid still
-    refuses an order placed before the saga. Paper lists no oid, so it keeps
-    the one read by the saga's own ref.
+    That one read judges every order listed under the cloid. A saga with no
+    oid is read once per listed oid, and each read judges only its own order.
+    The venue keeps one order per cloid for each life of the account, and
+    which one a read by cloid answers with is not documented (#652). The read
+    by a listed oid still refuses an order placed before the saga. Paper lists
+    no oid, so it keeps the one read by the saga's own ref.
     """
     own = OrderRef.of(order)
-    listed = listed_under[order.cloid]
     if order.venue_oid is not None or any(entry.venue_oid is None for entry in listed):
-        return [own]
-    return [replace(own, listed_oid=entry.venue_oid) for entry in listed]
+        return [(own, listed)]
+    return [(replace(own, listed_oid=entry.venue_oid), [entry]) for entry in listed]
 
 
 def _span_key(ref: OrderRef) -> str:
