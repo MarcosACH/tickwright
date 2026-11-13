@@ -158,3 +158,10 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   waits at least 5 minutes for one. Then it gives up after 3 more passes and ends `stopped`, so
   it no longer waits forever (#630). A hung `ci` job stops after 30 minutes, and an `image` job after 15 (#634). Bump PR
   backed by #637.
+- **v0.8.2** (2026-11-13). Fixes from the testnet soak. PATCH, because no `TICKWRIGHT_*`
+  variable or CLI command changed, and no adapter has to change. `OrderRef` gains an optional
+  `listed_oid`. A venue that keeps one order per cloid may ignore it (#652). The engine warns at
+  boot when the kill switch is still tripped (#639). It no longer fails an order while its place
+  request is still open (#640). It cancels an order the venue accepts after its saga failed
+  (#642). It cancels our stray when two orders rest under one cloid (#652). The verify report
+  shows what the open-order pass did (#654). Bump PR backed by #658.
