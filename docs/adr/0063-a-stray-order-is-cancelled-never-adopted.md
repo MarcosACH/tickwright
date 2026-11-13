@@ -26,6 +26,8 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
   - Still resting: cancel it.
   - No record, because the adapter refused a record older than the saga (invariant 12): it belongs
     to an earlier life. Log it as external.
+  - Another order listed under the same cloid, with an oid other than the one the read names:
+    it belongs to an earlier life (#354). Log it as external.
   - No longer resting: do nothing.
   - Read failed: as in the per-order passes (ADR-0049). A failed send freezes the cycle. A rate
     limit freezes it and returns `RATE_LIMITED`. An unreadable body skips that order and charges
@@ -35,13 +37,16 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
   on the next pass.
 - **Fills on a stray are logged, not booked.** Booking one would move a terminal saga, an illegal
   transition that faults the engine. Ledger reconciliation books the position as unattributed.
-  The cancel line names the fills behind it.
-- **It runs on the open-order cadence only.** One `fetch_open_orders` per pass, after the
-  per-order reads, plus one confirm read per candidate. The `Reconciler` takes the account anchor
-  for the list read. The startup barrier does not change.
+  The cancel line names the fills behind it. A fill the saga booked before it went terminal is in
+  the books already, so the line leaves it out.
+- **It runs in the open-order pass only.** That pass runs on the open-order cadence, and on each
+  pass a flatten run drives (ADR-0060). One `fetch_open_orders` per pass, after the per-order
+  reads, and only when they all proved. Then one confirm read per terminal saga the list names.
+  The `Reconciler` takes the account anchor for the list read. The startup barrier does not
+  change.
 - **A failed list read follows ADR-0049.** A failed send freezes the cycle. A rate limit freezes it
-  and returns `RATE_LIMITED`. An unreadable list freezes the cycle and is charged to the
-  `unreadable_grace_seconds` span, keyed on the account. Past the span the pass raises
+  and returns `RATE_LIMITED`. An unreadable list freezes the cycle and is charged to its own
+  window of the `unreadable_grace_seconds` span. Past the span the pass raises
   `VenueReadUnresolvable`. The pass is `PROVED` only if the list read succeeded too.
 - **Named events.**
   - `reconcile.stray_cancelled`: every cancel sent. It carries the saga state, the oid, and the
@@ -68,7 +73,8 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
 
 ## Consequences
 
-- A stray rests for at most one open-order interval (30 s by default) after the venue lists it.
+- A stray rests for at most one open-order interval (30 s by default) after the venue lists it,
+  while the pass's reads succeed. A failed read holds the stray check back until a pass proves.
 - A late order that fills in full never rests, so this pass never sees it. Only ledger
   reconciliation does, as an unattributed position.
 - `order.place_answer_after_terminal` does not fire for a place request that timed out on our side.

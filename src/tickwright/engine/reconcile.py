@@ -8,7 +8,9 @@ against the account materialisation that precedes it (``barrier.py``).
 *Continuous*: two cycles thereafter — a fast in-flight check resolving
 ``SUBMITTED`` orders that never acked, and a slower open-order/ghost reconcile
 in which only continuous absence across the grace window (with a fill-history
-cross-check on every read) resolves a resting order terminally.
+cross-check on every read) resolves a resting order terminally. The open-order
+cycle then lists the account's open orders and cancels any the venue still
+works under a terminal saga, a stray order (ADR-0063).
 
 **The grace window is not a runtime-only rule** (ADR-0011 inv 3, as amended):
 startup puts an absent resting order to the same ``GhostGate``, so boot *arms*
@@ -203,7 +205,10 @@ class ReconcileConfig:
 
 
 class Reconciler:
-    """Compares local non-terminal sagas against venue truth and heals the gap."""
+    """Compares local non-terminal sagas against venue truth and heals the gap.
+
+    The open-order pass also cancels a stray order, one the venue still works
+    under a terminal saga (ADR-0063)."""
 
     def __init__(
         self,
@@ -218,8 +223,8 @@ class Reconciler:
         self._bus = bus
         self._clock = clock
         # The **cloid** anchor and not the whole ``Exchange``: this cycle reads
-        # back what the manager sent, on the same grain and the same key, and
-        # the account is a different anchor with its own cycle (ADR-0034).
+        # back what the manager sent, on the same grain and the same key
+        # (ADR-0034). It also cancels a stray order on it (ADR-0063).
         self._exchange = exchange
         # Read for one thing only: the list of every order resting in the
         # account. A terminal saga has no per-cloid read left, so the list is
