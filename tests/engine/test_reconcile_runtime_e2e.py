@@ -24,7 +24,9 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AggressorSide,
     ComponentState,
+    ExternalOrderRef,
     MarketTick,
     OrderEvent,
     OrderFailed,
@@ -35,6 +37,7 @@ from tickwright.domain import (
     OrderState,
     PlaceOrder,
     Side,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     derive_cloid,
@@ -520,3 +523,106 @@ def test_a_send_that_returned_with_no_record_still_fails_after_the_budget(
     # The third miss after the send ended. Misses during the send would
     # have failed it at t=16.
     assert verdict.ts_event == 26 * _NS
+
+
+class _ListRecordingExchange(VenueLink):
+    """The real paper venue, with each open-order list it answers kept, so the
+    test can tell a pass that ran clean from a pass that never ran."""
+
+    def __init__(self, venue: PaperExchange) -> None:
+        super().__init__(venue)
+        self.lists: list[list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure] = []
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
+        listed = await self._venue.fetch_open_orders()
+        self.lists.append(listed)
+        return listed
+
+
+def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
+    """#642 on the hermetic path. Paper has no stray order to find, since a
+    saga stays open while its send is (#640). So every open-order pass must
+    read the list, find nothing to act on, and log nothing. A resting order
+    under a working saga is not a stray, and a filled one is not listed."""
+    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
+
+    async def main() -> tuple[Engine, _ListRecordingExchange, int]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        venue = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+            resting_orders=list,
+        )
+        link = _ListRecordingExchange(venue)
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=link,
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+            config=EngineConfig(reconcile=ReconcileConfig()),
+        )
+        strategy = SingleShotLimitStrategy(
+            emitter=engine.emitter_for("trivial"),
+            portfolio=engine.portfolio_for("trivial"),
+            settings=SingleShotLimitStrategy.Settings(
+                side=Side.BUY, quantity=Decimal("0.5"), price=Decimal("41000")
+            ),
+        )
+        engine.register(strategy, symbols={"BTC"})
+        live, filled = asyncio.Event(), asyncio.Event()
+
+        async def record(event: OrderEvent) -> None:
+            if isinstance(event, OrderLive):
+                live.set()
+            if isinstance(event, OrderFilled):
+                filled.set()
+
+        bus.subscribe(OrderEvent, record)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(live.wait(), timeout=5)
+        # The first pass, while the order rests under its LIVE saga.
+        clock.advance_to(31 * _NS)
+        await _let_cadences_run()
+        # The market crosses the resting BUY and the saga ends FILLED.
+        clock.advance_to(40 * _NS)
+        await bus.publish(
+            MarketTick(
+                ts_event=40 * _NS,
+                ts_init=40 * _NS,
+                symbol="BTC",
+                price=Decimal("40000"),
+                size=Decimal("3"),
+                aggressor_side=AggressorSide.SELL,
+                trade_id="cross",
+                seq=1,
+            )
+        )
+        await asyncio.wait_for(filled.wait(), timeout=5)
+        # Two passes over the terminal saga.
+        for t in (61, 91):
+            clock.advance_to(t * _NS)
+            await _let_cadences_run()
+        assert engine.state is ComponentState.RUNNING
+        await engine.stop()
+        return engine, link, await run
+
+    with capture_events() as events:
+        engine, link, exit_code = asyncio.run(main())
+
+    assert exit_code == 0
+    resting = [VenueOpenOrder(symbol="BTC", cloid=_CLOID, venue_oid=None)]
+    assert link.lists == [resting, [], []]
+    noisy = {
+        "reconcile.frozen",
+        "reconcile.stray_cancelled",
+        "reconcile.external_order",
+        "order.place_answer_after_terminal",
+    }
+    assert [e["event"] for e in events if e["event"] in noisy] == []
