@@ -421,14 +421,14 @@ the opposite of a [[Ghost]]: the venue works an order the books call finished. A
 make one, for example a send from a previous life that lands after boot resolved it `FAILED`.
 The open-order cycle finds it and cancels it by oid. The saga stays terminal, and its fills are
 logged but never booked. [[Ledger reconciliation]] books any position it left as unattributed
-(#642).
+(ADR-0063, #642).
 _Avoid_: orphan, stale order, zombie order.
 
 **External order**:
 A venue order the engine did not place. Its cloid is unknown to the books, or its record is older
 than the saga that holds the same cloid (invariant 12). A `DENIED` saga's cloid on the venue is
 external too, since that saga never sent. The engine logs it and never acts on it. Only an
-operator `cancel-all` or `flatten` may cancel it. See ADR-0011, ADR-0052.
+operator `cancel-all` or `flatten` may cancel it. See ADR-0011, ADR-0052, ADR-0063.
 _Avoid_: foreign order, unknown order.
 
 **Synthetic event**:

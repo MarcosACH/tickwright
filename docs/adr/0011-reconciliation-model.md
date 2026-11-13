@@ -140,6 +140,11 @@ ADR-0009).
   memory, so a restart has none and the budget counts from boot. A send from the previous life
   that lands after that budget is not covered here. Neither is a send that timed out on our
   side but that the venue accepts after the budget. #642 tracks both. [#640]**)**
+  **(Amended by ADR-0063:** both late sends are now covered. The saga stays `FAILED`. If the
+  venue lists an order under its cloid, the open-order cycle reads it again by the saga's own ref
+  and cancels it by oid while it still rests. The same holds for every terminal but `DENIED`. Such
+  an order is a stray order. Its fills are logged and never booked.
+  [#642](https://github.com/MarcosACH/tickwright/issues/642)**)**
 - An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
   cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
   preserved) from `PARTIALLY_FILLED` (ADR-0010).
@@ -157,6 +162,14 @@ This case cannot arise on the paper exchange; it is a live-path-only concern.
 cancel-all` and `tickwright flatten` cancel every resting order in the account, external orders
 included. The engine still never acts on an external order by itself. Decided in
 [#410](https://github.com/MarcosACH/tickwright/issues/410).**)**
+
+**(Amended by ADR-0063:** the open-order cycle now lists every open order in the account, so an
+external order is found each pass. It is logged once per oid per process life as
+`reconcile.external_order`. Three cases count as external: an unknown cloid, no cloid, and the
+cloid of a `DENIED` saga, which never sent. So does a record older than the saga that holds its
+cloid (invariant 12). An order under the cloid of any other terminal saga is ours. It is a stray
+order, and the engine cancels it.
+[#642](https://github.com/MarcosACH/tickwright/issues/642)**)**
 
 This reflects established live-reconciliation practice (startup mass-status + continuous in-flight
 monitoring, query-failure-vs-empty distinction, single-order re-query before terminal

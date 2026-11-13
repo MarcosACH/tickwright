@@ -192,3 +192,8 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
      checked against the `Literal` in the same file.
    A new closed vocabulary the engine reads by member gets the same treatment. Prefer a producer
    per member over a name per member. A name is not a proof. (#194, #303)
+14. **A terminal saga's resting order is cancelled, and no terminal saga is ever reopened.** The
+   next open-order pass that reads the venue cancels it by oid. It confirms first, with a read by
+   the saga's own ref. The list alone never triggers a cancel. Its fills are logged and never
+   booked. A `DENIED` saga never sent, so an order under its cloid is external, and the engine
+   never acts on an external order. (ADR-0063, #642)
