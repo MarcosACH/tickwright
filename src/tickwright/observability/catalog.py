@@ -28,6 +28,10 @@ class NamedEvent(StrEnum):
     ORDER_REJECTED = "order.rejected"
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
+    # The venue took an order whose saga is already terminal. No saga moves,
+    # so this line is the only record that the order may rest. The open-order
+    # pass cancels it if it still does (ADR-0063).
+    ORDER_PLACE_ANSWER_AFTER_TERMINAL = "order.place_answer_after_terminal"
 
     # Position changes (``PortfolioProjection``, ADR-0045 §2). A position change
     # is an *output* derived from a fill already on the bus, so it is
@@ -301,6 +305,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ORDER_REJECTED: frozenset({"reason"}),
     NamedEvent.ORDER_FAILED: frozenset({"reason"}),
     NamedEvent.ORDER_CANCELLED: frozenset(),
+    NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL: frozenset({"saga_state", "venue_oid"}),
     # One shape for the fill path and the funding-accrual path alike.
     NamedEvent.POSITION_OPENED: frozenset({"strategy_id", "symbol", "size", "funding"}),
     NamedEvent.POSITION_CHANGED: frozenset({"strategy_id", "symbol", "size", "funding"}),
