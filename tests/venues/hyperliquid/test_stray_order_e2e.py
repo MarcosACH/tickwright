@@ -457,16 +457,24 @@ def test_a_readable_list_restarts_the_unreadable_span() -> None:
 
 def test_two_listed_orders_under_one_cloid_get_one_cancel_and_one_external_line() -> None:
     # A cloid can name more than one venue order, one per life of the account
-    # (#354). The confirm read names the saga's order. The other listed order
-    # is not the saga's, so it is external, and the saga's gets one cancel.
+    # (#354). Here the read by cloid answers with the earlier life's order. The
+    # probe saw the newer one win, but no venue doc says so. A saga with no oid
+    # reads each listed oid instead, so the answer by cloid never decides.
     cloid = derive_cloid(_signal().signal_id)
     earlier_oid = 88
     listed = [
         {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
         {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
     ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+    earlier = order_status_response(cloid=cloid, oid=earlier_oid, placed_ms=SENT_MS - 300_000)
 
-    _, [result], seen = _open_order_passes(OrderState.FAILED, open_orders=listed)
+    def by_oid_or_cloid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else earlier
+
+    _, [result], seen = _open_order_passes(
+        OrderState.FAILED, open_orders=listed, confirm_answer=by_oid_or_cloid
+    )
 
     assert result is PassResult.PROVED
     cancels = [s for s in seen if isinstance(s, list)]

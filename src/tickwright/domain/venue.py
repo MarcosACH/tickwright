@@ -73,6 +73,12 @@ class OrderRef:
     The quantity is the size the saga asked for. A venue that shrank a
     reduce-only order, or filled an IOC order only in part, reports it done
     for less. Only the asked size shows the cut part (ADR-0057, #629).
+
+    The listed oid is an oid the open-order list named under this cloid. The
+    stray check reads a saga with no oid by it, so the answer by cloid never
+    decides which order is the saga's. The saga does not hold this oid, so the
+    creation time check still applies (#652). A venue that keeps one order per
+    cloid, as paper does, may ignore it.
     """
 
     cloid: str
@@ -81,6 +87,7 @@ class OrderRef:
     acked_ts_ns: int | None = None
     created_ts_ns: int | None = None
     quantity: Decimal | None = None
+    listed_oid: str | None = None
 
     @classmethod
     def of(cls, order: Order) -> "OrderRef":
