@@ -78,7 +78,8 @@ class OrderRef:
     stray check reads a saga with no oid by it, so the answer by cloid never
     decides which order is the saga's. The saga does not hold this oid, so the
     creation time check still applies (#652). A venue that keeps one order per
-    cloid, as paper does, may ignore it.
+    cloid, as paper does, may ignore it. Only ``fetch_order`` reads it. A
+    cancel goes by the saga's own oid, or by cloid when it has none.
     """
 
     cloid: str

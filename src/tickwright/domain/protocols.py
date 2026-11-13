@@ -591,6 +591,9 @@ class OrderAnchor(Protocol):
         record while it still holds the fills. The oid and ack time on the ref
         are what a venue reads its fill history by then (ADR-0011 inv 2).
 
+        The stray check may set ``listed_oid`` on the ref, for a saga with no
+        oid. The ``OrderRef`` docstring says how to read it (ADR-0063, #652).
+
         The failure carries **which way** it failed, and the caller acts on the
         difference: the reconciler drives a worklist, so it must know whether
         the venue answered at all before deciding whether one order's failure
