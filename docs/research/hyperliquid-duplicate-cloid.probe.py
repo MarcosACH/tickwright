@@ -7,7 +7,7 @@ Asks Hyperliquid testnet two questions:
 3. If it does, which order does a cancel by that cloid remove?
 
 It places two post-only BTC buys of about 12 USD under one fresh cloid. The
-first sits 5% below the oracle and the second 6% below it. Neither can fill,
+first sits 6% below the oracle and the second 5% below it. Neither can fill,
 and the two prices tell them apart. In every case it reads
 ``frontendOpenOrders`` once. If both rest, it reads ``orderStatus`` by the
 cloid several times, then by each oid. Then it cancels once by the cloid and
@@ -47,8 +47,10 @@ from hyperliquid.utils.types import Cloid
 
 COIN = "BTC"
 # The oracle-price-band probe saw passive orders rest up to 8% from the oracle.
-FIRST_DISTANCE = 0.05
-SECOND_DISTANCE = 0.06
+# The second order is the newer one and the one nearer the book. Commit 37948f99 had them the
+# other way round. Together the two runs tell "newest wins" apart from "best price wins".
+FIRST_DISTANCE = 0.06
+SECOND_DISTANCE = 0.05
 NOTIONAL_USD = 12
 # Several reads, because an undocumented choice between two orders may not be stable.
 CLOID_READS = 5
