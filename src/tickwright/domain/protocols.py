@@ -644,8 +644,9 @@ class AccountAnchor(Protocol):
         its first perp dex.
 
         Operator cancel all reads it for its list and again for its final check.
-        The reconciler reads it on each open-order pass (ADR-0063). A failed read returns a ``VenueReadFailure`` and never an empty list,
-        because an empty list says the account holds no order (ADR-0011 inv 1).
+        The reconciler reads it on each open-order pass (ADR-0063). A failed
+        read returns a ``VenueReadFailure`` and never an empty list, because an
+        empty list says the account holds no order (ADR-0011 inv 1).
         """
         ...
 

@@ -165,8 +165,8 @@ included. The engine still never acts on an external order by itself. Decided in
 
 **(Amended by ADR-0063:** the open-order cycle now lists every open order in the account, so an
 external order is found each pass. It is logged once per oid per process life as
-`reconcile.external_order`. Three cases count as external: an unknown cloid, no cloid, and the
-cloid of a `DENIED` saga, which never sent. So does a record older than the saga that holds its
+`reconcile.external_order`. These count as external: an unknown cloid, no cloid, and the
+cloid of a `DENIED` saga, which never sent. So do a record older than the saga that holds its
 cloid (invariant 12), and an oid other than the one the saga's own read names (#354). Any other
 order under the cloid of a terminal saga is ours. It is a stray order, and the engine cancels it.
 [#642](https://github.com/MarcosACH/tickwright/issues/642)**)**
