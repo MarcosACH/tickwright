@@ -346,9 +346,12 @@ class Reconciler:
             if order.is_terminal:
                 sagas[order.cloid] = order
                 listed_under.setdefault(order.cloid, []).append(entry)
+        reads = [
+            (order, ref) for order in sagas.values() for ref in _stray_refs(order, listed_under)
+        ]
         # A stray the list no longer names is over, and so is its unreadable
         # run. If it is listed again, its next unreadable read starts a new one.
-        self._unreadable_stray_run.retain(sagas.keys())
+        self._unreadable_stray_run.retain({_span_key(ref) for _, ref in reads})
 
         async def cancel_stray(order: Order, ref: OrderRef, view: VenueOrderView) -> None:
             listed = listed_under[order.cloid]
@@ -356,9 +359,6 @@ class Reconciler:
                 listed = [entry for entry in listed if entry.venue_oid == ref.listed_oid]
             await self._cancel_stray(order, view, listed)
 
-        reads = (
-            (order, ref) for order in sagas.values() for ref in _stray_refs(order, listed_under)
-        )
         return await self._read_each(reads, cancel_stray, self._unreadable_stray_run)
 
     async def _cancel_stray(
@@ -452,7 +452,8 @@ class Reconciler:
         only on a pass that proved **every** order it looked at.
         ``RATE_LIMITED`` when a read was refused for the IP limit, and
         ``FAILED`` when any other read failed. An unreadable body is charged
-        to ``unreadable``, keyed by cloid.
+        to ``unreadable``, keyed by the listed oid the ref reads by, else by
+        cloid.
 
         **How much a failed read costs turns on whether the venue answered**
         (ADR-0049). A dead send says nothing about this order in particular — the
@@ -475,10 +476,10 @@ class Reconciler:
                     case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
                         return self._stop_pass(view)
                     case VenueReadFailure.UNREADABLE_BODY:
-                        self._charge_unreadable(order, unreadable)
+                        self._charge_unreadable(ref, unreadable)
                         proved_all = False
                     case _:
-                        unreadable.record_present(order.cloid)
+                        unreadable.record_present(_span_key(ref))
                         await handle(order, ref, view)
         return PassResult.PROVED if proved_all else PassResult.FAILED
 
@@ -541,10 +542,10 @@ class Reconciler:
         await self._bus.publish(self._verdict(order, status, reason))
         named_event(NamedEvent.GHOST_RECONCILED, resolution=status.value)
 
-    def _charge_unreadable(self, order: Order, unreadable: GraceWindow) -> None:
-        """Hold one unreadable read against ``order``'s span in ``unreadable``
+    def _charge_unreadable(self, ref: OrderRef, unreadable: GraceWindow) -> None:
+        """Hold one unreadable read against ``ref``'s span in ``unreadable``
         and freeze it — or escalate, once the span says the condition is
-        durable (ADR-0049).
+        durable (ADR-0049). A read by a listed oid has a span of its own.
 
         A single unreadable body is transient by assumption and stays one: the
         order is skipped, the pass carries on, and the next cycle re-reads it.
@@ -561,11 +562,12 @@ class Reconciler:
         each of these reads against this cloid with the body it could not read,
         so the refusal names the order and leaves the evidence where it is.
         """
-        if not unreadable.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
+        if not unreadable.record_absent(_span_key(ref), now_ns=self._clock.timestamp_ns()):
             self._freeze(_FreezeScope.ORDER)
             return
+        oid = "" if ref.listed_oid is None else f" oid {ref.listed_oid}"
         raise VenueReadUnresolvable(
-            f"venue body for cloid {order.cloid} continuously unreadable across "
+            f"venue body for cloid {ref.cloid}{oid} continuously unreadable across "
             f"{self._config.unreadable_grace_seconds}s: the condition is durable "
             "and no later pass can resolve it — see the exchange.request_failed "
             "reads for this cloid, each quoting the body"
@@ -733,3 +735,9 @@ def _stray_refs(order: Order, listed_under: dict[str, list[VenueOpenOrder]]) -> 
     if order.venue_oid is not None or any(entry.venue_oid is None for entry in listed):
         return [own]
     return [replace(own, listed_oid=entry.venue_oid) for entry in listed]
+
+
+def _span_key(ref: OrderRef) -> str:
+    """The unreadable span a read is charged to. A read by a listed oid gets
+    its own, so a good read of one order never restarts another's (#652)."""
+    return ref.listed_oid or ref.cloid

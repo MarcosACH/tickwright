@@ -542,6 +542,38 @@ def test_a_list_without_the_stray_restarts_its_unreadable_span() -> None:
     assert results == [PassResult.FAILED, PassResult.PROVED, PassResult.FAILED]
 
 
+def test_a_listed_oid_unreadable_across_the_span_faults_while_its_sibling_reads_fine() -> None:
+    # A saga with no oid gets one read per listed oid. Each oid has its own
+    # span. Were they one span per cloid, every good read of oid 77 would
+    # restart it, and oid 88 could stay unreadable forever (ADR-0049).
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+
+    def by_oid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else UNREADABLE_STATUS
+
+    def passes(count: int) -> list[PassResult]:
+        _, results, _ = _open_order_passes(
+            OrderState.FAILED,
+            open_orders=listed,
+            confirm_answer=by_oid,
+            passes=count,
+            interval_seconds=30,
+        )
+        return results
+
+    # Passes at 0s, 30s and 60s: frozen, not yet faulted.
+    assert passes(3) == [PassResult.FAILED] * 3
+    # The pass at 90s spends oid 88's span.
+    with pytest.raises(VenueReadUnresolvable, match=f"oid {earlier_oid}"):
+        passes(4)
+
+
 def test_an_unreadable_read_from_the_sagas_working_life_never_faults_its_stray_check() -> None:
     # One unreadable read while the saga was LIVE starts its span. Then a push
     # ends the saga, with no read in between. Long after, the venue lists an
