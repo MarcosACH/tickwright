@@ -49,7 +49,7 @@ Preconditions:
 - Under replay the ticks drain in milliseconds after `engine.feed_started`. A `USR1` sent to a
   life that has a strategy arrives after the order was placed. Trip the switch in a life with no
   strategy and let the durable row do the work in the next life, as above.
-- `guard.kill_switch_tripped` and `guard.kill_switch_reset` carry no `run_id`. They are emitted
-  from the signal handler, outside the run's context. Do not grep them by run id.
-- `guard.kill_switch_restored` carries no `run_id` either. The guard is built before the run
-  binds its id.
+- `guard.kill_switch_tripped` and `guard.kill_switch_reset` carry the `run_id`. The signal
+  handler runs in the run's context.
+- `guard.kill_switch_restored` carries no `run_id`. The guard is built before the run binds its
+  id. Do not grep it by run id.

@@ -697,6 +697,10 @@ ALARM_EVENTS = (
     # A halted engine whose strategy never places logs no order.denied (#639).
     "guard.kill_switch_restored",
     "ghost.reconciled",
+    # No saga moves for these three, so the log line is the only record (ADR-0063).
+    "reconcile.stray_cancelled",
+    "reconcile.external_order",
+    "order.place_answer_after_terminal",
     "reconcile.frozen",
     "account.reconcile_frozen",
     "account.healed",
