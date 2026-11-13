@@ -219,6 +219,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   external orders (ADR-0063). Its failures follow the same three members. An unreadable list is
   charged to one span for the whole account. Report `LIVE` outside reconciliation only as a place
   answer. The engine logs a `LIVE` that reaches a terminal saga as a late place answer.
+  For a saga with no oid, `fetch_order` gets one read per listed oid, in `OrderRef.listed_oid`.
+  Read by that oid, and still refuse a record placed before `created_ts_ns` (invariant 12). A
+  venue that keeps one order per cloid, as paper does, may ignore the field (#652).
 - [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the
   seam-claims gate below will make you name a test for.
   - `account_spec()` returns an `AccountSpec`: the qualified `account_id` the store keys the ledger

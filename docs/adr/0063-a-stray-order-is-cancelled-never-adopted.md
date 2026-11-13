@@ -33,6 +33,21 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
     limit freezes it and returns `RATE_LIMITED`. An unreadable body skips that order and charges
     its own unreadable span. That span is kept apart from the saga's working life, so a run left
     open there never counts. A list read that no longer names the order ends its run.
+
+  **(Amended by #652 — a saga with no oid is read once per listed oid:**
+  The venue lets a second order rest under a cloid while the first one still rests. Which one a
+  read by cloid answers with is not documented (ADR-0011, #354). If it answered with an earlier
+  life's order, the age check refused it. This life's stray was then logged as external and
+  never cancelled. So a saga with no oid now reads each oid the list names under its cloid,
+  through `OrderRef.listed_oid`. The saga does not hold that oid, so the age check still runs.
+  Each read judges only its own listed order. Still resting: cancel it. Refused by the age
+  check: external. No longer resting: do nothing. If two listed orders both pass the age check,
+  both are cancelled. That happens when an earlier life placed the cloid within the 60 s skew
+  allowance. It is the one case where the engine may cancel an earlier life's order. A cancel
+  never adds exposure, and our own stray left resting could fill. An unreadable read is charged
+  to a span keyed by its listed oid, so a good read of one order never restarts another's span.
+  A saga with an oid still reads by it. A list entry with no oid, as on paper, keeps the one
+  read by the saga's own ref. [#652](https://github.com/MarcosACH/tickwright/issues/652)**)**
 - **The Reconciler cancels directly.** It sends the cancel on its `OrderAnchor`, by the oid from
   the confirm read. No saga is written. The pass keeps no memory, so a lost cancel is sent again
   on the next pass.

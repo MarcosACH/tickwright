@@ -428,7 +428,10 @@ _Avoid_: orphan, stale order, zombie order.
 **External order**:
 A venue order the engine did not place. Its cloid is unknown to the books, or it is an earlier
 life's order under a cloid a saga holds. That shows as a record older than the saga (invariant
-12), or as an oid other than the one the saga's own read names (#354). A `DENIED` saga's cloid on
+12). A saga with an oid reads by it, so any other oid listed under its cloid is external (#354).
+A saga with no oid reads each listed oid, and the age check runs on each read (#652). An earlier
+life's order placed within the skew allowance passes that check, so it is cancelled as a stray.
+A `DENIED` saga's cloid on
 the venue is external too, since that saga never sent. The engine logs it and never acts on it. Only an
 operator `cancel-all` or `flatten` may cancel it. See ADR-0011, ADR-0052, ADR-0063.
 _Avoid_: foreign order, unknown order.
