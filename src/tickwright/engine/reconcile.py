@@ -363,17 +363,20 @@ class Reconciler:
         """Cancel the saga's order if the confirm read says it still works.
         Every other order in ``listed`` is external."""
         if view.status is None:
-            # The venue lists this cloid, yet a read by the saga's own ref
-            # finds no record of it. An order we cancelled or filled would
-            # still answer with its record. So none of these is the saga's,
-            # most often an earlier life's (#354).
+            # The venue lists this cloid, yet the confirm read finds no record
+            # the saga could own. An order we cancelled or filled would still
+            # answer with its record. So none of these is the saga's, most often
+            # an earlier life's (#354). A read by a listed oid that the age
+            # check refused lands here too, and judges only its own entry (#652).
             for entry in listed:
                 self._log_external(entry)
             return
         venue_oid = view.status.venue_oid
         for entry in listed:
-            # The read names the saga's own order. Another oid under the same
-            # cloid is an earlier life's order. Paper gives no oid to compare.
+            # A read by the saga's own oid names its order. Another oid under
+            # the same cloid is an earlier life's order. A read by a listed oid
+            # judges only that entry, so nothing is logged here. Paper gives no
+            # oid to compare.
             if None not in (entry.venue_oid, venue_oid) and entry.venue_oid != venue_oid:
                 self._log_external(entry)
         if view.status.status not in WORKING_STATES:
