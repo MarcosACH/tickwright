@@ -307,13 +307,9 @@ class Reconciler:
         """
         listed = await self._account.fetch_open_orders()
         match listed:
-            case VenueReadFailure.SEND_FAILED:
+            case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
                 # Without the list a stray and an empty account look the same.
-                self._freeze(_FreezeScope.CYCLE)
-                return PassResult.FAILED
-            case VenueReadFailure.RATE_LIMITED_IP:
-                self._freeze(_FreezeScope.CYCLE)
-                return PassResult.RATE_LIMITED
+                return self._stop_pass(listed)
             case VenueReadFailure.UNREADABLE_BODY:
                 self._charge_unreadable_list()
                 return PassResult.FAILED
@@ -335,12 +331,8 @@ class Reconciler:
             with operation(cloid=order.cloid):
                 view = await self._exchange.fetch_order(OrderRef.of(order))
                 match view:
-                    case VenueReadFailure.SEND_FAILED:
-                        self._freeze(_FreezeScope.CYCLE)
-                        return PassResult.FAILED
-                    case VenueReadFailure.RATE_LIMITED_IP:
-                        self._freeze(_FreezeScope.CYCLE)
-                        return PassResult.RATE_LIMITED
+                    case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
+                        return self._stop_pass(view)
                     case VenueReadFailure.UNREADABLE_BODY:
                         # Only this order is skipped. The strays behind it
                         # still get their own read (ADR-0049).
@@ -395,9 +387,9 @@ class Reconciler:
     ) -> PassResult:
         """The one skeleton every cadence shares: over each non-terminal saga in
         ``states`` (all of them when ``None``), read venue truth by cloid and let
-        ``handle`` resolve the gap. A failed read trips the connectivity guard —
-        the whole pass freezes here and nowhere else, so ADR-0011 inv 1 lives in
-        exactly one place. ``PROVED`` only on a pass that proved **every** order
+        ``handle`` resolve the gap. A failed read trips the connectivity guard.
+        The stray check freezes on the same rules, and both stop through
+        ``_stop_pass``. ``PROVED`` only on a pass that proved **every** order
         it looked at. ``RATE_LIMITED`` when a read was refused for the IP limit,
         and ``FAILED`` when any other read failed.
 
@@ -426,15 +418,8 @@ class Reconciler:
                 with operation(cloid=order.cloid):
                     view = await self._exchange.fetch_order(OrderRef.of(order))
                     match view:
-                        case VenueReadFailure.SEND_FAILED:
-                            # Every other read in the pass would fail the same way.
-                            self._freeze(_FreezeScope.CYCLE)
-                            return PassResult.FAILED
-                        case VenueReadFailure.RATE_LIMITED_IP:
-                            # Every other read would be refused too, and would
-                            # spend more of the limit (ADR-0056).
-                            self._freeze(_FreezeScope.CYCLE)
-                            return PassResult.RATE_LIMITED
+                        case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
+                            return self._stop_pass(view)
                         case VenueReadFailure.UNREADABLE_BODY:
                             self._charge_unreadable(order)
                             proved_all = False
@@ -530,6 +515,17 @@ class Reconciler:
             "and no later pass can resolve it — see the exchange.request_failed "
             "reads for this cloid, each quoting the body"
         )
+
+    def _stop_pass(self, failure: VenueReadFailure) -> PassResult:
+        """Freeze the rest of the pass on a read the venue never answered
+        (ADR-0049). After a failed send, every other read would fail the same
+        way. After a rate limit, every other read would be refused too and
+        spend more of the limit (ADR-0056). So no read behind this one runs.
+        """
+        self._freeze(_FreezeScope.CYCLE)
+        if failure is VenueReadFailure.RATE_LIMITED_IP:
+            return PassResult.RATE_LIMITED
+        return PassResult.FAILED
 
     def _charge_unreadable_list(self) -> None:
         """Hold one unreadable open-order list against the account's span, as
