@@ -364,18 +364,20 @@ class Reconciler:
         if view.status.status not in WORKING_STATES:
             return
         await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])
-        # Its fills are never booked. Booking one would move a terminal saga,
-        # which faults the engine. Ledger reconciliation books the position as
-        # unattributed, and this line names the fills behind it. Totals and
-        # ids, not a list: a log field stays a scalar so it greps the same in
-        # every output.
+        # Its fills after the saga went terminal are never booked. Booking one
+        # would move a terminal saga, which faults the engine. Ledger
+        # reconciliation books the position as unattributed, and this line
+        # names the fills behind it. A fill booked before the terminal is in
+        # the books already, so it is left out. Totals and ids, not a list: a
+        # log field stays a scalar so it greps the same in every output.
+        unbooked = [fill for fill in view.fills if not order.has_booked(fill.trade_id)]
         named_event(
             NamedEvent.RECONCILE_STRAY_CANCELLED,
             saga_state=order.state.value,
             venue_oid=venue_oid,
-            unbooked_trade_ids=",".join(fill.trade_id for fill in view.fills),
-            unbooked_quantity=str(sum((f.quantity for f in view.fills), Decimal(0))),
-            unbooked_fee=str(sum((f.fee for f in view.fills), Decimal(0))),
+            unbooked_trade_ids=",".join(fill.trade_id for fill in unbooked),
+            unbooked_quantity=str(sum((f.quantity for f in unbooked), Decimal(0))),
+            unbooked_fee=str(sum((f.fee for f in unbooked), Decimal(0))),
         )
 
     def _log_external(self, entry: VenueOpenOrder | ExternalOrderRef) -> None:

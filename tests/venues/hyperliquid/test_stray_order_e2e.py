@@ -172,6 +172,7 @@ def _open_order_passes(
     open_orders: object = None,
     confirm_answer: object = None,
     interval_seconds: int = 0,
+    booked_trade_id: str | None = None,
 ) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
 
@@ -182,6 +183,7 @@ def _open_order_passes(
     ``open_orders`` replaces the list answer, such as with a failure, and
     ``confirm_answer`` replaces the confirm read's answer the same way. The clock
     moves ``interval_seconds`` after each pass, as the cadence would.
+    ``booked_trade_id`` books a 0.2 fill on the saga before it went terminal.
 
     Returns the saga as stored after the passes, each pass result, and the
     cancels sent followed by the stray, external and frozen log lines.
@@ -219,9 +221,20 @@ def _open_order_passes(
             side=Side.BUY,
             quantity=signal.quantity,
             order_type=OrderType.LIMIT,
-            state=state,
+            state=OrderState.LIVE if booked_trade_id else state,
             created_ts_ns=SENT_MS * 1_000_000,
         )
+        if booked_trade_id:
+            saga.record_fill(
+                trade_id=booked_trade_id,
+                quantity=Decimal("0.2"),
+                price=Decimal("42000"),
+                ts_event=LANDED_MS * 1_000_000,
+                ts_init=LANDED_MS * 1_000_000,
+            )
+            # The saga went terminal after the fill, such as a ghost verdict
+            # that kept the fill (ADR-0010).
+            saga.state = state
         store.checkpoint(saga, ts_ns=SENT_MS * 1_000_000)
         checks = checkpointer(store, clock=clock)
         checks.cache.rebuild()
@@ -268,6 +281,29 @@ def test_a_strays_fills_are_logged_with_its_cancel_and_never_booked() -> None:
     }
     assert saga is not None
     assert (saga.state, saga.cum_qty) == (OrderState.FAILED, Decimal("0"))
+
+
+def test_a_fill_the_saga_already_booked_is_not_logged_as_unbooked() -> None:
+    # The saga booked 9001, then went terminal while the order kept working.
+    # Only 9002 is outside the books, so only 9002 is named as unbooked.
+    fills = [
+        fill_entry(oid=STRAY_OID, tid=9001, px="42000", sz="0.2", fee="1.68", time=LANDED_MS),
+        fill_entry(oid=STRAY_OID, tid=9002, px="42000", sz="0.1", fee="0.84", time=LANDED_MS),
+    ]
+    saga, [result], seen = _open_order_passes(
+        OrderState.CANCELLED, fills=fills, booked_trade_id="9001"
+    )
+
+    assert result is PassResult.PROVED
+    _, stray = seen
+    unbooked = {k: v for k, v in stray.items() if k.startswith("unbooked_")}
+    assert unbooked == {
+        "unbooked_trade_ids": "9002",
+        "unbooked_quantity": "0.1",
+        "unbooked_fee": "0.84",
+    }
+    assert saga is not None
+    assert (saga.state, saga.cum_qty) == (OrderState.CANCELLED, Decimal("0.2"))
 
 
 @pytest.mark.parametrize("state", [OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED])
