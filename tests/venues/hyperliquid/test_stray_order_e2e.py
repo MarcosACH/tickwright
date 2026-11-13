@@ -174,6 +174,7 @@ def _open_order_passes(
     confirm_answer: object = None,
     interval_seconds: int = 0,
     booked_trade_id: str | None = None,
+    saga_oid: int | None = None,
 ) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
 
@@ -185,6 +186,7 @@ def _open_order_passes(
     ``confirm_answer`` replaces the confirm read's answer the same way. The clock
     moves ``interval_seconds`` after each pass, as the cadence would.
     ``booked_trade_id`` books a 0.2 fill on the saga before it went terminal.
+    ``saga_oid`` gives the saga the oid an ack would have stored.
 
     Returns the saga as stored after the passes, each pass result, and the
     cancels sent followed by the stray, external and frozen log lines.
@@ -224,6 +226,7 @@ def _open_order_passes(
             order_type=OrderType.LIMIT,
             state=OrderState.LIVE if booked_trade_id else state,
             created_ts_ns=SENT_MS * 1_000_000,
+            venue_oid=None if saga_oid is None else str(saga_oid),
         )
         if booked_trade_id:
             saga.record_fill(
@@ -457,22 +460,91 @@ def test_a_readable_list_restarts_the_unreadable_span() -> None:
 
 def test_two_listed_orders_under_one_cloid_get_one_cancel_and_one_external_line() -> None:
     # A cloid can name more than one venue order, one per life of the account
-    # (#354). The confirm read names the saga's order. The other listed order
-    # is not the saga's, so it is external, and the saga's gets one cancel.
+    # (#354). Here the read by cloid answers with the earlier life's order. The
+    # probe saw the newer one win, but no venue doc says so. A saga with no oid
+    # reads each listed oid instead, so the answer by cloid never decides.
     cloid = derive_cloid(_signal().signal_id)
     earlier_oid = 88
     listed = [
         {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
         {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
     ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+    earlier = order_status_response(cloid=cloid, oid=earlier_oid, placed_ms=SENT_MS - 300_000)
 
-    _, [result], seen = _open_order_passes(OrderState.FAILED, open_orders=listed)
+    def by_oid_or_cloid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else earlier
+
+    _, [result], seen = _open_order_passes(
+        OrderState.FAILED, open_orders=listed, confirm_answer=by_oid_or_cloid
+    )
 
     assert result is PassResult.PROVED
     cancels = [s for s in seen if isinstance(s, list)]
     assert cancels == [[{"a": 3, "o": STRAY_OID}]]
     lines = [(e["event"], e["venue_oid"]) for e in seen if isinstance(e, dict)]
     assert sorted(lines) == [
+        ("reconcile.external_order", str(earlier_oid)),
+        ("reconcile.stray_cancelled", str(STRAY_OID)),
+    ]
+
+
+def test_two_listed_orders_that_both_pass_the_age_check_are_both_cancelled() -> None:
+    # An earlier life placed the same cloid 30s before this saga existed. The
+    # age check allows 60s of clock skew, so that order passes it too, and the
+    # reads cannot tell which order is ours. A cancel never adds exposure, so
+    # both are cancelled rather than leaving our own stray to fill.
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+    earlier = order_status_response(cloid=cloid, oid=earlier_oid, placed_ms=SENT_MS - 30_000)
+
+    def by_oid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else earlier
+
+    _, [result], seen = _open_order_passes(
+        OrderState.FAILED, open_orders=listed, confirm_answer=by_oid
+    )
+
+    assert result is PassResult.PROVED
+    cancels = [s for s in seen if isinstance(s, list)]
+    assert cancels == [[{"a": 3, "o": STRAY_OID}], [{"a": 3, "o": earlier_oid}]]
+    lines = [(e["event"], e["venue_oid"]) for e in seen if isinstance(e, dict)]
+    assert lines == [
+        ("reconcile.stray_cancelled", str(STRAY_OID)),
+        ("reconcile.stray_cancelled", str(earlier_oid)),
+    ]
+
+
+def test_a_saga_with_an_oid_cancels_only_its_own_and_logs_the_other_listed_order() -> None:
+    # The saga holds an oid, so one read by it names its order. The other oid
+    # under its cloid is external, even though it would pass the age check.
+    # Were each listed oid read instead, both orders would be cancelled.
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+    earlier = order_status_response(cloid=cloid, oid=earlier_oid, placed_ms=SENT_MS - 30_000)
+
+    def by_oid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else earlier
+
+    _, [result], seen = _open_order_passes(
+        OrderState.CANCELLED, open_orders=listed, confirm_answer=by_oid, saga_oid=STRAY_OID
+    )
+
+    assert result is PassResult.PROVED
+    cancels = [s for s in seen if isinstance(s, list)]
+    assert cancels == [[{"a": 3, "o": STRAY_OID}]]
+    lines = [(e["event"], e["venue_oid"]) for e in seen if isinstance(e, dict)]
+    assert lines == [
         ("reconcile.external_order", str(earlier_oid)),
         ("reconcile.stray_cancelled", str(STRAY_OID)),
     ]
@@ -501,6 +573,38 @@ def test_a_list_without_the_stray_restarts_its_unreadable_span() -> None:
     )
 
     assert results == [PassResult.FAILED, PassResult.PROVED, PassResult.FAILED]
+
+
+def test_a_listed_oid_unreadable_across_the_span_faults_while_its_sibling_reads_fine() -> None:
+    # A saga with no oid gets one read per listed oid. Each oid has its own
+    # span. Were they one span per cloid, every good read of oid 77 would
+    # restart it, and oid 88 could stay unreadable forever (ADR-0049).
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+    ours = order_status_response(cloid=cloid, oid=STRAY_OID, placed_ms=LANDED_MS)
+
+    def by_oid(payload: dict) -> dict:
+        return ours if payload["oid"] == STRAY_OID else UNREADABLE_STATUS
+
+    def passes(count: int) -> list[PassResult]:
+        _, results, _ = _open_order_passes(
+            OrderState.FAILED,
+            open_orders=listed,
+            confirm_answer=by_oid,
+            passes=count,
+            interval_seconds=30,
+        )
+        return results
+
+    # Passes at 0s, 30s and 60s: frozen, not yet faulted.
+    assert passes(3) == [PassResult.FAILED] * 3
+    # The pass at 90s spends oid 88's span.
+    with pytest.raises(VenueReadUnresolvable, match=f"oid {earlier_oid}"):
+        passes(4)
 
 
 def test_an_unreadable_read_from_the_sagas_working_life_never_faults_its_stray_check() -> None:
