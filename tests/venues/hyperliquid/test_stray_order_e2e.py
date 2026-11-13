@@ -415,6 +415,29 @@ def test_a_readable_list_restarts_the_unreadable_span() -> None:
     ]
 
 
+def test_two_listed_orders_under_one_cloid_get_one_cancel_and_one_external_line() -> None:
+    # A cloid can name more than one venue order, one per life of the account
+    # (#354). The confirm read names the saga's order. The other listed order
+    # is not the saga's, so it is external, and the saga's gets one cancel.
+    cloid = derive_cloid(_signal().signal_id)
+    earlier_oid = 88
+    listed = [
+        {"coin": "BTC", "oid": STRAY_OID, "cloid": cloid},
+        {"coin": "BTC", "oid": earlier_oid, "cloid": cloid},
+    ]
+
+    _, [result], seen = _open_order_passes(OrderState.FAILED, open_orders=listed)
+
+    assert result is PassResult.PROVED
+    cancels = [s for s in seen if isinstance(s, list)]
+    assert cancels == [[{"a": 3, "o": STRAY_OID}]]
+    lines = [(e["event"], e["venue_oid"]) for e in seen if isinstance(e, dict)]
+    assert sorted(lines) == [
+        ("reconcile.external_order", str(earlier_oid)),
+        ("reconcile.stray_cancelled", str(STRAY_OID)),
+    ]
+
+
 def test_an_earlier_lifes_order_is_logged_once_across_passes() -> None:
     before_saga_ms = SENT_MS - 300_000
     _, _, seen = _open_order_passes(OrderState.FAILED, placed_ms=before_saga_ms, passes=3)

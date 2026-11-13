@@ -314,7 +314,9 @@ class Reconciler:
                 self._charge_unreadable_list()
                 return PassResult.FAILED
         self._unreadable_run.record_present(_ACCOUNT_LIST_KEY)
-        proved_all = True
+        # Every listed order under each terminal saga's cloid. A cloid can name
+        # more than one venue order (#354), and the saga is read once for all.
+        strays: dict[str, list[VenueOpenOrder]] = {}
         for entry in listed:
             if isinstance(entry, ExternalOrderRef):
                 # No cloid at all, so placed by hand or by another client.
@@ -326,8 +328,12 @@ class Reconciler:
             if order is None or order.state is OrderState.DENIED:
                 self._log_external(entry)
                 continue
-            if not order.is_terminal:
-                continue
+            if order.is_terminal:
+                strays.setdefault(order.cloid, []).append(entry)
+        proved_all = True
+        for cloid, entries in strays.items():
+            order = self._cache.get_order(cloid)
+            assert order is not None
             with operation(cloid=order.cloid):
                 view = await self._exchange.fetch_order(OrderRef.of(order))
                 match view:
@@ -340,31 +346,44 @@ class Reconciler:
                         proved_all = False
                         continue
                 self._unreadable_run.record_present(order.cloid)
-                if view.status is None:
-                    # The venue lists this cloid, yet a read by the saga's own
-                    # ref finds no record of it. An order we cancelled or
-                    # filled would still answer with its record. So this one
-                    # is not the saga's, most often an earlier life's (#354).
-                    self._log_external(entry)
-                    continue
-                if view.status.status not in WORKING_STATES:
-                    continue
-                venue_oid = view.status.venue_oid
-                await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])
-                # Its fills are never booked. Booking one would move a terminal
-                # saga, which faults the engine. Ledger reconciliation books the
-                # position as unattributed, and this line names the fills behind it.
-                # Totals and ids, not a list: a log field stays a scalar so it
-                # greps the same in every output.
-                named_event(
-                    NamedEvent.RECONCILE_STRAY_CANCELLED,
-                    saga_state=order.state.value,
-                    venue_oid=venue_oid,
-                    unbooked_trade_ids=",".join(fill.trade_id for fill in view.fills),
-                    unbooked_quantity=str(sum((f.quantity for f in view.fills), Decimal(0))),
-                    unbooked_fee=str(sum((f.fee for f in view.fills), Decimal(0))),
-                )
+                await self._cancel_stray(order, view, entries)
         return PassResult.PROVED if proved_all else PassResult.FAILED
+
+    async def _cancel_stray(
+        self, order: Order, view: VenueOrderView, listed: list[VenueOpenOrder]
+    ) -> None:
+        """Cancel the saga's order if the confirm read says it still works.
+        Every other order listed under its cloid is external."""
+        if view.status is None:
+            # The venue lists this cloid, yet a read by the saga's own ref
+            # finds no record of it. An order we cancelled or filled would
+            # still answer with its record. So none of these is the saga's,
+            # most often an earlier life's (#354).
+            for entry in listed:
+                self._log_external(entry)
+            return
+        venue_oid = view.status.venue_oid
+        for entry in listed:
+            # The read names the saga's own order. Another oid under the same
+            # cloid is an earlier life's order. Paper gives no oid to compare.
+            if None not in (entry.venue_oid, venue_oid) and entry.venue_oid != venue_oid:
+                self._log_external(entry)
+        if view.status.status not in WORKING_STATES:
+            return
+        await self._exchange.cancel([replace(OrderRef.of(order), venue_oid=venue_oid)])
+        # Its fills are never booked. Booking one would move a terminal saga,
+        # which faults the engine. Ledger reconciliation books the position as
+        # unattributed, and this line names the fills behind it. Totals and
+        # ids, not a list: a log field stays a scalar so it greps the same in
+        # every output.
+        named_event(
+            NamedEvent.RECONCILE_STRAY_CANCELLED,
+            saga_state=order.state.value,
+            venue_oid=venue_oid,
+            unbooked_trade_ids=",".join(fill.trade_id for fill in view.fills),
+            unbooked_quantity=str(sum((f.quantity for f in view.fills), Decimal(0))),
+            unbooked_fee=str(sum((f.fee for f in view.fills), Decimal(0))),
+        )
 
     def _log_external(self, entry: VenueOpenOrder | ExternalOrderRef) -> None:
         """Log an order no saga of ours sent, once per process life. The engine
