@@ -318,6 +318,7 @@ class Reconciler:
                 self._charge_unreadable_list()
                 return PassResult.FAILED
         self._unreadable_run.record_present(_ACCOUNT_LIST_KEY)
+        proved_all = True
         for entry in listed:
             if isinstance(entry, ExternalOrderRef):
                 # No cloid at all, so placed by hand or by another client.
@@ -333,8 +334,20 @@ class Reconciler:
                 continue
             with operation(cloid=order.cloid):
                 view = await self._exchange.fetch_order(OrderRef.of(order))
-                if isinstance(view, VenueReadFailure):
-                    return PassResult.FAILED
+                match view:
+                    case VenueReadFailure.SEND_FAILED:
+                        self._freeze(_FreezeScope.CYCLE)
+                        return PassResult.FAILED
+                    case VenueReadFailure.RATE_LIMITED_IP:
+                        self._freeze(_FreezeScope.CYCLE)
+                        return PassResult.RATE_LIMITED
+                    case VenueReadFailure.UNREADABLE_BODY:
+                        # Only this order is skipped. The strays behind it
+                        # still get their own read (ADR-0049).
+                        self._charge_unreadable(order)
+                        proved_all = False
+                        continue
+                self._unreadable_run.record_present(order.cloid)
                 if view.status is None:
                     # The venue lists this cloid, yet a read by the saga's own
                     # ref finds no record of it. An order we cancelled or
@@ -359,7 +372,7 @@ class Reconciler:
                     unbooked_quantity=str(sum((f.quantity for f in view.fills), Decimal(0))),
                     unbooked_fee=str(sum((f.fee for f in view.fills), Decimal(0))),
                 )
-        return PassResult.PROVED
+        return PassResult.PROVED if proved_all else PassResult.FAILED
 
     def _log_external(self, entry: VenueOpenOrder | ExternalOrderRef) -> None:
         """Log an order no saga of ours sent, once per process life. The engine

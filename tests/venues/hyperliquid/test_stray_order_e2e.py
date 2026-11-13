@@ -170,6 +170,7 @@ def _open_order_passes(
     fills: list[dict] | None = None,
     passes: int = 1,
     open_orders: object = None,
+    confirm_answer: object = None,
     interval_seconds: int = 0,
 ) -> tuple[Order | None, list[PassResult], list[dict]]:
     """Open-order passes over a saga in ``state`` while the venue lists one order.
@@ -178,7 +179,8 @@ def _open_order_passes(
     saga's own ref answers with, and ``fills`` its fill history. The listed
     order carries the saga's cloid, unless ``listed_cloid`` names another one.
     An empty string lists it with no cloid at all, as an order placed by hand.
-    ``open_orders`` replaces the list answer, such as with a failure. The clock
+    ``open_orders`` replaces the list answer, such as with a failure, and
+    ``confirm_answer`` replaces the confirm read's answer the same way. The clock
     moves ``interval_seconds`` after each pass, as the cadence would.
 
     Returns the saga as stored after the passes, each pass result, and the
@@ -194,7 +196,7 @@ def _open_order_passes(
         clock = ManualClock(start_ns=(LANDED_MS + 30_000) * 1_000_000)
         post = FakeExchangeApi(
             {
-                "orderStatus": confirm,
+                "orderStatus": confirm if confirm_answer is None else confirm_answer,
                 "userFillsByTime": fills or [],
                 "frontendOpenOrders": (
                     [{"coin": "BTC", "oid": STRAY_OID, "cloid": listed}]
@@ -343,6 +345,29 @@ def test_a_failed_list_read_freezes_the_pass(failure: Exception, expected: PassR
     assert result is expected
     [frozen] = seen
     assert (frozen["event"], frozen["scope"]) == ("reconcile.frozen", "cycle")
+    assert saga is not None and saga.state is OrderState.FAILED
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected", "scope"),
+    [
+        (TimeoutError("confirm read timed out"), PassResult.FAILED, "cycle"),
+        (IpRateLimited("429 from the venue"), PassResult.RATE_LIMITED, "cycle"),
+        ({"error": "not an order status"}, PassResult.FAILED, "order"),
+    ],
+    ids=["send-failed", "rate-limited", "unreadable"],
+)
+def test_a_failed_confirm_read_freezes_and_sends_no_cancel(
+    failure: object, expected: PassResult, scope: str
+) -> None:
+    # The list alone is not proof the order still rests. Without the confirm
+    # read there is nothing to cancel on, so the pass freezes the same way the
+    # per-order passes do (ADR-0049). The next pass reads it again.
+    saga, [result], seen = _open_order_passes(OrderState.FAILED, confirm_answer=failure)
+
+    assert result is expected
+    [frozen] = seen
+    assert (frozen["event"], frozen["scope"]) == ("reconcile.frozen", scope)
     assert saga is not None and saga.state is OrderState.FAILED
 
 
