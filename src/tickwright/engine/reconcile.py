@@ -70,9 +70,9 @@ from .ghost_gate import GhostGate, GhostVerdict
 # cycle reads the domain's ``WORKING_STATES``.
 _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
 
-# The unreadable span's key for the account's open-order list. It shares the
-# per-cloid window, and a cloid is a 0x hex string, so the two never collide.
-_ACCOUNT_LIST_KEY = "account:open_orders"
+# The one key in the open-order list's unreadable span. The span is keyed
+# because it shares its type with the per-cloid one.
+_LIST_KEY = "open_orders"
 
 
 class _FreezeScope(Enum):
@@ -246,9 +246,13 @@ class Reconciler:
         # barrier not on a cadence at all, so a read count would mean a
         # different amount of waiting under each of them (ADR-0049 §4).
         config = self._config
-        self._unreadable_run = GraceWindow(
-            span_ns=duration_ns(config.unreadable_grace_seconds, name="unreadable_grace_seconds")
+        unreadable_span_ns = duration_ns(
+            config.unreadable_grace_seconds, name="unreadable_grace_seconds"
         )
+        self._unreadable_run = GraceWindow(span_ns=unreadable_span_ns)
+        # The same span for the account's open-order list (ADR-0063). Its own
+        # window, since the list is not an order.
+        self._unreadable_list_run = GraceWindow(span_ns=unreadable_span_ns)
         self._ghost_gate = GhostGate(
             grace_span_ns=duration_ns(config.ghost_grace_seconds, name="ghost_grace_seconds"),
             protection_span_ns=duration_ns(
@@ -313,7 +317,7 @@ class Reconciler:
             case VenueReadFailure.UNREADABLE_BODY:
                 self._charge_unreadable_list()
                 return PassResult.FAILED
-        self._unreadable_run.record_present(_ACCOUNT_LIST_KEY)
+        self._unreadable_list_run.record_present(_LIST_KEY)
         # Every listed order under each terminal saga's cloid. A cloid can name
         # more than one venue order (#354), and the saga is read once for all.
         sagas: dict[str, Order] = {}
@@ -558,8 +562,8 @@ class Reconciler:
         the span it faults. A pass that never reads the list never sees a
         stray order again, and only an operator can fix a durable condition.
         """
-        if not self._unreadable_run.record_absent(
-            _ACCOUNT_LIST_KEY, now_ns=self._clock.timestamp_ns()
+        if not self._unreadable_list_run.record_absent(
+            _LIST_KEY, now_ns=self._clock.timestamp_ns()
         ):
             self._freeze(_FreezeScope.CYCLE)
             return
