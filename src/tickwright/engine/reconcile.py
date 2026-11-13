@@ -36,7 +36,7 @@ reads prove the condition durable, rather than inventing a terminal state for
 an order whose body was never read.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
@@ -316,7 +316,8 @@ class Reconciler:
         self._unreadable_run.record_present(_ACCOUNT_LIST_KEY)
         # Every listed order under each terminal saga's cloid. A cloid can name
         # more than one venue order (#354), and the saga is read once for all.
-        strays: dict[str, list[VenueOpenOrder]] = {}
+        sagas: dict[str, Order] = {}
+        listed_under: dict[str, list[VenueOpenOrder]] = {}
         for entry in listed:
             if isinstance(entry, ExternalOrderRef):
                 # No cloid at all, so placed by hand or by another client.
@@ -329,25 +330,13 @@ class Reconciler:
                 self._log_external(entry)
                 continue
             if order.is_terminal:
-                strays.setdefault(order.cloid, []).append(entry)
-        proved_all = True
-        for cloid, entries in strays.items():
-            order = self._cache.get_order(cloid)
-            assert order is not None
-            with operation(cloid=order.cloid):
-                view = await self._exchange.fetch_order(OrderRef.of(order))
-                match view:
-                    case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
-                        return self._stop_pass(view)
-                    case VenueReadFailure.UNREADABLE_BODY:
-                        # Only this order is skipped. The strays behind it
-                        # still get their own read (ADR-0049).
-                        self._charge_unreadable(order)
-                        proved_all = False
-                        continue
-                self._unreadable_run.record_present(order.cloid)
-                await self._cancel_stray(order, view, entries)
-        return PassResult.PROVED if proved_all else PassResult.FAILED
+                sagas[order.cloid] = order
+                listed_under.setdefault(order.cloid, []).append(entry)
+
+        async def cancel_stray(order: Order, view: VenueOrderView) -> None:
+            await self._cancel_stray(order, view, listed_under[order.cloid])
+
+        return await self._read_each(sagas.values(), cancel_stray)
 
     async def _cancel_stray(
         self, order: Order, view: VenueOrderView, listed: list[VenueOpenOrder]
@@ -406,11 +395,33 @@ class Reconciler:
     ) -> PassResult:
         """The one skeleton every cadence shares: over each non-terminal saga in
         ``states`` (all of them when ``None``), read venue truth by cloid and let
-        ``handle`` resolve the gap. A failed read trips the connectivity guard.
-        The stray check freezes on the same rules, and both stop through
-        ``_stop_pass``. ``PROVED`` only on a pass that proved **every** order
-        it looked at. ``RATE_LIMITED`` when a read was refused for the IP limit,
-        and ``FAILED`` when any other read failed.
+        ``handle`` resolve the gap. ``_read_each`` does the reading.
+        """
+        # The cycle id scopes the whole pass; the per-order cloid nests inside it
+        # (ADR-0020), so every reconcile record — a verdict or a freeze — is
+        # traceable to its cycle and its order without either being repeated as a
+        # field. Correlation binding lives here, at the one cadence chokepoint.
+        with operation(cycle=cycle):
+            # A generator, so each saga's state is checked when its turn comes.
+            orders = (
+                order
+                for order in self._cache.open_orders()
+                if states is None or order.state in states
+            )
+            return await self._read_each(orders, handle)
+
+    async def _read_each(
+        self,
+        orders: Iterable[Order],
+        handle: Callable[[Order, VenueOrderView], Awaitable[None]],
+    ) -> PassResult:
+        """Read each saga in ``orders`` by its own ref and let ``handle`` resolve
+        the answer. Every per-order read in a pass goes through here, the
+        per-saga cadences and the stray check alike. So a failed read trips the
+        connectivity guard here and nowhere else (ADR-0011 inv 1). ``PROVED``
+        only on a pass that proved **every** order it looked at.
+        ``RATE_LIMITED`` when a read was refused for the IP limit, and
+        ``FAILED`` when any other read failed.
 
         **How much a failed read costs turns on whether the venue answered**
         (ADR-0049). A dead send says nothing about this order in particular — the
@@ -425,27 +436,20 @@ class Reconciler:
         phase's contract intact (inv 5): a pass that could not prove one order
         never clears the ``StartupBarrier``, whichever way the read failed.
         """
-        # The cycle id scopes the whole pass; the per-order cloid nests inside it
-        # (ADR-0020), so every reconcile record — a verdict or a freeze — is
-        # traceable to its cycle and its order without either being repeated as a
-        # field. Correlation binding lives here, at the one cadence chokepoint.
-        with operation(cycle=cycle):
-            proved_all = True
-            for order in self._cache.open_orders():
-                if states is not None and order.state not in states:
-                    continue
-                with operation(cloid=order.cloid):
-                    view = await self._exchange.fetch_order(OrderRef.of(order))
-                    match view:
-                        case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
-                            return self._stop_pass(view)
-                        case VenueReadFailure.UNREADABLE_BODY:
-                            self._charge_unreadable(order)
-                            proved_all = False
-                        case _:
-                            self._unreadable_run.record_present(order.cloid)
-                            await handle(order, view)
-            return PassResult.PROVED if proved_all else PassResult.FAILED
+        proved_all = True
+        for order in orders:
+            with operation(cloid=order.cloid):
+                view = await self._exchange.fetch_order(OrderRef.of(order))
+                match view:
+                    case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
+                        return self._stop_pass(view)
+                    case VenueReadFailure.UNREADABLE_BODY:
+                        self._charge_unreadable(order)
+                        proved_all = False
+                    case _:
+                        self._unreadable_run.record_present(order.cloid)
+                        await handle(order, view)
+        return PassResult.PROVED if proved_all else PassResult.FAILED
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record
