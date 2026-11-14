@@ -27,3 +27,8 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+    # ADR-0021 keeps the image on 3.13, the lowest Python we support. A newer
+    # minor would ship on a version CI may not test. Digest updates still arrive.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
