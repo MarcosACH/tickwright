@@ -186,8 +186,8 @@ def _failed_read(request: str, cloids: Sequence[str], error: str) -> None:
     record has one shape (#338).
 
     A cancel batch names one event per order. Each order may still rest, and
-    reconciliation never resends a cancel, so the operator needs every cloid
-    (ADR-0055).
+    reconciliation never resends a saga's cancel, so the operator needs every
+    cloid (ADR-0055). Only a stray's cancel is sent again (ADR-0063).
 
     Private, and so are the two causes above since #237: ``read`` is the one way
     in. A caller that reached any of them directly would be choosing its own

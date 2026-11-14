@@ -173,7 +173,9 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    read goes by cloid, and the adapter must refuse a record the venue placed before the saga's
    own creation time, less the skew allowance. Its fills are never read. A record adopted from
    an earlier life moves money the venue never moved, and the real fill then faults the engine.
-   (ADR-0011 inv 2, #354)
+   The stray check may read a saga with no oid by an oid the open-order list named
+   (`OrderRef.listed_oid`). The saga does not hold that oid, so the same refusal applies.
+   (ADR-0011 inv 2, #354, #652)
 13. **A closed set the engine branches on has a coverage test over its hand-written list.** A
    member nobody answers for fails silently, and that has happened once (#194). The rule is
    written once, in `tests/_support/closed_sets.py`: the list must cover the set exactly, both
@@ -192,3 +194,10 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
      checked against the `Literal` in the same file.
    A new closed vocabulary the engine reads by member gets the same treatment. Prefer a producer
    per member over a name per member. A name is not a proof. (#194, #303)
+14. **A terminal saga's resting order is cancelled, and no terminal saga is ever reopened.** The
+   next open-order pass that reads the venue cancels it by oid. It confirms first, with a read by
+   the saga's own ref. A saga with no oid is read once per oid listed under its cloid instead,
+   and each listed order is judged on its own read. Two listed orders that both pass the age
+   check are both cancelled. The list alone never triggers a cancel. Its fills are logged and
+   never booked. A `DENIED` saga never sent, so an order under its cloid is external, and the
+   engine never acts on an external order. (ADR-0063, #642, #652)

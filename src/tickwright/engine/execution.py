@@ -435,6 +435,14 @@ class ExecutionManager:
             # verdict crossing a venue push. Terminal is terminal: absorb it
             # as an idempotent no-op, never route it into ``Order.apply`` to
             # raise on an illegal transition (ADR-0026).
+            if report.status is OrderState.LIVE and not report.reconciliation:
+                # Only a place answer says LIVE outside reconciliation. The
+                # venue took an order the engine no longer tracks (ADR-0063).
+                named_event(
+                    NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL,
+                    saga_state=order.state.value,
+                    venue_oid=report.venue_oid,
+                )
             return
 
         event = self._status_event(order, report)

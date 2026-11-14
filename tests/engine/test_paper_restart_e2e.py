@@ -198,7 +198,12 @@ def _second_life(store: SQLiteStore, clock: ManualClock) -> tuple[InMemoryBus, R
     manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     reconciler = Reconciler(
-        bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
+        bus=bus,
+        clock=clock,
+        exchange=exchange,
+        account=exchange,
+        cache=checks.cache,
+        config=ReconcileConfig(),
     )
     asyncio.run(exchange.start())
     return bus, reconciler

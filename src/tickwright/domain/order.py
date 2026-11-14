@@ -151,6 +151,13 @@ class Order:
         prefix = f"{self.cloid}:fill:"
         return sum(1 for event_id in self._applied_event_ids if event_id.startswith(prefix))
 
+    def has_booked(self, trade_id: str) -> bool:
+        """Whether the saga booked the fill with this venue ``trade_id``.
+
+        The key is ``OrderFillEvent.event_id``, the one the dedup uses.
+        """
+        return f"{self.cloid}:fill:{trade_id}" in self._applied_event_ids
+
     @property
     def is_terminal(self) -> bool:
         """Whether the saga has reached a terminal state (no transition leaves it)."""

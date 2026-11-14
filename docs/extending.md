@@ -215,6 +215,12 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   order. A raise faults the whole engine, so every outcome is a report on the bus. The
   [`OrderAnchor.place`](../src/tickwright/domain/protocols.py) docstring lists which report goes
   with which outcome (#509).
+  The reconciler also reads `fetch_open_orders` on every open-order pass, to find stray and
+  external orders (ADR-0063). Its failures follow the same three members. An unreadable list is
+  charged to one span for the whole account. Report `LIVE` outside reconciliation only as a place
+  answer. The engine logs a `LIVE` that reaches a terminal saga as a late place answer.
+  For a saga with no oid, `fetch_order` gets one read per listed oid, in `OrderRef.listed_oid`.
+  The [`OrderRef`](../src/tickwright/domain/venue.py) docstring says how to read it (#652).
 - [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the
   seam-claims gate below will make you name a test for.
   - `account_spec()` returns an `AccountSpec`: the qualified `account_id` the store keys the ledger

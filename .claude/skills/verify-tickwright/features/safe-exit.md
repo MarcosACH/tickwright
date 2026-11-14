@@ -10,6 +10,8 @@ refusal and a flatten with no key.
 ## Sub-features
 
 - `se-setup` a strategy leaves a BTC long and a resting buy far below the market.
+- `se-external` an engine on a fresh store logs the resting buy once as
+  `reconcile.external_order` and does not cancel it (ADR-0063).
 - `se-cancel-all` `cancel-all` exits 0, the resting buy ends `cancelled`, and the long stays.
 - `se-flatten` `flatten` exits 0, every partition reads flat, and the kill switch is tripped.
 - `se-halted` a restarted engine has its first order denied. The venue gets nothing.
@@ -47,6 +49,15 @@ Preconditions:
   Check at once, before the next life changes the store:
   `$V check safe-exit open se-setup --sql "select signed_size from positions where strategy_id='rest_then_hold'" --expect 0.001`,
   `$V check safe-exit open se-setup --sql "select state from orders where cloid='$($V cloid rest_then_hold:BTC:2)'" --expect live`.
+- **External.** Run `$V start safe-exit external --preset testnet --forward-key --env TICKWRIGHT_SQLITE__PATH=external.db`.
+  Its store has no saga for the resting buy, so to this engine the order is not its own. Run
+  `$V await safe-exit external --event reconcile.external_order --timeout 120`, then
+  `$V signal safe-exit external TERM`, `$V await safe-exit external --exit`,
+  `$V dump safe-exit external`. Check
+  `$V check safe-exit external se-external --event reconcile.external_order --expect 1`,
+  `$V check safe-exit external se-external --event reconcile.stray_cancelled --expect 0`,
+  `$V check safe-exit external se-external --exit --expect 0`.
+  The next life writes a new `.env`, so its checks read `store.db` again.
 - **Cancel all.** Run `$V start safe-exit cancel --preset testnet --forward-key --command cancel-all`,
   then `$V await safe-exit cancel --exit --timeout 120` and `$V dump safe-exit cancel`. Check
   `$V check safe-exit cancel se-cancel-all --exit --expect 0`,
@@ -100,8 +111,8 @@ Preconditions:
 
 ## Gotchas
 
-- Every life shares one store, and `check --sql` reads it as it is now. Run each life's checks
-  before the next life starts, or they read a later state.
+- Every life but `external` shares one store, and `check --sql` reads it as it is now. Run each
+  life's checks before the next life starts, or they read a later state.
 - **Wait for the first mark.** On Hyperliquid, a market order sent before the first mark arrives
   is never sent. It ends `failed` with reason `no mark cached for 'BTC'`, and the engine keeps
   running ([#509](https://github.com/MarcosACH/tickwright/issues/509)). The checks need the order
@@ -121,3 +132,10 @@ Preconditions:
   the store at boot (#484). A replay flatten plays the whole tick file and fills at the last row
   (ADR-0059).
 - `start` cannot pass `--new-store`, so the `new_store` refusal is not driven here.
+- `reconcile.external_order` is an alarm in `REPORT.md`. In this run it is expected once, from
+  the `external` life. The open-order pass runs every 30 seconds, so the line lands within about
+  a minute of boot.
+- The stray cancel and `order.place_answer_after_terminal` are verified-unreachable. Each needs
+  a race: the venue accepts a place after its saga failed (#651), or two orders rest under one
+  cloid (#653). No helper verb can force either. `tests/venues/hyperliquid/test_stray_order_e2e.py`
+  covers the stray cancel. `tests/engine/test_execution_manager.py` covers the late answer.

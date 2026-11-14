@@ -72,5 +72,6 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
 - [Hyperliquid testnet](./hyperliquid-testnet.md): a real round trip on the testnet exchange, a
   partial close with no cash heal, the account reconcile cadence, and key redaction.
 - [Safe exit](./safe-exit.md): on testnet, `cancel-all` and `flatten` leave the account flat, and
-  a restart after `flatten` trades nothing until the kill switch is reset. On paper, the store
+  a restart after `flatten` trades nothing until the kill switch is reset. An engine on a fresh
+  store logs a resting order it did not send and leaves it alone. On paper, the store
   lock refuses an exit run and `flatten` works with no key.
