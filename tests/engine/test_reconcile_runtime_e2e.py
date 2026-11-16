@@ -13,6 +13,7 @@ replicas. Zero external services; the whole run is deterministic.
 import asyncio
 import json
 import random
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import (
+    FillModel,
     ImmediateFillModel,
     PaperExchange,
     StochasticFillModel,
@@ -408,32 +410,56 @@ async def _let_cadences_run() -> None:
         await asyncio.sleep(0)
 
 
-def _slow_send_engine(
-    tmp_path: Path, *, delivers: bool
-) -> tuple[Engine, ManualClock, InMemoryBus, _SlowSendExchange]:
-    """An engine whose strategy places one resting BUY at t=1, through a send
-    the test holds open. The saga store is ``tmp_path / "saga.db"``."""
+def _engine_behind[L: VenueLink](
+    tmp_path: Path,
+    link: Callable[[PaperExchange], L],
+    *,
+    bus: InMemoryBus | None = None,
+    venue_bus: InMemoryBus | None = None,
+    fill_fraction: str | None = None,
+) -> tuple[Engine, ManualClock, InMemoryBus, PaperExchange, L]:
+    """An engine whose strategy places one resting BUY at t=1, through ``link``
+    in front of the paper venue. The saga store is ``tmp_path / "saga.db"``.
+
+    The venue reports into ``venue_bus``, which is the engine's bus unless the
+    test passes its own. A separate one cuts the venue off, so its reports
+    reach the engine only if the link forwards them. With ``fill_fraction``,
+    each crossing tick fills that part of the order. Without it, the whole
+    order fills at once."""
     ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
-    bus = InMemoryBus()
+    bus = InMemoryBus() if bus is None else bus
+    venue_bus = bus if venue_bus is None else venue_bus
     clock = ManualClock()
+    fill_model: FillModel = ImmediateFillModel()
+    if fill_fraction is not None:
+        # Fill probability 1 and no slippage, so the seed never decides anything.
+        fill_model = StochasticFillModel(
+            rng=random.Random(0),
+            clock=clock,
+            params=StochasticParams(partial_fill_fraction=Decimal(fill_fraction)),
+        )
     venue = PaperExchange(
-        bus=bus,
+        bus=venue_bus,
         clock=clock,
-        fill_model=ImmediateFillModel(),
+        fill_model=fill_model,
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
         resting_orders=list,
     )
-    link = _SlowSendExchange(venue, delivers=delivers)
+    exchange = link(venue)
     engine = Engine(
         bus=bus,
         clock=clock,
         store=SQLiteStore(tmp_path / "saga.db"),
-        exchange=link,
+        exchange=exchange,
         feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
         config=EngineConfig(reconcile=ReconcileConfig()),
     )
+    if venue_bus is not bus:
+        # The venue subscribes to ticks on its own bus, so the engine's ticks
+        # are wired to it here.
+        bus.subscribe(MarketTick, venue.on_tick)
     strategy = SingleShotLimitStrategy(
         emitter=engine.emitter_for("trivial"),
         portfolio=engine.portfolio_for("trivial"),
@@ -444,7 +470,21 @@ def _slow_send_engine(
         ),
     )
     engine.register(strategy, symbols={"BTC"})
-    return engine, clock, bus, link
+    return engine, clock, bus, venue, exchange
+
+
+def _cross(price: str, size: str, *, at_s: int) -> MarketTick:
+    """A sell print at the venue that crosses the resting 41000 BUY."""
+    return MarketTick(
+        ts_event=at_s * _NS,
+        ts_init=at_s * _NS,
+        symbol="BTC",
+        price=Decimal(price),
+        size=Decimal(size),
+        aggressor_side=AggressorSide.SELL,
+        trade_id=f"cross-{at_s}",
+        seq=at_s,
+    )
 
 
 def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> None:
@@ -453,7 +493,7 @@ def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> 
     "no record" read while the send is open is not proof the send failed."""
 
     async def main() -> list[OrderEvent]:
-        engine, clock, bus, link = _slow_send_engine(tmp_path, delivers=True)
+        engine, clock, bus, _, link = _engine_behind(tmp_path, _SlowSendExchange)
         events: list[OrderEvent] = []
         live = asyncio.Event()
 
@@ -497,7 +537,9 @@ def test_a_send_that_returned_with_no_record_still_fails_after_the_budget(
     three misses count from the reads at t=16, 21 and 26."""
 
     async def main() -> list[OrderEvent]:
-        engine, clock, bus, link = _slow_send_engine(tmp_path, delivers=False)
+        engine, clock, bus, _, link = _engine_behind(
+            tmp_path, lambda venue: _SlowSendExchange(venue, delivers=False)
+        )
         events: list[OrderEvent] = []
         failed = asyncio.Event()
 
@@ -552,37 +594,9 @@ def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
     saga stays open while its send is (#640). So every open-order pass must
     read the list, find nothing to act on, and log nothing. A resting order
     under a working saga is not a stray, and a filled one is not listed."""
-    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
 
     async def main() -> tuple[Engine, _ListRecordingExchange, int]:
-        bus = InMemoryBus()
-        clock = ManualClock()
-        venue = PaperExchange(
-            bus=bus,
-            clock=clock,
-            fill_model=ImmediateFillModel(),
-            genesis_collateral=GENESIS,
-            account_net=dict,
-            applied_fills=lambda cloid: (),
-            resting_orders=list,
-        )
-        link = _ListRecordingExchange(venue)
-        engine = Engine(
-            bus=bus,
-            clock=clock,
-            store=SQLiteStore(tmp_path / "saga.db"),
-            exchange=link,
-            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
-            config=EngineConfig(reconcile=ReconcileConfig()),
-        )
-        strategy = SingleShotLimitStrategy(
-            emitter=engine.emitter_for("trivial"),
-            portfolio=engine.portfolio_for("trivial"),
-            settings=SingleShotLimitStrategy.Settings(
-                side=Side.BUY, quantity=Decimal("0.5"), price=Decimal("41000")
-            ),
-        )
-        engine.register(strategy, symbols={"BTC"})
+        engine, clock, bus, _, link = _engine_behind(tmp_path, _ListRecordingExchange)
         live, filled = asyncio.Event(), asyncio.Event()
 
         async def record(event: OrderEvent) -> None:
@@ -600,18 +614,7 @@ def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
         await _let_cadences_run()
         # The market crosses the resting BUY and the saga ends FILLED.
         clock.advance_to(40 * _NS)
-        await bus.publish(
-            MarketTick(
-                ts_event=40 * _NS,
-                ts_init=40 * _NS,
-                symbol="BTC",
-                price=Decimal("40000"),
-                size=Decimal("3"),
-                aggressor_side=AggressorSide.SELL,
-                trade_id="cross",
-                seq=1,
-            )
-        )
+        await bus.publish(_cross("40000", "3", at_s=40))
         await asyncio.wait_for(filled.wait(), timeout=5)
         # Two passes over the terminal saga.
         for t in (61, 91):
@@ -672,62 +675,15 @@ class _HeldAnswerExchange(VenueLink):
 def _held_answer_engine(
     tmp_path: Path, *, fill_fraction: str = "1"
 ) -> tuple[Engine, ManualClock, InMemoryBus, PaperExchange, _HeldAnswerExchange]:
-    """An engine whose strategy places one resting BUY at t=1. The venue's
-    answer is held until the test releases it. Each crossing tick fills
-    ``fill_fraction`` of the order. The saga store is ``tmp_path / "saga.db"``."""
-    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
-    bus = InMemoryBus()
-    venue_bus = InMemoryBus()
-    clock = ManualClock()
-    # Fill probability 1 and no slippage, so the seed never decides anything.
-    fill_model = StochasticFillModel(
-        rng=random.Random(0),
-        clock=clock,
-        params=StochasticParams(partial_fill_fraction=Decimal(fill_fraction)),
-    )
-    venue = PaperExchange(
-        bus=venue_bus,
-        clock=clock,
-        fill_model=fill_model,
-        genesis_collateral=GENESIS,
-        account_net=dict,
-        applied_fills=lambda cloid: (),
-        resting_orders=list,
-    )
-    link = _HeldAnswerExchange(venue, venue_bus=venue_bus, bus=bus)
-    engine = Engine(
+    """``_engine_behind`` with the venue's answer held until the test releases
+    it. Each crossing tick fills ``fill_fraction`` of the order."""
+    bus, venue_bus = InMemoryBus(), InMemoryBus()
+    return _engine_behind(
+        tmp_path,
+        lambda venue: _HeldAnswerExchange(venue, venue_bus=venue_bus, bus=bus),
         bus=bus,
-        clock=clock,
-        store=SQLiteStore(tmp_path / "saga.db"),
-        exchange=link,
-        feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
-        config=EngineConfig(reconcile=ReconcileConfig()),
-    )
-    bus.subscribe(MarketTick, venue.on_tick)
-    strategy = SingleShotLimitStrategy(
-        emitter=engine.emitter_for("trivial"),
-        portfolio=engine.portfolio_for("trivial"),
-        settings=SingleShotLimitStrategy.Settings(
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
-            price=Decimal("41000"),  # rests below the 42000 print
-        ),
-    )
-    engine.register(strategy, symbols={"BTC"})
-    return engine, clock, bus, venue, link
-
-
-def _cross(price: str, size: str, *, at_s: int) -> MarketTick:
-    """A sell print at the venue that crosses the resting 41000 BUY."""
-    return MarketTick(
-        ts_event=at_s * _NS,
-        ts_init=at_s * _NS,
-        symbol="BTC",
-        price=Decimal(price),
-        size=Decimal(size),
-        aggressor_side=AggressorSide.SELL,
-        trade_id=f"cross-{at_s}",
-        seq=at_s,
+        venue_bus=venue_bus,
+        fill_fraction=fill_fraction,
     )
 
 
