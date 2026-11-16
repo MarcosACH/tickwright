@@ -733,10 +733,9 @@ def _cross(price: str, size: str, *, at_s: int) -> MarketTick:
 
 def test_a_filled_order_whose_answer_is_late_still_takes_its_ack(tmp_path: Path) -> None:
     """#666: the venue filled the order while its answer was still on the wire.
-    An in-flight pass in that window must not settle the saga ahead of the ack.
-    If it does, the late ack logs a venue order the engine never dropped. On
-    Hyperliquid the saga also loses the oid that only the ack carries
-    (ADR-0011 inv 2)."""
+    An in-flight pass in that window adopts the venue's record, so the saga
+    ends ``FILLED`` before the answer lands. The late answer then records the
+    ack on the saga. It must not log a venue order the engine never dropped."""
 
     async def main() -> tuple[int, list[OrderEvent]]:
         engine, clock, bus, venue, link = _held_answer_engine(tmp_path)
@@ -767,12 +766,20 @@ def test_a_filled_order_whose_answer_is_late_still_takes_its_ack(tmp_path: Path)
 
     assert exit_code == 0
     assert [e for e in events if e["event"] == "order.place_answer_after_terminal"] == []
-    assert [event.state for event in saga] == [
-        OrderState.PENDING,
-        OrderState.SUBMITTED,
-        OrderState.LIVE,
-        OrderState.FILLED,
+    # The pass adopted the record during the send: its fill ended the saga.
+    assert [(event.state, event.reconciliation) for event in saga] == [
+        (OrderState.PENDING, False),
+        (OrderState.SUBMITTED, False),
+        (OrderState.FILLED, True),
     ]
+    # Paper has no oid to keep. The ack time is what the late answer adds.
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        order = reopened.get_order(_CLOID)
+        assert order is not None
+        assert order.acked_ts_ns is not None
+    finally:
+        reopened.close()
 
 
 def test_an_order_filled_in_two_trades_before_its_answer_does_not_fault(
@@ -780,7 +787,8 @@ def test_an_order_filled_in_two_trades_before_its_answer_does_not_fault(
 ) -> None:
     """#666, the soak crash: the venue filled the order in two trades while its
     answer was still on the wire. A reconcile fill ahead of the ack left the
-    saga ``PARTIALLY_FILLED``, and the late ``LIVE`` ack faulted the engine."""
+    saga ``PARTIALLY_FILLED``, and the late ``LIVE`` ack faulted the engine.
+    Now the answer moves no state, and the second fill finishes the saga."""
 
     async def main() -> tuple[int, ComponentState, list[OrderEvent]]:
         engine, clock, bus, venue, link = _held_answer_engine(tmp_path, fill_fraction="0.5")
@@ -793,8 +801,8 @@ def test_an_order_filled_in_two_trades_before_its_answer_does_not_fault(
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(link.sending.wait(), timeout=5)
         # Each crossing print fills half the order. The in-flight pass at t=6
-        # sees only the first trade, so the ack would land on a part-filled
-        # saga, as on testnet. Both trades and the ack are still on the wire.
+        # sees only the first trade, so the ack lands on a part-filled saga,
+        # as on testnet. Both trades and the ack are still on the wire.
         clock.advance_to(2 * _NS)
         await venue.on_tick(_cross("40000", "3", at_s=2))
         clock.advance_to(6 * _NS)
@@ -812,12 +820,11 @@ def test_an_order_filled_in_two_trades_before_its_answer_does_not_fault(
 
     assert exit_code == 0
     assert state is ComponentState.RUNNING
-    assert [event.state for event in saga] == [
-        OrderState.PENDING,
-        OrderState.SUBMITTED,
-        OrderState.LIVE,
-        OrderState.PARTIALLY_FILLED,
-        OrderState.FILLED,
+    assert [(event.state, event.reconciliation) for event in saga] == [
+        (OrderState.PENDING, False),
+        (OrderState.SUBMITTED, False),
+        (OrderState.PARTIALLY_FILLED, True),
+        (OrderState.FILLED, False),
     ]
     reopened = SQLiteStore(tmp_path / "saga.db")
     try:
