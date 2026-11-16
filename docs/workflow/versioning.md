@@ -166,3 +166,10 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   request is still open (#640). It cancels an order the venue accepts after its saga failed
   (#642). It cancels our stray when two orders rest under one cloid (#652). The verify report
   shows what the open-order pass did (#654). Bump PR backed by #658.
+- **v0.8.3** (2026-11-16). Fixes from the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. The engine no longer crashes when a fill
+  reaches the saga before the place answer. That answer now only records the order id (#666).
+  `reconcile.external_order` now logs at `warning`, so an operator sees it (#656). The docs say
+  the strategy snapshot is also saved after `on_wake` (#657). Dependabot keeps the image on
+  Python 3.13 (#661). Runtime bumps: pydantic 2.14.3 and pydantic-settings 2.16.2. Bump PR
+  backed by #670.
