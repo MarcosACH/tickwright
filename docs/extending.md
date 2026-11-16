@@ -55,7 +55,8 @@ Concretely, the engine does the pulling **for** you before it subscribes you (in
 2. **`set_next_seq(next_seq)`** — your monotonic `seq` is resumed from the **saga store's
    high-water mark**, not from your snapshot, so a stale snapshot can never reuse a consumed
    `signal_id` (ADR-0006/0016). Place, cancel, and cancel all intents each consume a `seq`.
-3. Only then are your `on_tick` / `on_order_event` handlers subscribed, and the feed starts.
+3. Only then are your `on_tick`, `on_wake` and `on_order_event` handlers subscribed, and the feed
+   starts.
 
 Your snapshot can be stale after a restart. Startup may have settled an order before your handlers
 were subscribed, so you never saw that event. To rebuild your open orders, call
