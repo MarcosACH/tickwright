@@ -438,26 +438,17 @@ class ExecutionManager:
         order = self._checkpointer.cache.get_order(report.cloid)
         if order is None:
             return  # A status for an order we do not own — reconciliation's concern.
+        if _is_place_answer(report) and (
+            order.is_terminal or order.state is OrderState.PARTIALLY_FILLED
+        ):
+            self._take_late_place_answer(order, report)
+            return
         if order.is_terminal:
             # A late or synthetic status after the saga already resolved — e.g.
             # the cancel-ack that lost the race to a fill, or a reconciler
             # verdict crossing a venue push. Terminal is terminal: absorb it
             # as an idempotent no-op, never route it into ``Order.apply`` to
             # raise on an illegal transition (ADR-0026).
-            if report.status is OrderState.LIVE and not report.reconciliation:
-                # Only a place answer says LIVE outside reconciliation. The
-                # venue took an order the engine no longer tracks (ADR-0063).
-                named_event(
-                    NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL,
-                    saga_state=order.state.value,
-                    venue_oid=report.venue_oid,
-                )
-            return
-        if order.state is OrderState.PARTIALLY_FILLED and _is_place_answer(report):
-            # A fill got here first, from reconcile or a venue push (#666).
-            # LIVE would be an illegal move, so the answer only adds the oid.
-            if order.record_ack(venue_oid=report.venue_oid, ts_ns=self._clock.timestamp_ns()):
-                self._checkpointer.checkpoint(order)
             return
 
         event = self._status_event(order, report)
@@ -466,6 +457,26 @@ class ExecutionManager:
         if not order.apply(event):
             return  # Redelivered status the saga already reflects: suppress republish.
         await self._commit(order, event)
+
+    def _take_late_place_answer(self, order: Order, report: OrderStatusReport) -> None:
+        """Take a place answer that found the saga already past ``LIVE``.
+
+        A fill got there first, from reconcile or from a venue push (#666). The
+        answer moves no state (ADR-0007). It only adds its oid, on a terminal
+        saga too (ADR-0026). ``FAILED`` is the exception. The engine proved the
+        order never landed, yet the venue took it. So an order may rest that
+        nothing tracks. That is logged, and the stray pass cancels the order
+        (ADR-0063).
+        """
+        if order.state is OrderState.FAILED:
+            named_event(
+                NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL,
+                saga_state=order.state.value,
+                venue_oid=report.venue_oid,
+            )
+            return
+        if order.record_ack(venue_oid=report.venue_oid, ts_ns=self._clock.timestamp_ns()):
+            self._checkpointer.checkpoint(order)
 
     async def _apply_fill(self, report: FillReport) -> None:
         order = self._checkpointer.cache.get_order(report.cloid)

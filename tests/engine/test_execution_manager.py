@@ -1083,32 +1083,84 @@ def _late_report(cloid: str, status: OrderState, *, reconciliation: bool) -> Ord
     )
 
 
-def _place_answer_lines(late: OrderStatusReport) -> tuple[Order | None, list[MutableMapping]]:
-    """Fill a resting order in full, then deliver ``late`` against its terminal saga."""
-    bus, _, store, _ = _harness()
+_CLOID_1 = derive_cloid("trivial:BTC:1")
+
+
+def _ended(status: OrderState, *, reconciliation: bool) -> OrderStatusReport:
+    """A status with no oid that ends the saga, as reconcile or the venue sends it."""
+    return OrderStatusReport(
+        ts_event=1_500,
+        ts_init=1_500,
+        cloid=_CLOID_1,
+        symbol="BTC",
+        status=status,
+        reconciliation=reconciliation,
+    )
+
+
+# What ends a saga before its place answer comes. Every report carries no oid,
+# as reconcile's fills and verdicts do, so only the late answer can supply one.
+_ENDINGS: dict[OrderState, list[ExecutionReport]] = {
+    # The order filled at the venue before its answer reached the saga (#666).
+    OrderState.FILLED: [_fill_report(_CLOID_1, trade_id="v1", quantity="0.5")],
+    # An IOC filled in part, and the venue cancelled the rest.
+    OrderState.CANCELLED: [
+        _fill_report(_CLOID_1, trade_id="v1", quantity="0.2"),
+        _ended(OrderState.CANCELLED, reconciliation=True),
+    ],
+    # The engine proved the order never landed.
+    OrderState.FAILED: [_ended(OrderState.FAILED, reconciliation=True)],
+}
+
+
+def _place_answer_lines(
+    ending: OrderState, late: OrderStatusReport
+) -> tuple[Order | None, list[MutableMapping]]:
+    """End an in-flight saga in ``ending``, then deliver ``late`` against it.
+    Returns the durable saga and the ``order.place_answer_after_terminal`` lines."""
+    bus, _, store, _ = _harness(link=SendDies)
 
     async def scenario() -> None:
-        await bus.publish(_tick("42000"))
-        await bus.publish(_limit_signal("41000"))  # rests LIVE
-        await bus.publish(_fill_report(late.cloid, trade_id="v1", quantity="0.5"))
+        with pytest.raises(SendCrashed):
+            await bus.publish(_market_signal())  # in flight, SUBMITTED
+        for report in _ENDINGS[ending]:
+            await bus.publish(report)
         await bus.publish(late)
 
     with capture_events() as events:
         asyncio.run(scenario())
     lines = [e for e in events if e["event"] == "order.place_answer_after_terminal"]
-    return store.get_order(late.cloid), lines
+    return store.get_order(_CLOID_1), lines
 
 
-def test_a_place_answer_on_a_terminal_saga_is_logged_and_never_applied() -> None:
-    # The venue says it took the order, but the saga is already over. The saga
-    # stays terminal (ADR-0026), and the line tells the operator an order may
-    # rest that the engine no longer tracks. The stray pass cancels it (ADR-0063).
-    cloid = derive_cloid("trivial:BTC:1")
-    saga, lines = _place_answer_lines(_late_report(cloid, OrderState.LIVE, reconciliation=False))
+@pytest.mark.parametrize("ending", [OrderState.FILLED, OrderState.CANCELLED])
+def test_a_place_answer_after_the_venue_ended_the_order_keeps_its_oid(
+    ending: OrderState,
+) -> None:
+    # #666: the venue's fills reached the saga before the place answer. The
+    # venue order is over, so nothing rests and there is no stray to report.
+    # The terminal saga stays put and keeps the oid only the answer carries
+    # (ADR-0026, ADR-0011 inv 2).
+    late = _late_report(_CLOID_1, OrderState.LIVE, reconciliation=False)
+    saga, lines = _place_answer_lines(ending, late)
 
-    assert saga is not None and saga.state is OrderState.FILLED
+    assert saga is not None
+    assert (saga.state, saga.venue_oid) == (ending, "77")
+    assert lines == []
+
+
+def test_a_place_answer_on_a_failed_saga_is_logged_and_never_applied() -> None:
+    # The engine proved the order never landed, yet the venue says it took it.
+    # The saga stays FAILED (ADR-0026), and the line tells the operator an
+    # order may rest that the engine no longer tracks. The stray pass cancels
+    # it (ADR-0063).
+    late = _late_report(_CLOID_1, OrderState.LIVE, reconciliation=False)
+    saga, lines = _place_answer_lines(OrderState.FAILED, late)
+
+    assert saga is not None
+    assert (saga.state, saga.venue_oid) == (OrderState.FAILED, None)
     [line] = lines
-    assert (line["saga_state"], line["venue_oid"], line["cloid"]) == ("filled", "77", cloid)
+    assert (line["saga_state"], line["venue_oid"], line["cloid"]) == ("failed", "77", _CLOID_1)
 
 
 @pytest.mark.parametrize(
@@ -1119,10 +1171,10 @@ def test_a_place_answer_on_a_terminal_saga_is_logged_and_never_applied() -> None
 def test_other_late_reports_on_a_terminal_saga_log_no_place_answer(
     status: OrderState, reconciliation: bool
 ) -> None:
-    # A cancel ack that lost the race to a fill, or a reconciler verdict
-    # crossing a venue push, is routine. Neither is a place answer.
-    cloid = derive_cloid("trivial:BTC:1")
-    _, lines = _place_answer_lines(_late_report(cloid, status, reconciliation=reconciliation))
+    # FAILED is the one saga a place answer is logged on. A late cancel ack or
+    # a reconciler verdict reaching it is routine. Neither is a place answer.
+    late = _late_report(_CLOID_1, status, reconciliation=reconciliation)
+    _, lines = _place_answer_lines(OrderState.FAILED, late)
 
     assert lines == []
 
