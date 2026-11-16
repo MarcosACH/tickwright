@@ -28,9 +28,10 @@ class NamedEvent(StrEnum):
     ORDER_REJECTED = "order.rejected"
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
-    # The venue took an order whose saga is already terminal. No saga moves,
-    # so this line is the only record that the order may rest. The open-order
-    # pass cancels it if it still does (ADR-0063).
+    # The venue took an order whose saga says it never did: FAILED, REJECTED
+    # or DENIED (#666). No saga moves, so this line is the only record that
+    # the order may rest. The open-order pass cancels it if it still does
+    # (ADR-0063).
     ORDER_PLACE_ANSWER_AFTER_TERMINAL = "order.place_answer_after_terminal"
 
     # Position changes (``PortfolioProjection``, ADR-0045 §2). A position change
