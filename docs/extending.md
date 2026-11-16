@@ -218,7 +218,8 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   The reconciler also reads `fetch_open_orders` on every open-order pass, to find stray and
   external orders (ADR-0063). Its failures follow the same three members. An unreadable list is
   charged to one span for the whole account. Report `LIVE` outside reconciliation only as a place
-  answer. The engine logs a `LIVE` that reaches a terminal saga as a late place answer.
+  answer. A place answer may arrive after the order's fills. The engine then records its oid and
+  moves no state. It logs one that reaches a `FAILED` saga as a late place answer (#666).
   For a saga with no oid, `fetch_order` gets one read per listed oid, in `OrderRef.listed_oid`.
   The [`OrderRef`](../src/tickwright/domain/venue.py) docstring says how to read it (#652).
 - [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the

@@ -166,8 +166,9 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    resolves `FAILED`.* (ADR-0011 inv 3, ADR-0010)
    A read taken while the order's place call is still open is not positive proof. It never
    counts toward that `FAILED` verdict. (ADR-0011 Resolutions, #640)
-   A record seen in that window is not adopted either. The place answer reaches the saga before
-   any reconcile fill. (ADR-0011 Resolutions, #666)
+   A record seen in that window is still adopted. A place answer that then finds the saga past
+   `LIVE` moves no state. It records the oid and the ack time, on a terminal saga too. Only a
+   `FAILED` saga logs it as `order.place_answer_after_terminal`. (ADR-0007, ADR-0026, #666)
 12. **A venue read or cancel goes by the oid once the saga holds one.** A cloid is derived from
    the signal id, and the venue remembers every cloid ever placed on the account. A fresh store
    restarts the seq at 1, so a second life places the same cloid again, and a read by cloid can

@@ -52,6 +52,15 @@ ack-lost cancel as a venue rejection. The marker is what makes "no `CANCELLING` 
 than lossy. Order **modification** is likewise out of v1: the amend path is a `CancelSignal` + a
 fresh `PlaceSignal`; a native modify (`PENDING_UPDATE`) is an additive extension.
 
+**(Amended by [#666](https://github.com/MarcosACH/tickwright/issues/666) — a late place answer
+adds its oid to a terminal saga:** a late status still never moves a terminal saga. A place
+answer is the one exception to the no-op. When it finds the saga terminal, it records the oid and,
+if none is held, the ack time, and the saga is checkpointed. These are metadata, like the
+`cancel_requested` marker, and the state never changes. In practice the saga is `FILLED` or
+`CANCELLED`, because a fill reached it before the answer. The venue order is over then, so the
+answer is not a stray. `FAILED` is the exception. There the engine proved the order never landed,
+so the saga stays untouched and the answer is logged (ADR-0063).**)**
+
 ## The kill-switch is global and halt-only, tripped manually
 
 The `PreTradeGuard` kill-switch (ADR-0017) is **halt-only**: tripped, the guard returns `DENIED`
