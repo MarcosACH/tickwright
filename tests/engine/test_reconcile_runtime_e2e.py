@@ -27,6 +27,7 @@ from tickwright.domain import (
     AggressorSide,
     ComponentState,
     ExternalOrderRef,
+    FillReport,
     MarketTick,
     OrderEvent,
     OrderFailed,
@@ -35,6 +36,7 @@ from tickwright.domain import (
     OrderRef,
     OrderRejected,
     OrderState,
+    OrderStatusReport,
     PlaceOrder,
     Side,
     VenueOpenOrder,
@@ -626,3 +628,136 @@ def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
         "order.place_answer_after_terminal",
     }
     assert [e["event"] for e in events if e["event"] in noisy] == []
+
+
+class _HeldAnswerExchange(VenueLink):
+    """A venue that acts on a place request at once, but whose answer stays on
+    the wire until the test lets it through (#666). The venue reports into its
+    own bus. While a send is open this link holds those reports back."""
+
+    def __init__(self, venue: PaperExchange, *, venue_bus: InMemoryBus, bus: InMemoryBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+        self._holding = False
+        self.held: list[OrderStatusReport | FillReport] = []
+        self.sending = asyncio.Event()
+        self.land = asyncio.Event()
+        self.answered = asyncio.Event()
+        venue_bus.subscribe(OrderStatusReport, self._forward)
+        venue_bus.subscribe(FillReport, self._forward)
+
+    async def _forward(self, report: OrderStatusReport | FillReport) -> None:
+        if self._holding:
+            self.held.append(report)
+        else:
+            await self._bus.publish(report)
+
+    async def place(self, order: PlaceOrder) -> None:
+        self._holding = True
+        await self._venue.place(order)
+        self.sending.set()
+        await self.land.wait()
+        self._holding = False
+        for report in self.held:
+            await self._bus.publish(report)
+        self.answered.set()
+
+
+def _held_answer_engine(
+    tmp_path: Path,
+) -> tuple[Engine, ManualClock, InMemoryBus, PaperExchange, _HeldAnswerExchange]:
+    """An engine whose strategy places one resting BUY at t=1. The venue's
+    answer is held until the test releases it. The saga store is
+    ``tmp_path / "saga.db"``."""
+    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
+    bus = InMemoryBus()
+    venue_bus = InMemoryBus()
+    clock = ManualClock()
+    venue = PaperExchange(
+        bus=venue_bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=lambda cloid: (),
+        resting_orders=list,
+    )
+    link = _HeldAnswerExchange(venue, venue_bus=venue_bus, bus=bus)
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(tmp_path / "saga.db"),
+        exchange=link,
+        feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        config=EngineConfig(reconcile=ReconcileConfig()),
+    )
+    bus.subscribe(MarketTick, venue.on_tick)
+    strategy = SingleShotLimitStrategy(
+        emitter=engine.emitter_for("trivial"),
+        portfolio=engine.portfolio_for("trivial"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),  # rests below the 42000 print
+        ),
+    )
+    engine.register(strategy, symbols={"BTC"})
+    return engine, clock, bus, venue, link
+
+
+def _cross(price: str, size: str, *, at_s: int) -> MarketTick:
+    """A sell print at the venue that crosses the resting 41000 BUY."""
+    return MarketTick(
+        ts_event=at_s * _NS,
+        ts_init=at_s * _NS,
+        symbol="BTC",
+        price=Decimal(price),
+        size=Decimal(size),
+        aggressor_side=AggressorSide.SELL,
+        trade_id=f"cross-{at_s}",
+        seq=at_s,
+    )
+
+
+def test_a_filled_order_whose_answer_is_late_still_takes_its_ack(tmp_path: Path) -> None:
+    """#666: the venue filled the order while its answer was still on the wire.
+    An in-flight pass in that window must not settle the saga ahead of the ack.
+    If it does, the late ack logs a venue order the engine never dropped. On
+    Hyperliquid the saga also loses the oid that only the ack carries
+    (ADR-0011 inv 2)."""
+
+    async def main() -> tuple[int, list[OrderEvent]]:
+        engine, clock, bus, venue, link = _held_answer_engine(tmp_path)
+        saga: list[OrderEvent] = []
+
+        async def record(event: OrderEvent) -> None:
+            saga.append(event)
+
+        bus.subscribe(OrderEvent, record)
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(link.sending.wait(), timeout=5)
+        # The venue acked the order and now fills it in one trade. Both answers
+        # are still on the wire.
+        clock.advance_to(2 * _NS)
+        await venue.on_tick(_cross("40000", "3", at_s=2))
+        # Two in-flight deadlines pass while the venue already holds the fill.
+        for t in (6, 11):
+            clock.advance_to(t * _NS)
+            await _let_cadences_run()
+        link.land.set()
+        await asyncio.wait_for(link.answered.wait(), timeout=5)
+        await _let_cadences_run()
+        await engine.stop()
+        return await run, saga
+
+    with capture_events() as events:
+        exit_code, saga = asyncio.run(main())
+
+    assert exit_code == 0
+    assert [e for e in events if e["event"] == "order.place_answer_after_terminal"] == []
+    assert [event.state for event in saga] == [
+        OrderState.PENDING,
+        OrderState.SUBMITTED,
+        OrderState.LIVE,
+        OrderState.FILLED,
+    ]

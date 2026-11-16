@@ -484,14 +484,19 @@ class Reconciler:
         consecutive miss resolves ``FAILED``, never a blind resend. A miss counts
         only once the place call has returned (#640). That budget
         stays under the ghost grace window, so a retried order can never be
-        ghosted (ADR-0008/0011)."""
+        ghosted (ADR-0008/0011).
+
+        While the place call is open, the pass leaves the order alone, record or
+        not. The call's own answer is still coming, and it must reach the saga
+        before any fill this pass would publish (#666)."""
+        if self._cache.is_sending(order.cloid):
+            # A miss here does not count, because the venue can still accept the
+            # send. A record is not adopted either. Its fills would land before
+            # the ack, and a LIVE ack after a fill is an illegal transition.
+            return
         if view.has_record:
             self._inflight_run.record_present(order.cloid)
             await self._adopt(order, view)
-            return
-        if self._cache.is_sending(order.cloid):
-            # The venue can still accept a send that has not returned, so this
-            # miss does not count. The budget starts when the send ends (#640).
             return
         if self._inflight_run.record_absent(order.cloid):
             await self._bus.publish(self._failed_verdict(order))

@@ -154,6 +154,12 @@ ADR-0009).
   **(Amended by #652:** a `FAILED` saga from a timed-out send has no oid. So the cycle reads it
   once per oid listed under its cloid, not by the saga's own ref. The age check still runs on
   each read (ADR-0063). [#652](https://github.com/MarcosACH/tickwright/issues/652)**)**
+  **(Amended by #666:** a record seen during the send is no longer adopted. The pass leaves the
+  order alone until the place call returns, record or not. The call's own answer is still
+  coming. If the pass published the venue's fills first, the late `LIVE` ack would follow a fill.
+  That is an illegal transition, and on testnet it faulted the engine. The ack also carries the
+  oid the saga keeps (inv 2). Once the call returns, the next pass adopts as before.
+  [#666](https://github.com/MarcosACH/tickwright/issues/666)**)**
 - An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
   cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
   preserved) from `PARTIALLY_FILLED` (ADR-0010).
