@@ -177,6 +177,14 @@ def _is_place_answer(report: OrderStatusReport) -> bool:
     return report.status is OrderState.LIVE and not report.reconciliation
 
 
+# The states a fill or a venue cancel can reach before the place answer. In
+# each, the venue took the order, so a late answer only adds its oid (#666).
+# In FAILED, REJECTED and DENIED the engine holds that it never did.
+_WORKED_AT_THE_VENUE: frozenset[OrderState] = frozenset(
+    {OrderState.PARTIALLY_FILLED, OrderState.FILLED, OrderState.CANCELLED}
+)
+
+
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
@@ -463,12 +471,12 @@ class ExecutionManager:
 
         A fill got there first, from reconcile or from a venue push (#666). The
         answer moves no state (ADR-0007). It only adds its oid, on a terminal
-        saga too (ADR-0026). ``FAILED`` is the exception. The engine proved the
-        order never landed, yet the venue took it. So an order may rest that
-        nothing tracks. That is logged, and the stray pass cancels the order
-        (ADR-0063).
+        saga too (ADR-0026). Any other terminal is the exception. There the
+        engine holds that the venue never took the order, yet the venue did. So
+        an order may rest that nothing tracks. That is logged, and the stray
+        pass cancels the order (ADR-0063).
         """
-        if order.state is OrderState.FAILED:
+        if order.state not in _WORKED_AT_THE_VENUE:
             named_event(
                 NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL,
                 saga_state=order.state.value,

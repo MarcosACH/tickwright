@@ -54,12 +54,12 @@ fresh `PlaceSignal`; a native modify (`PENDING_UPDATE`) is an additive extension
 
 **(Amended by [#666](https://github.com/MarcosACH/tickwright/issues/666) — a late place answer
 adds its oid to a terminal saga:** a late status still never moves a terminal saga. A place
-answer is the one exception to the no-op. When it finds the saga terminal, it records the oid and,
-if none is held, the ack time, and the saga is checkpointed. These are metadata, like the
-`cancel_requested` marker, and the state never changes. In practice the saga is `FILLED` or
-`CANCELLED`, because a fill reached it before the answer. The venue order is over then, so the
-answer is not a stray. `FAILED` is the exception. There the engine proved the order never landed,
-so the saga stays untouched and the answer is logged (ADR-0063).**)**
+answer is the one exception to the no-op. When it finds the saga `FILLED` or `CANCELLED`, it
+records the oid and, if none is held, the ack time, and the saga is checkpointed. These are
+metadata, like the `cancel_requested` marker, and the state never changes. A fill or a venue
+cancel reached the saga before the answer. The venue order is over then, so the answer is not a
+stray. `FAILED`, `REJECTED` and `DENIED` are the exception. There the engine holds that the venue
+never took the order. So the saga stays untouched and the answer is logged (ADR-0063).**)**
 
 ## The kill-switch is global and halt-only, tripped manually
 

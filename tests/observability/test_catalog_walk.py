@@ -1349,7 +1349,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_REJECTED: _drive_status(OrderState.REJECTED),
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
-    # Only a FAILED saga logs a place answer. Any other terminal keeps its oid (#666).
+    # A FILLED or CANCELLED saga keeps the answer's oid and logs nothing (#666).
     NamedEvent.ORDER_PLACE_ANSWER_AFTER_TERMINAL: _drive_status(OrderState.FAILED, OrderState.LIVE),
     NamedEvent.POSITION_OPENED: _drive_position_changes(closing=False),
     NamedEvent.POSITION_CHANGED: _drive_position_changed,

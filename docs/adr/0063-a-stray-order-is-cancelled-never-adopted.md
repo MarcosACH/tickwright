@@ -109,8 +109,8 @@ a fresh ref from the saga. The `OrderRef` docstring states this. Revisit this if
 - New invariant 14 in `docs/agents/invariants.md`.
 
 **(Amended by [#666](https://github.com/MarcosACH/tickwright/issues/666):**
-`order.place_answer_after_terminal` now fires only on a `FAILED` saga. A fill that arrives before
-the place answer is routine, so it no longer fires for one. The answer records its oid on the
-terminal saga instead (ADR-0026). The venue order is over then, and nothing rests to cancel. A
-`FAILED` saga says the order never landed. A place answer there still means a stray may
-rest.**)**
+`order.place_answer_after_terminal` now fires only on a `FAILED`, `REJECTED` or `DENIED` saga. A
+fill that arrives before the place answer is routine, so it no longer fires for one. The answer
+records its oid on the `FILLED` or `CANCELLED` saga instead (ADR-0026). The venue order is over
+then, and nothing rests to cancel. The other three say the venue never took the order. A place
+answer there still means a stray may rest.**)**

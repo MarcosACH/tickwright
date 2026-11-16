@@ -1110,6 +1110,8 @@ _ENDINGS: dict[OrderState, list[ExecutionReport]] = {
     ],
     # The engine proved the order never landed.
     OrderState.FAILED: [_ended(OrderState.FAILED, reconciliation=True)],
+    # The venue answered the place with a rejection.
+    OrderState.REJECTED: [_ended(OrderState.REJECTED, reconciliation=False)],
 }
 
 
@@ -1149,18 +1151,25 @@ def test_a_place_answer_after_the_venue_ended_the_order_keeps_its_oid(
     assert lines == []
 
 
-def test_a_place_answer_on_a_failed_saga_is_logged_and_never_applied() -> None:
-    # The engine proved the order never landed, yet the venue says it took it.
-    # The saga stays FAILED (ADR-0026), and the line tells the operator an
+@pytest.mark.parametrize("ending", [OrderState.FAILED, OrderState.REJECTED])
+def test_a_place_answer_on_a_saga_that_never_landed_is_logged_and_never_applied(
+    ending: OrderState,
+) -> None:
+    # The engine holds that the venue never took the order, yet the venue says
+    # it did. The saga stays put (ADR-0026), and the line tells the operator an
     # order may rest that the engine no longer tracks. The stray pass cancels
     # it (ADR-0063).
     late = _late_report(_CLOID_1, OrderState.LIVE, reconciliation=False)
-    saga, lines = _place_answer_lines(OrderState.FAILED, late)
+    saga, lines = _place_answer_lines(ending, late)
 
     assert saga is not None
-    assert (saga.state, saga.venue_oid) == (OrderState.FAILED, None)
+    assert (saga.state, saga.venue_oid) == (ending, None)
     [line] = lines
-    assert (line["saga_state"], line["venue_oid"], line["cloid"]) == ("failed", "77", _CLOID_1)
+    assert (line["saga_state"], line["venue_oid"], line["cloid"]) == (
+        ending.value,
+        "77",
+        _CLOID_1,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1171,7 +1180,7 @@ def test_a_place_answer_on_a_failed_saga_is_logged_and_never_applied() -> None:
 def test_other_late_reports_on_a_terminal_saga_log_no_place_answer(
     status: OrderState, reconciliation: bool
 ) -> None:
-    # FAILED is the one saga a place answer is logged on. A late cancel ack or
+    # A FAILED saga logs a place answer. A late cancel ack or
     # a reconciler verdict reaching it is routine. Neither is a place answer.
     late = _late_report(_CLOID_1, status, reconciliation=reconciliation)
     _, lines = _place_answer_lines(OrderState.FAILED, late)
