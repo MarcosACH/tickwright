@@ -470,9 +470,10 @@ class ExecutionManager:
         """Take a place answer that found the saga already past ``LIVE``.
 
         A fill got there first, from reconcile or from a venue push (#666). The
-        answer moves no state (ADR-0007). It only adds its oid, on a terminal
-        saga too (ADR-0026). Any other terminal is the exception. There the
-        engine holds that the venue never took the order, yet the venue did. So
+        answer moves no state (ADR-0007). It only adds its oid, on a
+        ``FILLED`` or ``CANCELLED`` saga too (ADR-0026). ``FAILED``,
+        ``REJECTED`` and ``DENIED`` are the exception. There the engine holds
+        that the venue never took the order, yet the venue did. So
         an order may rest that nothing tracks. That is logged, and the stray
         pass cancels the order (ADR-0063).
         """
