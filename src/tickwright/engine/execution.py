@@ -168,6 +168,15 @@ def _saga_envelope(
     )
 
 
+def _is_place_answer(report: OrderStatusReport) -> bool:
+    """Whether ``report`` is the venue's answer to our place request.
+
+    Only a place answer says ``LIVE`` outside reconciliation. Every adapter
+    keeps to that (``docs/extending.md``, ADR-0063).
+    """
+    return report.status is OrderState.LIVE and not report.reconciliation
+
+
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
@@ -443,6 +452,12 @@ class ExecutionManager:
                     saga_state=order.state.value,
                     venue_oid=report.venue_oid,
                 )
+            return
+        if order.state is OrderState.PARTIALLY_FILLED and _is_place_answer(report):
+            # A fill got here first, from reconcile or a venue push (#666).
+            # LIVE would be an illegal move, so the answer only adds the oid.
+            if order.record_ack(venue_oid=report.venue_oid, ts_ns=self._clock.timestamp_ns()):
+                self._checkpointer.checkpoint(order)
             return
 
         event = self._status_event(order, report)

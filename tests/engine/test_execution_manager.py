@@ -566,6 +566,35 @@ def test_partial_fills_accumulate_to_filled_with_checkpoints() -> None:
     ]
 
 
+def test_a_place_answer_after_a_part_fill_keeps_the_oid_and_publishes_nothing(
+    tmp_path: Path,
+) -> None:
+    # #666: a reconcile fill reached the saga first, then the place answer
+    # came. It used to raise on PARTIALLY_FILLED -> LIVE and fault the engine.
+    # Now the saga keeps the oid durably and stays where the fill put it.
+    db = tmp_path / "saga.db"
+    bus, _, store, order_events = _harness(db, link=SendDies)
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        with pytest.raises(SendCrashed):
+            await bus.publish(_market_signal())
+        await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
+        await bus.publish(_late_report(cloid, OrderState.LIVE, reconciliation=False))
+
+    asyncio.run(scenario())
+
+    assert not [ev for ev in order_events if isinstance(ev, OrderLive)]
+    store.close()
+    reopened = SQLiteStore(db)
+    try:
+        record = reopened.get_order(cloid)
+        assert record is not None
+        assert (record.state, record.venue_oid) == (OrderState.PARTIALLY_FILLED, "77")
+    finally:
+        reopened.close()
+
+
 def test_each_fill_event_carries_the_fee_the_venue_reported_for_that_trade() -> None:
     # The venue is the fee's authority, so the manager propagates rather than
     # derives it — exactly as it already does for the report's ``ts_event`` and
