@@ -316,6 +316,33 @@ class Order:
         self._applied_event_ids.add(event.event_id)
         return True
 
+    def record_ack(self, *, venue_oid: str | None, ts_ns: int) -> bool:
+        """Keep what a place answer says about the order, without moving the saga.
+
+        A fill can reach the saga before the place answer does. A reconcile
+        pass can deliver it, and so can a venue that pushes fills (#666). The
+        answer then finds the saga past ``LIVE``, so it is not a transition. It
+        still carries the oid, which the saga reads fills by once the venue
+        drops the record (ADR-0011 inv 2). The oid on the answer wins, as it
+        does in ``apply``. A time already held is the real ack, so it is kept.
+
+        Returns ``True`` if the saga changed, so the caller checkpoints it.
+        """
+        if self.state in (OrderState.PENDING, OrderState.SUBMITTED):
+            # Here LIVE is a legal move, and only ``apply`` makes it.
+            raise InvariantViolation(
+                f"place answer for cloid {self.cloid} in state {self.state.value} "
+                "is a transition, not a late answer"
+            )
+        changed = False
+        if venue_oid is not None and venue_oid != self.venue_oid:
+            self.venue_oid = venue_oid
+            changed = True
+        if self.acked_ts_ns is None:
+            self.acked_ts_ns = ts_ns
+            changed = True
+        return changed
+
     def record_fill(
         self,
         *,

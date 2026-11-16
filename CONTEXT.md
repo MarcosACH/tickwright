@@ -64,6 +64,8 @@ A timeout never transitions it — only [[Reconciliation]] moves a stuck `SUBMIT
 **reconciles by cloid before any resend**. See ADR-0007, ADR-0008.
 `LIVE` means the venue acked the order with its oid. It does not mean the order rested. An
 order that fills on placement is acked `LIVE` first, then its fills move it on (#328).
+A fill can still reach the saga before the place answer. The saga then skips `LIVE`, and the
+late answer only records the oid (#666).
 _Avoid_: order state machine (fine informally), workflow, process.
 
 **Working state**:

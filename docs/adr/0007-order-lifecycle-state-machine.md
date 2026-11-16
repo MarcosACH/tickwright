@@ -48,6 +48,14 @@ change. It reads only whether the saga ended and what filled, so the attempt sti
 (ADR-0056). `tests/_support/exchange_contract.py` now checks that every venue ends this case, an
 IOC order filled only in part, and a cut reduce-only order the same way.**)**
 
+**(Amended by [#666](https://github.com/MarcosACH/tickwright/issues/666) — a place answer after
+a fill is not a transition:** a fill can reach the saga before the place answer does. A reconcile
+pass can deliver it, and so can a venue that pushes fills. The answer then finds the saga past
+`LIVE`, for example at `PARTIALLY_FILLED`. It moves no state, and `PARTIALLY_FILLED → LIVE` stays
+illegal. It only records the oid and, if none is held, the ack time (`Order.record_ack`). Only a
+`LIVE` report outside reconciliation is read this way, because only a place answer is one
+(ADR-0063). A terminal saga takes it the same way (ADR-0026).**)**
+
 ## Load-bearing invariants
 
 1. **A timeout is never a direct transition.** A crash/timeout in `SUBMITTED` leaves the order

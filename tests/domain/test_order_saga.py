@@ -6,6 +6,7 @@ raises ``InvariantViolation`` on an illegal transition (fail-fast, ADR-0014). Th
 tracer exercises the happy-path subset ``PENDING → SUBMITTED → FILLED``.
 """
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -511,6 +512,37 @@ def test_live_ack_records_its_time_and_a_redelivered_ack_is_a_no_op() -> None:
     )
     assert order.apply(redelivered) is False
     assert order.acked_ts_ns == 2
+
+
+def test_a_place_answer_after_a_fill_records_the_oid_and_moves_no_state() -> None:
+    # A fill can reach the saga before the place answer does (#666). The
+    # answer then finds the saga past LIVE, so it is not a transition. It
+    # still carries the oid, which the saga reads fills by later (ADR-0011
+    # inv 2).
+    order = _order()
+    order.apply(replace(_submitted(), venue_oid=None))
+    order.apply(_partial())
+
+    assert order.record_ack(venue_oid="oid-7", ts_ns=5) is True
+    assert (order.state, order.cum_qty) == (OrderState.PARTIALLY_FILLED, Decimal("1"))
+    assert (order.venue_oid, order.acked_ts_ns) == ("oid-7", 5)
+    # A redelivered answer has nothing new, so the caller writes nothing.
+    assert order.record_ack(venue_oid="oid-7", ts_ns=9) is False
+    assert order.acked_ts_ns == 5
+
+
+@pytest.mark.parametrize("state", [OrderState.PENDING, OrderState.SUBMITTED])
+def test_a_place_answer_before_the_ack_is_a_transition_not_a_late_answer(
+    state: OrderState,
+) -> None:
+    # Before the ack, LIVE is a legal move, and only ``apply`` may make it.
+    order = _order()
+    if state is OrderState.SUBMITTED:
+        order.apply(_submitted())
+
+    with pytest.raises(InvariantViolation):
+        order.record_ack(venue_oid="oid-7", ts_ns=5)
+    assert order.state is state
 
 
 def _limit() -> Order:

@@ -154,6 +154,14 @@ ADR-0009).
   **(Amended by #652:** a `FAILED` saga from a timed-out send has no oid. So the cycle reads it
   once per oid listed under its cloid, not by the saga's own ref. The age check still runs on
   each read (ADR-0063). [#652](https://github.com/MarcosACH/tickwright/issues/652)**)**
+  **(Amended by #666:** a record seen during the send is still adopted, so its fills can reach
+  the saga before the call's own answer. On testnet the late `LIVE` ack then hit a
+  `PARTIALLY_FILLED` saga. That transition is illegal, and it faulted the engine. Now a place
+  answer that finds the saga past `LIVE` moves no state. It records the oid the saga keeps
+  (inv 2) and the ack time (ADR-0007, ADR-0026). So the order of answer and fills no longer
+  matters. Holding the record back until the call returned was tried first and dropped. Its
+  safety on Kafka depended on the bus sending the held ack before any other task published.
+  [#666](https://github.com/MarcosACH/tickwright/issues/666)**)**
 - An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
   cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
   preserved) from `PARTIALLY_FILLED` (ADR-0010).

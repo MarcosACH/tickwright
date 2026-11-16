@@ -12,6 +12,8 @@ replicas. Zero external services; the whole run is deterministic.
 
 import asyncio
 import json
+import random
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,12 +23,19 @@ from venue_doubles import VenueLink
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    FillModel,
+    ImmediateFillModel,
+    PaperExchange,
+    StochasticFillModel,
+    StochasticParams,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ComponentState,
     ExternalOrderRef,
+    FillReport,
     MarketTick,
     OrderEvent,
     OrderFailed,
@@ -35,6 +44,7 @@ from tickwright.domain import (
     OrderRef,
     OrderRejected,
     OrderState,
+    OrderStatusReport,
     PlaceOrder,
     Side,
     VenueOpenOrder,
@@ -400,32 +410,56 @@ async def _let_cadences_run() -> None:
         await asyncio.sleep(0)
 
 
-def _slow_send_engine(
-    tmp_path: Path, *, delivers: bool
-) -> tuple[Engine, ManualClock, InMemoryBus, _SlowSendExchange]:
-    """An engine whose strategy places one resting BUY at t=1, through a send
-    the test holds open. The saga store is ``tmp_path / "saga.db"``."""
+def _engine_behind[L: VenueLink](
+    tmp_path: Path,
+    link: Callable[[PaperExchange], L],
+    *,
+    bus: InMemoryBus | None = None,
+    venue_bus: InMemoryBus | None = None,
+    fill_fraction: str | None = None,
+) -> tuple[Engine, ManualClock, InMemoryBus, PaperExchange, L]:
+    """An engine whose strategy places one resting BUY at t=1, through ``link``
+    in front of the paper venue. The saga store is ``tmp_path / "saga.db"``.
+
+    The venue reports into ``venue_bus``, which is the engine's bus unless the
+    test passes its own. A separate one cuts the venue off, so its reports
+    reach the engine only if the link forwards them. With ``fill_fraction``,
+    each crossing tick fills that part of the order. Without it, the whole
+    order fills at once."""
     ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
-    bus = InMemoryBus()
+    bus = InMemoryBus() if bus is None else bus
+    venue_bus = bus if venue_bus is None else venue_bus
     clock = ManualClock()
+    fill_model: FillModel = ImmediateFillModel()
+    if fill_fraction is not None:
+        # Fill probability 1 and no slippage, so the seed never decides anything.
+        fill_model = StochasticFillModel(
+            rng=random.Random(0),
+            clock=clock,
+            params=StochasticParams(partial_fill_fraction=Decimal(fill_fraction)),
+        )
     venue = PaperExchange(
-        bus=bus,
+        bus=venue_bus,
         clock=clock,
-        fill_model=ImmediateFillModel(),
+        fill_model=fill_model,
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
         resting_orders=list,
     )
-    link = _SlowSendExchange(venue, delivers=delivers)
+    exchange = link(venue)
     engine = Engine(
         bus=bus,
         clock=clock,
         store=SQLiteStore(tmp_path / "saga.db"),
-        exchange=link,
+        exchange=exchange,
         feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
         config=EngineConfig(reconcile=ReconcileConfig()),
     )
+    if venue_bus is not bus:
+        # The venue subscribes to ticks on its own bus, so the engine's ticks
+        # are wired to it here.
+        bus.subscribe(MarketTick, venue.on_tick)
     strategy = SingleShotLimitStrategy(
         emitter=engine.emitter_for("trivial"),
         portfolio=engine.portfolio_for("trivial"),
@@ -436,7 +470,21 @@ def _slow_send_engine(
         ),
     )
     engine.register(strategy, symbols={"BTC"})
-    return engine, clock, bus, link
+    return engine, clock, bus, venue, exchange
+
+
+def _cross(price: str, size: str, *, at_s: int) -> MarketTick:
+    """A sell print at the venue that crosses the resting 41000 BUY."""
+    return MarketTick(
+        ts_event=at_s * _NS,
+        ts_init=at_s * _NS,
+        symbol="BTC",
+        price=Decimal(price),
+        size=Decimal(size),
+        aggressor_side=AggressorSide.SELL,
+        trade_id=f"cross-{at_s}",
+        seq=at_s,
+    )
 
 
 def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> None:
@@ -445,7 +493,7 @@ def test_an_order_is_not_failed_while_its_send_is_still_open(tmp_path: Path) -> 
     "no record" read while the send is open is not proof the send failed."""
 
     async def main() -> list[OrderEvent]:
-        engine, clock, bus, link = _slow_send_engine(tmp_path, delivers=True)
+        engine, clock, bus, _, link = _engine_behind(tmp_path, _SlowSendExchange)
         events: list[OrderEvent] = []
         live = asyncio.Event()
 
@@ -489,7 +537,9 @@ def test_a_send_that_returned_with_no_record_still_fails_after_the_budget(
     three misses count from the reads at t=16, 21 and 26."""
 
     async def main() -> list[OrderEvent]:
-        engine, clock, bus, link = _slow_send_engine(tmp_path, delivers=False)
+        engine, clock, bus, _, link = _engine_behind(
+            tmp_path, lambda venue: _SlowSendExchange(venue, delivers=False)
+        )
         events: list[OrderEvent] = []
         failed = asyncio.Event()
 
@@ -544,37 +594,9 @@ def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
     saga stays open while its send is (#640). So every open-order pass must
     read the list, find nothing to act on, and log nothing. A resting order
     under a working saga is not a stray, and a filled one is not listed."""
-    ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
 
     async def main() -> tuple[Engine, _ListRecordingExchange, int]:
-        bus = InMemoryBus()
-        clock = ManualClock()
-        venue = PaperExchange(
-            bus=bus,
-            clock=clock,
-            fill_model=ImmediateFillModel(),
-            genesis_collateral=GENESIS,
-            account_net=dict,
-            applied_fills=lambda cloid: (),
-            resting_orders=list,
-        )
-        link = _ListRecordingExchange(venue)
-        engine = Engine(
-            bus=bus,
-            clock=clock,
-            store=SQLiteStore(tmp_path / "saga.db"),
-            exchange=link,
-            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
-            config=EngineConfig(reconcile=ReconcileConfig()),
-        )
-        strategy = SingleShotLimitStrategy(
-            emitter=engine.emitter_for("trivial"),
-            portfolio=engine.portfolio_for("trivial"),
-            settings=SingleShotLimitStrategy.Settings(
-                side=Side.BUY, quantity=Decimal("0.5"), price=Decimal("41000")
-            ),
-        )
-        engine.register(strategy, symbols={"BTC"})
+        engine, clock, bus, _, link = _engine_behind(tmp_path, _ListRecordingExchange)
         live, filled = asyncio.Event(), asyncio.Event()
 
         async def record(event: OrderEvent) -> None:
@@ -592,18 +614,7 @@ def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
         await _let_cadences_run()
         # The market crosses the resting BUY and the saga ends FILLED.
         clock.advance_to(40 * _NS)
-        await bus.publish(
-            MarketTick(
-                ts_event=40 * _NS,
-                ts_init=40 * _NS,
-                symbol="BTC",
-                price=Decimal("40000"),
-                size=Decimal("3"),
-                aggressor_side=AggressorSide.SELL,
-                trade_id="cross",
-                seq=1,
-            )
-        )
+        await bus.publish(_cross("40000", "3", at_s=40))
         await asyncio.wait_for(filled.wait(), timeout=5)
         # Two passes over the terminal saga.
         for t in (61, 91):
@@ -626,3 +637,156 @@ def test_the_stray_check_runs_clean_on_the_paper_path(tmp_path: Path) -> None:
         "order.place_answer_after_terminal",
     }
     assert [e["event"] for e in events if e["event"] in noisy] == []
+
+
+class _HeldAnswerExchange(VenueLink):
+    """A venue that acts on a place request at once, but whose answer stays on
+    the wire until the test lets it through (#666). The venue reports into its
+    own bus. While a send is open this link holds those reports back."""
+
+    def __init__(self, venue: PaperExchange, *, venue_bus: InMemoryBus, bus: InMemoryBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+        self._holding = False
+        self.held: list[OrderStatusReport | FillReport] = []
+        self.sending = asyncio.Event()
+        self.land = asyncio.Event()
+        self.answered = asyncio.Event()
+        venue_bus.subscribe(OrderStatusReport, self._forward)
+        venue_bus.subscribe(FillReport, self._forward)
+
+    async def _forward(self, report: OrderStatusReport | FillReport) -> None:
+        if self._holding:
+            self.held.append(report)
+        else:
+            await self._bus.publish(report)
+
+    async def place(self, order: PlaceOrder) -> None:
+        self._holding = True
+        await self._venue.place(order)
+        self.sending.set()
+        await self.land.wait()
+        self._holding = False
+        for report in self.held:
+            await self._bus.publish(report)
+        self.answered.set()
+
+
+def _held_answer_engine(
+    tmp_path: Path, *, fill_fraction: str = "1"
+) -> tuple[Engine, ManualClock, InMemoryBus, PaperExchange, _HeldAnswerExchange]:
+    """``_engine_behind`` with the venue's answer held until the test releases
+    it. Each crossing tick fills ``fill_fraction`` of the order."""
+    bus, venue_bus = InMemoryBus(), InMemoryBus()
+    return _engine_behind(
+        tmp_path,
+        lambda venue: _HeldAnswerExchange(venue, venue_bus=venue_bus, bus=bus),
+        bus=bus,
+        venue_bus=venue_bus,
+        fill_fraction=fill_fraction,
+    )
+
+
+def test_a_filled_order_whose_answer_is_late_still_takes_its_ack(tmp_path: Path) -> None:
+    """#666: the venue filled the order while its answer was still on the wire.
+    An in-flight pass in that window adopts the venue's record, so the saga
+    ends ``FILLED`` before the answer lands. The late answer then records the
+    ack on the saga. It must not log a venue order the engine never dropped."""
+
+    async def main() -> tuple[int, list[OrderEvent]]:
+        engine, clock, bus, venue, link = _held_answer_engine(tmp_path)
+        saga: list[OrderEvent] = []
+
+        async def record(event: OrderEvent) -> None:
+            saga.append(event)
+
+        bus.subscribe(OrderEvent, record)
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(link.sending.wait(), timeout=5)
+        # The venue acked the order and now fills it in one trade. Both answers
+        # are still on the wire.
+        clock.advance_to(2 * _NS)
+        await venue.on_tick(_cross("40000", "3", at_s=2))
+        # Two in-flight deadlines pass while the venue already holds the fill.
+        for t in (6, 11):
+            clock.advance_to(t * _NS)
+            await _let_cadences_run()
+        link.land.set()
+        await asyncio.wait_for(link.answered.wait(), timeout=5)
+        await _let_cadences_run()
+        await engine.stop()
+        return await run, saga
+
+    with capture_events() as events:
+        exit_code, saga = asyncio.run(main())
+
+    assert exit_code == 0
+    assert [e for e in events if e["event"] == "order.place_answer_after_terminal"] == []
+    # The pass adopted the record during the send: its fill ended the saga.
+    assert [(event.state, event.reconciliation) for event in saga] == [
+        (OrderState.PENDING, False),
+        (OrderState.SUBMITTED, False),
+        (OrderState.FILLED, True),
+    ]
+    # Paper has no oid to keep. The ack time is what the late answer adds.
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        order = reopened.get_order(_CLOID)
+        assert order is not None
+        assert order.acked_ts_ns is not None
+    finally:
+        reopened.close()
+
+
+def test_an_order_filled_in_two_trades_before_its_answer_does_not_fault(
+    tmp_path: Path,
+) -> None:
+    """#666, the soak crash: the venue filled the order in two trades while its
+    answer was still on the wire. A reconcile fill ahead of the ack left the
+    saga ``PARTIALLY_FILLED``, and the late ``LIVE`` ack faulted the engine.
+    Now the answer moves no state, and the second fill finishes the saga."""
+
+    async def main() -> tuple[int, ComponentState, list[OrderEvent]]:
+        engine, clock, bus, venue, link = _held_answer_engine(tmp_path, fill_fraction="0.5")
+        saga: list[OrderEvent] = []
+
+        async def record(event: OrderEvent) -> None:
+            saga.append(event)
+
+        bus.subscribe(OrderEvent, record)
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(link.sending.wait(), timeout=5)
+        # Each crossing print fills half the order. The in-flight pass at t=6
+        # sees only the first trade, so the ack lands on a part-filled saga,
+        # as on testnet. Both trades and the ack are still on the wire.
+        clock.advance_to(2 * _NS)
+        await venue.on_tick(_cross("40000", "3", at_s=2))
+        clock.advance_to(6 * _NS)
+        await _let_cadences_run()
+        clock.advance_to(7 * _NS)
+        await venue.on_tick(_cross("40000", "3", at_s=7))
+        link.land.set()
+        await asyncio.wait_for(link.answered.wait(), timeout=5)
+        await _let_cadences_run()
+        state = engine.state
+        await engine.stop()
+        return await run, state, saga
+
+    exit_code, state, saga = asyncio.run(main())
+
+    assert exit_code == 0
+    assert state is ComponentState.RUNNING
+    assert [(event.state, event.reconciliation) for event in saga] == [
+        (OrderState.PENDING, False),
+        (OrderState.SUBMITTED, False),
+        (OrderState.PARTIALLY_FILLED, True),
+        (OrderState.FILLED, False),
+    ]
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        order = reopened.get_order(_CLOID)
+        assert order is not None
+        assert order.state is OrderState.FILLED
+        assert order.cum_qty == Decimal("0.5")
+    finally:
+        reopened.close()
