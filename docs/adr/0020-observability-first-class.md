@@ -71,6 +71,9 @@ adds `guard.kill_switch_restored` (ADR-0026). The catalog also pins a level now.
 `observability.catalog.WARNINGS` logs at `warning`, and every other event logs at `info`. The level
 belongs to the name, so one event never logs at two levels. An event goes in `WARNINGS` when the
 engine keeps running but an operator must act. `guard.kill_switch_restored` is the first.**)**
+**(Extended by [#656](https://github.com/MarcosACH/tickwright/issues/656):**
+`reconcile.external_order` is the second event in `WARNINGS` (ADR-0063). The engine never cancels
+an external order, so only an operator can act on it.**)**
 
 ## Coverage requirement
 

@@ -369,6 +369,18 @@ def test_an_order_we_never_placed_is_logged_once_and_never_cancelled(listed_cloi
     assert external["venue_oid"] == str(STRAY_OID)
 
 
+def test_an_order_we_never_placed_logs_at_warning() -> None:
+    # Issue #656: the engine never cancels this order, so only an operator can.
+    # An operator who filters the log on warning must still see it (ADR-0020).
+    _, _, seen = _open_order_passes(
+        OrderState.FAILED, listed_cloid="0x00000000000000000000000000000abc"
+    )
+
+    [external] = seen
+    assert external["event"] == "reconcile.external_order"
+    assert external["log_level"] == "warning"
+
+
 @pytest.mark.parametrize(
     ("failure", "expected"),
     [

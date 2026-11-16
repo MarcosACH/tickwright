@@ -11,7 +11,7 @@ refusal and a flatten with no key.
 
 - `se-setup` a strategy leaves a BTC long and a resting buy far below the market.
 - `se-external` an engine on a fresh store logs the resting buy once as
-  `reconcile.external_order` and does not cancel it (ADR-0063).
+  `reconcile.external_order` at `warning` and does not cancel it (ADR-0063).
 - `se-cancel-all` `cancel-all` exits 0, the resting buy ends `cancelled`, and the long stays.
 - `se-flatten` `flatten` exits 0, every partition reads flat, and the kill switch is tripped.
 - `se-halted` a restarted engine has its first order denied. The venue gets nothing.

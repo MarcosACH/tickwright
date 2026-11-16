@@ -108,6 +108,7 @@ class NamedEvent(StrEnum):
     RECONCILE_STRAY_CANCELLED = "reconcile.stray_cancelled"
     # An order resting on the venue that no saga of ours sent (ADR-0063). The
     # engine never acts on it, so this line is how an operator learns of it.
+    # It logs at ``warning``, because only the operator can cancel it (#656).
     RECONCILE_EXTERNAL_ORDER = "reconcile.external_order"
 
     # One completed account-grain cycle (``LedgerReconciliation``, ADR-0034).
@@ -376,4 +377,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
 # The events logged at ``warning``. Every other event is ``info``. The level
 # belongs to the event, not the call site, so one name always has one level.
 # An event lands here when the engine keeps running but an operator must act.
-WARNINGS: frozenset[NamedEvent] = frozenset({NamedEvent.GUARD_KILL_SWITCH_RESTORED})
+#
+# ``reconcile.stray_cancelled`` stays ``info``, even with unbooked fills. The
+# engine cancels the order itself, and ledger reconciliation books the position.
+WARNINGS: frozenset[NamedEvent] = frozenset(
+    {NamedEvent.GUARD_KILL_SWITCH_RESTORED, NamedEvent.RECONCILE_EXTERNAL_ORDER}
+)
