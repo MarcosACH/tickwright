@@ -68,6 +68,10 @@ order** is a venue order the engine did not place. Both terms are in `CONTEXT.md
   - `reconcile.stray_cancelled`: every cancel sent. It carries the saga state, the oid, and the
     unbooked fills as trade ids, total quantity and total fee.
   - `reconcile.external_order`: once per oid per process life.
+    **(Amended by [#656](https://github.com/MarcosACH/tickwright/issues/656):** it logs at
+    `warning`. The engine never cancels it, so only an operator can act (ADR-0020).
+    `reconcile.stray_cancelled` stays at `info`, even with unbooked fills. The engine cancels that
+    order itself, and ledger reconciliation books the position.**)**
   - `order.place_answer_after_terminal`: a place answer reaches a terminal saga. The check lives
     in the `ExecutionManager`. A `LIVE` report outside reconciliation is only ever a place answer,
     so that is what it matches. The saga does not move.

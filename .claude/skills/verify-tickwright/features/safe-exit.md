@@ -11,7 +11,7 @@ refusal and a flatten with no key.
 
 - `se-setup` a strategy leaves a BTC long and a resting buy far below the market.
 - `se-external` an engine on a fresh store logs the resting buy once as
-  `reconcile.external_order` and does not cancel it (ADR-0063).
+  `reconcile.external_order` at `warning` and does not cancel it (ADR-0063).
 - `se-cancel-all` `cancel-all` exits 0, the resting buy ends `cancelled`, and the long stays.
 - `se-flatten` `flatten` exits 0, every partition reads flat, and the kill switch is tripped.
 - `se-halted` a restarted engine has its first order denied. The venue gets nothing.
@@ -54,7 +54,7 @@ Preconditions:
   `$V await safe-exit external --event reconcile.external_order --timeout 120`, then
   `$V signal safe-exit external TERM`, `$V await safe-exit external --exit`,
   `$V dump safe-exit external`. Check
-  `$V check safe-exit external se-external --event reconcile.external_order --expect 1`,
+  `$V check safe-exit external se-external --event reconcile.external_order --level warning --expect 1`,
   `$V check safe-exit external se-external --event reconcile.stray_cancelled --expect 0`,
   `$V check safe-exit external se-external --exit --expect 0`.
   The next life writes a new `.env`, so its checks read `store.db` again.
@@ -73,7 +73,7 @@ Preconditions:
   Send `$V signal safe-exit halted USR2` and `$V await safe-exit halted --event guard.kill_switch_reset`.
   Then `$V signal safe-exit halted TERM`, `$V await safe-exit halted --exit`, `$V dump safe-exit halted`.
   Check `$V check safe-exit halted se-halted --event order.denied --expect 1`,
-  `$V check safe-exit halted se-restored --event guard.kill_switch_restored --expect 1`,
+  `$V check safe-exit halted se-restored --event guard.kill_switch_restored --level warning --expect 1`,
   `$V check safe-exit halted se-halted --sql "select count(*) from orders where strategy_id='margin_watch' and venue_oid is not null" --expect 0`,
   `$V check safe-exit halted se-reset --sql "select tripped from kill_switch" --expect 0`.
 - **Reset.** Run `$V start safe-exit reset --preset testnet --forward-key --strategy round_trip_then_flat --param QUANTITY=0.001 --param HOLD_TICKS=1 --param WAIT_SECONDS=10`,

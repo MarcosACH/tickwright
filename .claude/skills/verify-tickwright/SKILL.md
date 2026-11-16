@@ -111,6 +111,7 @@ $V dump  <run> <life>                                     # store tables + event
 $V check <run> <life> <check-id> --sql "..." --expect X   # records PASS or FAIL
 $V check <run> <life> <check-id> --file first.offsets.txt --expect X   # an evidence file's content
 $V check <run> <life> <check-id> --event order.placed --expect 0       # a log event's count
+$V check <run> <life> <check-id> --event X --level warning --expect 1  # count at one level only
 $V check <run> <life> <check-id> --exit --expect 0                     # the exit code
 $V report <run>                                           # writes and prints REPORT.md
 ```

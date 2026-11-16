@@ -652,7 +652,12 @@ def _observed(args: argparse.Namespace) -> str:
     if args.event:
         log = evidence(args.run_id) / f"{args.life}.stderr.jsonl"
         text = log.read_text() if log.exists() else ""
-        return str(sum(f'"event": "{args.event}"' in line for line in text.splitlines()))
+        lines = [line for line in text.splitlines() if f'"event": "{args.event}"' in line]
+        if args.level:
+            # A feature that names a level must prove it. A count alone passes
+            # while the line still logs at the old level (#656).
+            lines = [line for line in lines if f'"level": "{args.level}"' in line]
+        return str(len(lines))
     exit_file = evidence(args.run_id) / f"{args.life}.exit"
     return exit_file.read_text().strip() if exit_file.exists() else ""
 
@@ -1143,6 +1148,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--event", help="a named event whose count is compared")
     group.add_argument("--file", help="an evidence file whose stripped content is compared")
     group.add_argument("--exit", action="store_true", help="the exit code is compared")
+    p.add_argument("--level", help="with --event: count only lines at this level, e.g. warning")
     p.add_argument("--expect", required=True, help="the value the feature file says")
     p.set_defaults(fn=cmd_check)
 
