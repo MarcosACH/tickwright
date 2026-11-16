@@ -36,7 +36,7 @@ Preconditions:
 - **Reset.** Run `$V signal ks denied USR2`, `$V await ks denied --event guard.kill_switch_reset`,
   `$V signal ks denied TERM`, `$V await ks denied --exit`, `$V dump ks denied`.
 - **Check denied.** Run `$V check ks denied ks-deny --event order.denied --expect 1`,
-  `$V check ks denied ks-restored --event guard.kill_switch_restored --expect 1`,
+  `$V check ks denied ks-restored --event guard.kill_switch_restored --level warning --expect 1`,
   `$V check ks denied ks-durable --sql "select state from orders" --expect denied`,
   `$V check ks denied ks-durable --sql "select count(*) from positions" --expect 0`,
   `$V check ks denied ks-reset --event guard.kill_switch_reset --expect 1`,

@@ -253,6 +253,43 @@ class TestCheck:
             in (helper.evidence("r1") / "checks.txt").read_text()
         )
 
+    def test_an_event_check_with_a_level_counts_only_that_level(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        # A feature that claims an event logs at warning must be able to prove
+        # it. A count alone passes while the line is still at info (#656).
+        run("init", "r1")
+        _finished_life(
+            helper,
+            "r1",
+            "external",
+            exit_code=0,
+            events=[
+                {"event": "reconcile.external_order", "level": "info"},
+                {"event": "reconcile.external_order", "level": "warning"},
+            ],
+            orders=[],
+        )
+
+        code, _ = run(
+            "check",
+            "r1",
+            "external",
+            "se-external",
+            "--event",
+            "reconcile.external_order",
+            "--level",
+            "warning",
+            "--expect",
+            "1",
+        )
+
+        assert code == 0
+        assert (
+            "PASS se-external external expected=1 got=1"
+            in (helper.evidence("r1") / "checks.txt").read_text()
+        )
+
     def test_checks_accumulate_in_order(
         self, helper: ModuleType, run: Callable[..., tuple[int, str]]
     ) -> None:
