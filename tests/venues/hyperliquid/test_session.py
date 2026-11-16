@@ -12,6 +12,8 @@ assert.
 """
 
 import asyncio
+import json
+from collections.abc import Callable
 
 import pytest
 from hyperliquid_fakes import FakeConnector, FakeWsConnection, RecordingClock
@@ -363,3 +365,64 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
     with pytest.raises(RuntimeError, match="cannot represent"):
         asyncio.run(main())
     assert len(connector.asked) == 1
+
+
+_NS = 1_000_000_000
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Yield to the loop until ``condition`` holds, failing rather than hanging."""
+    for _ in range(1000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
+
+
+async def _let_the_loop_run() -> None:
+    """Give every ready task a chance to act, for asserting that one did not."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+def _pings(connection: FakeWsConnection) -> list[object]:
+    return [json.loads(sent) for sent in connection.sent if sent != "subscribe"]
+
+
+def test_a_quiet_socket_is_pinged_every_30_seconds_so_the_venue_keeps_it_open() -> None:
+    """Hyperliquid closes a socket that has sent it nothing for 60 s (#672).
+
+    The funding socket hears from the venue only on the hour. Without a ping it
+    was dropped and resubscribed about once a minute. Every resubscribe replayed
+    the whole payment history onto the bus.
+    """
+    connection = FakeWsConnection([])
+    clock = RecordingClock()
+
+    async def main() -> None:
+        driver = _Driver()
+        session = WsSession(
+            config=CONFIG,
+            clock=clock,
+            connect=FakeConnector([connection]),
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        running = asyncio.create_task(session.run())
+        await connection.drained.wait()
+
+        clock.advance_to(29 * _NS)
+        await _let_the_loop_run()
+        assert _pings(connection) == []
+
+        clock.advance_to(30 * _NS)
+        await _until(lambda: len(_pings(connection)) == 1)
+        clock.advance_to(60 * _NS)
+        await _until(lambda: len(_pings(connection)) == 2)
+
+        await session.stop()
+        await asyncio.wait_for(running, timeout=2)
+
+    asyncio.run(main())
+    assert _pings(connection) == [{"method": "ping"}, {"method": "ping"}]

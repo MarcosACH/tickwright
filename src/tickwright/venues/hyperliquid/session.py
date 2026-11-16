@@ -24,12 +24,27 @@ funding ingest's refusal of a payment it cannot represent has to reach it
 whose contract had changed.
 """
 
+import asyncio
+import json
 from collections.abc import Awaitable, Callable
 
 from tickwright.domain import Backoff, Clock
 
 from .config import HyperliquidConfig
 from .transport import Connect, WsConnection
+
+PING_INTERVAL_SECONDS = 30
+"""How often an open socket sends the venue a ping.
+
+Hyperliquid closes a socket that has sent it nothing for 60 s. The funding
+socket hears from the venue only on the hour, so without a ping it was dropped
+and resubscribed about once a minute (#672). Half the venue's limit leaves room
+for a late wake-up. A fixed value, not config: the limit is the venue's, so no
+operator has a reason to move it.
+"""
+
+_PING = json.dumps({"method": "ping"})
+_NS_PER_SECOND = 1_000_000_000
 
 type Subscribe = Callable[[WsConnection], Awaitable[None]]
 """Sends this subscription's ``subscribe`` messages on a freshly-opened socket.
@@ -137,12 +152,28 @@ class WsSession:
                 self._connection = connection
                 await self._subscribe(connection)
             backoff.reset()
-            await self._consume(connection)
+            heartbeat = asyncio.create_task(self._ping_until_cancelled(connection))
+            try:
+                await self._consume(connection)
+            finally:
+                heartbeat.cancel()
             # The consumer is done: a stop() is final; anything else was the
             # venue hanging up, so back off once and go resubscribe.
             if self._stopping:
                 return
             await backoff.sleep_on(self._clock)
+
+    async def _ping_until_cancelled(self, connection: WsConnection) -> None:
+        """Ping the socket every ``PING_INTERVAL_SECONDS`` while it is consumed.
+
+        Waits with ``sleep_until`` rather than ``sleep``. Under ``ManualClock``
+        a ``sleep`` advances time itself, so this loop would spin and drag
+        virtual time forward on its own.
+        """
+        while True:
+            wake_ns = self._clock.timestamp_ns() + PING_INTERVAL_SECONDS * _NS_PER_SECOND
+            await self._clock.sleep_until(wake_ns)
+            await connection.send(_PING)
 
     async def stop(self) -> None:
         """End the run: refuse further reconnects and close the live socket.
