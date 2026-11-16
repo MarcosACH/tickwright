@@ -468,3 +468,7 @@ net** and always faults. The bus stays a pure transport — containment is a pro
 Engine subscribes* third-party components. A type-based-only scheme (run everything raw, catch only a
 designated `RecoverableError`) was rejected: it inverts the default for untrusted strategy code, so an
 unexpected `KeyError` in a third-party strategy would fault the whole engine.
+**(Amended by [#657](https://github.com/MarcosACH/tickwright/issues/657): `on_wake` is contained
+too.** ADR-0062 added `on_wake` as a third strategy callback. The host wraps it in the same net as
+`on_tick` and `on_order_event`. An error in it emits `strategy.error`, and `InvariantViolation`
+still pierces.**)**

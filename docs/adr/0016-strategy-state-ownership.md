@@ -92,6 +92,11 @@ or a strategy that never fired. Never a Signal with no memory behind it. The sna
 `PENDING` checkpoint stay two writes. They no longer need to be one transaction, because the
 order between them is now fixed by the bus, not by luck.**)**
 
+**(Amended by [#657](https://github.com/MarcosACH/tickwright/issues/657): `on_wake` is a save
+point too.** ADR-0062 added `on_wake` as a third strategy callback. The host saves the snapshot
+after it the same way it does after `on_tick` and `on_order_event`. The write still happens only
+when the bytes changed.**)**
+
 ## Restore failure is not an invariant violation
 
 An unreadable/incompatible snapshot (the strategy's code changed shape between runs) must not

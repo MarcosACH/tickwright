@@ -55,7 +55,8 @@ Concretely, the engine does the pulling **for** you before it subscribes you (in
 2. **`set_next_seq(next_seq)`** — your monotonic `seq` is resumed from the **saga store's
    high-water mark**, not from your snapshot, so a stale snapshot can never reuse a consumed
    `signal_id` (ADR-0006/0016). Place, cancel, and cancel all intents each consume a `seq`.
-3. Only then are your `on_tick` / `on_order_event` handlers subscribed, and the feed starts.
+3. Only then are your `on_tick`, `on_wake` and `on_order_event` handlers subscribed, and the feed
+   starts.
 
 Your snapshot can be stale after a restart. Startup may have settled an order before your handlers
 were subscribed, so you never saw that event. To rebuild your open orders, call
@@ -68,7 +69,7 @@ orders against the venue. The corollary discipline:
 - **Keep state minimal and reconstructible.** Version your snapshot payload (`{"version": 1, …}`)
   and reject unknown shapes in `restore()` — the engine turns that into a clean start.
 - **Keep `snapshot()` cheap, and never let it raise.** The engine calls it once at start and after
-  every `on_tick` and `on_order_event`, and writes it to the store when the bytes changed
+  every `on_tick`, `on_wake` and `on_order_event`, and writes it to the store when the bytes changed
   (ADR-0016). A state that moves on every tick costs one store write per tick. A `snapshot()` that
   raises is not contained: the engine faults, because a strategy it cannot persist cannot recover.
 - **Signal ids must be deterministic and gap-free**, driven only by the engine-set `seq` — replay or
