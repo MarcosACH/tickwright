@@ -12,6 +12,7 @@ replicas. Zero external services; the whole run is deterministic.
 
 import asyncio
 import json
+import random
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,7 +22,12 @@ from venue_doubles import VenueLink
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    ImmediateFillModel,
+    PaperExchange,
+    StochasticFillModel,
+    StochasticParams,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
@@ -664,19 +670,25 @@ class _HeldAnswerExchange(VenueLink):
 
 
 def _held_answer_engine(
-    tmp_path: Path,
+    tmp_path: Path, *, fill_fraction: str = "1"
 ) -> tuple[Engine, ManualClock, InMemoryBus, PaperExchange, _HeldAnswerExchange]:
     """An engine whose strategy places one resting BUY at t=1. The venue's
-    answer is held until the test releases it. The saga store is
-    ``tmp_path / "saga.db"``."""
+    answer is held until the test releases it. Each crossing tick fills
+    ``fill_fraction`` of the order. The saga store is ``tmp_path / "saga.db"``."""
     ticks = _ticks_file(tmp_path / "ticks.jsonl", [("42000", 1 * _NS)])
     bus = InMemoryBus()
     venue_bus = InMemoryBus()
     clock = ManualClock()
+    # Fill probability 1 and no slippage, so the seed never decides anything.
+    fill_model = StochasticFillModel(
+        rng=random.Random(0),
+        clock=clock,
+        params=StochasticParams(partial_fill_fraction=Decimal(fill_fraction)),
+    )
     venue = PaperExchange(
         bus=venue_bus,
         clock=clock,
-        fill_model=ImmediateFillModel(),
+        fill_model=fill_model,
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
@@ -761,3 +773,57 @@ def test_a_filled_order_whose_answer_is_late_still_takes_its_ack(tmp_path: Path)
         OrderState.LIVE,
         OrderState.FILLED,
     ]
+
+
+def test_an_order_filled_in_two_trades_before_its_answer_does_not_fault(
+    tmp_path: Path,
+) -> None:
+    """#666, the soak crash: the venue filled the order in two trades while its
+    answer was still on the wire. A reconcile fill ahead of the ack left the
+    saga ``PARTIALLY_FILLED``, and the late ``LIVE`` ack faulted the engine."""
+
+    async def main() -> tuple[int, ComponentState, list[OrderEvent]]:
+        engine, clock, bus, venue, link = _held_answer_engine(tmp_path, fill_fraction="0.5")
+        saga: list[OrderEvent] = []
+
+        async def record(event: OrderEvent) -> None:
+            saga.append(event)
+
+        bus.subscribe(OrderEvent, record)
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(link.sending.wait(), timeout=5)
+        # Each crossing print fills half the order. The in-flight pass at t=6
+        # sees only the first trade, so the ack would land on a part-filled
+        # saga, as on testnet. Both trades and the ack are still on the wire.
+        clock.advance_to(2 * _NS)
+        await venue.on_tick(_cross("40000", "3", at_s=2))
+        clock.advance_to(6 * _NS)
+        await _let_cadences_run()
+        clock.advance_to(7 * _NS)
+        await venue.on_tick(_cross("40000", "3", at_s=7))
+        link.land.set()
+        await asyncio.wait_for(link.answered.wait(), timeout=5)
+        await _let_cadences_run()
+        state = engine.state
+        await engine.stop()
+        return await run, state, saga
+
+    exit_code, state, saga = asyncio.run(main())
+
+    assert exit_code == 0
+    assert state is ComponentState.RUNNING
+    assert [event.state for event in saga] == [
+        OrderState.PENDING,
+        OrderState.SUBMITTED,
+        OrderState.LIVE,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.FILLED,
+    ]
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        order = reopened.get_order(_CLOID)
+        assert order is not None
+        assert order.state is OrderState.FILLED
+        assert order.cum_qty == Decimal("0.5")
+    finally:
+        reopened.close()
