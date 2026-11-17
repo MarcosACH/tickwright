@@ -157,6 +157,12 @@ class WsSession:
                 await self._consume(connection)
             finally:
                 heartbeat.cancel()
+            # A ping that failed for any reason the heartbeat does not expect
+            # is a bug. Raise it here, so it faults the run like a consumer
+            # error does, rather than vanish with the task.
+            await asyncio.wait([heartbeat])
+            if not heartbeat.cancelled() and (error := heartbeat.exception()) is not None:
+                raise error
             # The consumer is done: a stop() is final; anything else was the
             # venue hanging up, so back off once and go resubscribe.
             if self._stopping:

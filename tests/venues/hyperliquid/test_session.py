@@ -426,3 +426,57 @@ def test_a_quiet_socket_is_pinged_every_30_seconds_so_the_venue_keeps_it_open() 
 
     asyncio.run(main())
     assert _pings(connection) == [{"method": "ping"}, {"method": "ping"}]
+
+
+class _PingFails(FakeWsConnection):
+    """An idle socket that takes the subscribe and then refuses every ping."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__([])
+        self.ping_failed = asyncio.Event()
+        self._error = error
+
+    async def send(self, message: str) -> None:
+        if message == "subscribe":
+            await super().send(message)
+            return
+        self.ping_failed.set()
+        raise self._error
+
+
+def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -> None:
+    """Fail the first ping, then let the venue drop the socket nobody pinged."""
+    clock = RecordingClock()
+
+    async def main() -> None:
+        driver = _Driver()
+        session = WsSession(
+            config=CONFIG,
+            clock=clock,
+            connect=FakeConnector([connection, spare]),
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        running = asyncio.create_task(session.run())
+        await connection.drained.wait()
+        clock.advance_to(30 * _NS)
+        await connection.ping_failed.wait()
+        await connection.close()
+        try:
+            await spare.drained.wait()
+        finally:
+            await session.stop()
+            await asyncio.wait_for(running, timeout=2)
+
+    asyncio.run(asyncio.wait_for(main(), timeout=2))
+
+
+def test_a_ping_that_fails_for_an_unexpected_reason_faults_the_run() -> None:
+    """A ping failure that is not a dead socket is a bug, and it must reach the
+    runner the way a consumer's error does (ADR-0024). Swallowed, it would
+    leave the socket unpinged with nothing in the log to say why."""
+    connection = _PingFails(RuntimeError("a bug in the ping"))
+
+    with pytest.raises(RuntimeError, match="a bug in the ping"):
+        _run_until_the_ping_fails(connection, FakeWsConnection([]))
