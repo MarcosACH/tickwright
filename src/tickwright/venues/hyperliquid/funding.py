@@ -158,6 +158,7 @@ class FundingIngest:
         self._account_id = account_id
         self._address = address
         self._session = WsSession(
+            name="userFundings",
             config=config,
             clock=clock,
             connect=connect,

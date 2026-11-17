@@ -357,9 +357,11 @@ def _ingest_refusing(frames: list[str]) -> str:
         await exchange.start()
         await asyncio.wait_for(exchange.run(), timeout=2)
 
-    with pytest.raises(VenueFactUnsupported) as raised:
+    # Wrapped once, by the TaskGroup the session holds each socket in. The
+    # runner unwraps it (#338), so the refusal itself is what it reports.
+    with pytest.RaisesGroup(VenueFactUnsupported) as raised:
         asyncio.run(main())
-    return str(raised.value)
+    return str(raised.value.exceptions[0])
 
 
 @pytest.mark.parametrize(
@@ -586,6 +588,38 @@ def test_a_funding_socket_blip_that_clears_inside_the_budget_boots_normally() ->
         assert len(connect.asked) == 3, "the two refusals and the connect that landed"
         assert connection.sent, "the socket that landed is the one subscribed"
         assert 0 < clock.timestamp_ns() < STARTUP_TIMEOUT_SECONDS * 1_000_000_000
+
+        await exchange.stop()
+
+    asyncio.run(main())
+
+
+class _DroppedBeforeSubscribe(FakeWsConnection):
+    """A socket the venue drops right after the connect, so the subscribe fails."""
+
+    async def send(self, message: str) -> None:
+        raise ConnectionError("hyperliquid websocket closed")
+
+
+def test_a_socket_dropped_during_the_boot_subscribe_is_retried_like_a_refused_connect() -> None:
+    """The transport raises ``ConnectionError`` on a send to a dead socket (#672).
+
+    That is an ``OSError``, so the boot retries it on its deadline, the same as
+    a refused connect. A venue hangup in the first second of a boot is a blip,
+    not a reason to stop the engine.
+    """
+
+    async def main() -> None:
+        clock = ManualClock()
+        dropped = _DroppedBeforeSubscribe([])
+        connection = FakeWsConnection([])
+        connect = FakeConnector([dropped, connection])
+        exchange = make_exchange(aligned_venue(), bus=InMemoryBus(), clock=clock, connect=connect)
+
+        await exchange.start()  # no refusal is the assertion
+
+        assert dropped.closed, "the boot closes the socket it could not subscribe"
+        assert connection.sent, "the next socket is the one subscribed"
 
         await exchange.stop()
 

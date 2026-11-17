@@ -54,6 +54,7 @@ class HyperliquidFeed:
         # A list, not a set, so the subscribe order is the order given.
         self._symbols = list(config.symbols)
         self._session = WsSession(
+            name="market data",
             config=config,
             clock=clock,
             connect=connect,

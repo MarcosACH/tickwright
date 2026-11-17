@@ -62,6 +62,7 @@ class WsConnection(Protocol):
     The contract the reconnect loops stand on: iteration **ends** when the
     connection dies — however it dies — and never raises for it; ``close()``
     also ends iteration (that is how ``stop`` unblocks the reader).
+    ``send()`` on a dead connection raises ``ConnectionError``.
     """
 
     async def send(self, message: str) -> None: ...
@@ -127,7 +128,12 @@ class _RealWsConnection:
         self._closed_exc = ConnectionClosed
 
     async def send(self, message: str) -> None:
-        await self._connection.send(message)
+        try:
+            await self._connection.send(message)
+        except self._closed_exc as exc:
+            # One type for a dead socket, so the session's ping can tell it
+            # apart from a bug (#672).
+            raise ConnectionError(f"hyperliquid websocket closed: {exc}") from exc
 
     async def close(self) -> None:
         await self._connection.close()

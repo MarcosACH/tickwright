@@ -26,6 +26,7 @@ from closed_sets import assert_covers_exactly
 from hyperliquid_fakes import (
     ORACLE_REJECT,
     TEST_SIGNING_KEY,
+    FakeConnector,
     FakeExchangeApi,
     FakeWsConnection,
     idle_ws,
@@ -1177,6 +1178,28 @@ def _drive_feed_frame_dropped() -> None:
     asyncio.run(go())
 
 
+def _drive_venue_socket_dropped() -> None:
+    """The venue hangs up the feed's socket. The drop is named
+    (``venue.socket_dropped``, #672) and the feed reconnects on a fresh one."""
+
+    async def go() -> None:
+        dropped = FakeWsConnection([], drop_when_drained=True)
+        spare = FakeWsConnection([])
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            connect=FakeConnector([dropped, spare]),
+        )
+        await feed.start()
+        run = asyncio.create_task(feed.run())
+        await spare.drained.wait()  # the reconnect landed
+        await feed.stop()
+        await run
+
+    asyncio.run(go())
+
+
 def _drive_account_reconciled() -> None:
     """One account-grain cycle against a venue snapshot: the ledger is
     cross-checked, the pass is named (``account.reconciled``, ADR-0034), and the
@@ -1357,6 +1380,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_MATERIALISED: _drive_account_materialised,
     NamedEvent.FEED_LAGGED: _drive_feed_lagged,
     NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
+    NamedEvent.VENUE_SOCKET_DROPPED: _drive_venue_socket_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,

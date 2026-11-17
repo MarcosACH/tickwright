@@ -12,8 +12,11 @@ assert.
 """
 
 import asyncio
+import json
+from collections.abc import Callable
 
 import pytest
+import structlog.testing
 from hyperliquid_fakes import FakeConnector, FakeWsConnection, RecordingClock
 
 from tickwright.venues.hyperliquid.config import HyperliquidConfig
@@ -60,6 +63,7 @@ def _drive(
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=clock,
             connect=connector,
             subscribe=driver.subscribe,
@@ -161,6 +165,7 @@ def test_stopping_a_session_that_never_connected_is_safe() -> None:
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=FakeConnector([]),
             subscribe=_Driver().subscribe,
@@ -195,6 +200,7 @@ def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=connector,
             subscribe=driver.subscribe,
@@ -227,6 +233,7 @@ def test_a_subscribe_that_fails_in_start_closes_the_socket_it_opened() -> None:
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=connector,
             subscribe=refuse,
@@ -262,6 +269,7 @@ def test_a_run_without_a_start_refuses_rather_than_opening_its_own_socket() -> N
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=clock,
             connect=connector,
             subscribe=_Driver().subscribe,
@@ -313,6 +321,7 @@ def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
 
     session = WsSession(
         config=CONFIG,
+        name="test",
         clock=clock,
         connect=connector,
         subscribe=subscribe,
@@ -352,6 +361,7 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=connector,
             subscribe=subscribe,
@@ -360,6 +370,175 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
         await session.start()
         await asyncio.wait_for(session.run(), timeout=2)
 
-    with pytest.raises(RuntimeError, match="cannot represent"):
+    # Wrapped, because the consumer shares a TaskGroup with the ping. The
+    # runner unwraps it (#338). Only the consumer's error, not the ping's cancel.
+    with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="cannot represent")):
         asyncio.run(main())
     assert len(connector.asked) == 1
+
+
+_NS = 1_000_000_000
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Yield to the loop until ``condition`` holds, failing rather than hanging."""
+    for _ in range(1000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
+
+
+async def _let_the_loop_run() -> None:
+    """Give every ready task a chance to act, for asserting that one did not."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+def _pings(connection: FakeWsConnection) -> list[object]:
+    return [json.loads(sent) for sent in connection.sent if sent != "subscribe"]
+
+
+def test_a_quiet_socket_is_pinged_every_30_seconds_so_the_venue_keeps_it_open() -> None:
+    """Hyperliquid closes a socket it has had nothing to send on for 60 s (#672).
+
+    The funding socket hears from the venue only on the hour. Without a ping it
+    was dropped and resubscribed about once a minute. Every resubscribe replayed
+    the whole payment history onto the bus.
+    """
+    connection = FakeWsConnection([])
+    clock = RecordingClock()
+
+    async def main() -> None:
+        driver = _Driver()
+        session = WsSession(
+            config=CONFIG,
+            name="test",
+            clock=clock,
+            connect=FakeConnector([connection]),
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        running = asyncio.create_task(session.run())
+        await connection.drained.wait()
+
+        clock.advance_to(29 * _NS)
+        await _let_the_loop_run()
+        assert _pings(connection) == []
+
+        clock.advance_to(30 * _NS)
+        await _until(lambda: len(_pings(connection)) == 1)
+        clock.advance_to(60 * _NS)
+        await _until(lambda: len(_pings(connection)) == 2)
+
+        await session.stop()
+        await asyncio.wait_for(running, timeout=2)
+
+    asyncio.run(main())
+    assert _pings(connection) == [{"method": "ping"}, {"method": "ping"}]
+
+
+class _PingFails(FakeWsConnection):
+    """An idle socket that takes the subscribe and then refuses every ping."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__([])
+        self.ping_failed = asyncio.Event()
+        self._error = error
+
+    async def send(self, message: str) -> None:
+        if message == "subscribe":
+            await super().send(message)
+            return
+        self.ping_failed.set()
+        raise self._error
+
+
+def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -> None:
+    """Fail the first ping, then let the venue drop the socket."""
+    clock = RecordingClock()
+
+    async def main() -> None:
+        driver = _Driver()
+        session = WsSession(
+            config=CONFIG,
+            name="test",
+            clock=clock,
+            connect=FakeConnector([connection, spare]),
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        running = asyncio.create_task(session.run())
+        await connection.drained.wait()
+        clock.advance_to(30 * _NS)
+        await connection.ping_failed.wait()
+        await connection.close()
+        try:
+            await spare.drained.wait()
+        finally:
+            await session.stop()
+            await asyncio.wait_for(running, timeout=2)
+
+    asyncio.run(asyncio.wait_for(main(), timeout=2))
+
+
+def test_a_ping_that_fails_for_an_unexpected_reason_faults_the_run_at_once() -> None:
+    """A ping failure that is not a dead socket is a bug, and it must reach the
+    runner the way a consumer's error does (ADR-0024). Swallowed, it would
+    leave the socket unpinged with nothing in the log to say why.
+
+    Nobody closes the socket here. The fault must not wait for the venue to
+    drop the socket the failed ping left unpinged."""
+    connection = _PingFails(RuntimeError("a bug in the ping"))
+    connector = FakeConnector([connection])
+    clock = RecordingClock()
+
+    async def main() -> None:
+        driver = _Driver()
+        session = WsSession(
+            config=CONFIG,
+            name="test",
+            clock=clock,
+            connect=connector,
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        running = asyncio.create_task(session.run())
+        await connection.drained.wait()
+        clock.advance_to(30 * _NS)
+        await asyncio.wait_for(running, timeout=2)
+
+    with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="a bug in the ping")):
+        asyncio.run(main())
+    assert len(connector.asked) == 1, "a fault, not a reconnect"
+
+
+def test_a_ping_into_a_dead_socket_reconnects_rather_than_faulting() -> None:
+    """A socket can die between two reads, so a ping can be the first thing to
+    find out. That is the venue hanging up, which the session already answers
+    with a reconnect. Faulting the engine for it would turn every dropped socket
+    into a stopped engine."""
+    connection = _PingFails(ConnectionError("socket closed"))
+    spare = FakeWsConnection(["frame-after-reconnect"])
+
+    _run_until_the_ping_fails(connection, spare)
+
+    assert spare.sent == ["subscribe"]
+
+
+def test_a_venue_hangup_logs_a_warning_that_names_the_subscription() -> None:
+    """An operator has to be able to see a socket dropping (#672). The funding
+    socket was dropped about once a minute and the log said nothing.
+
+    A stop ends the last connection too, and logs nothing: only one record."""
+    dropped = FakeWsConnection(["frame-1"], drop_when_drained=True)
+
+    with structlog.testing.capture_logs() as logs:
+        _drive([dropped, FakeWsConnection(["frame-2"])], until_frames=2)
+
+    assert [log for log in logs if log["event"] == "venue.socket_dropped"] == [
+        {"event": "venue.socket_dropped", "subscription": "test", "log_level": "warning"}
+    ]

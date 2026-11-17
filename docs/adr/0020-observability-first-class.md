@@ -74,6 +74,11 @@ engine keeps running but an operator must act. `guard.kill_switch_restored` is t
 **(Extended by [#656](https://github.com/MarcosACH/tickwright/issues/656):**
 `reconcile.external_order` is the second event in `WARNINGS` (ADR-0063). The engine never cancels
 an external order, so only an operator can act on it.**)**
+**(Extended by [#672](https://github.com/MarcosACH/tickwright/issues/672):**
+An event also goes in `WARNINGS` when the engine heals it by itself but a repeat needs an
+operator. Each one must be visible, or nobody can see the pattern. `venue.socket_dropped` is the
+third. One dropped socket needs nothing. A drop about once a minute means the socket is not kept
+open.**)**
 
 ## Coverage requirement
 

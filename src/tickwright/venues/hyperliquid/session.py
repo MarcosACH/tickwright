@@ -24,12 +24,31 @@ funding ingest's refusal of a payment it cannot represent has to reach it
 whose contract had changed.
 """
 
+import asyncio
+import json
 from collections.abc import Awaitable, Callable
 
 from tickwright.domain import Backoff, Clock
+from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
 from .transport import Connect, WsConnection
+
+PING_INTERVAL_SECONDS = 30
+"""How often an open socket sends the venue a ping.
+
+Hyperliquid closes a socket it has had nothing to send on for 60 s. Each ping
+makes it answer with a ``pong``, so the socket never goes quiet. The funding
+socket hears from the venue only on the hour, so without a ping it was dropped
+and resubscribed about once a minute (#672). Source:
+https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/timeouts-and-heartbeats
+
+Half the venue's limit leaves room for a late wake-up. A fixed value, not
+config: the limit is the venue's, so no operator has a reason to move it.
+"""
+
+_PING = json.dumps({"method": "ping"})
+_NS_PER_SECOND = 1_000_000_000
 
 type Subscribe = Callable[[WsConnection], Awaitable[None]]
 """Sends this subscription's ``subscribe`` messages on a freshly-opened socket.
@@ -46,17 +65,22 @@ whether or not a ``stop()`` is behind it, which is the session's to tell apart."
 
 class WsSession:
     """A subscription that survives its sockets: connect, subscribe, consume,
-    reconnect, until stopped."""
+    reconnect, until stopped.
+
+    ``name`` says which subscription this is in the log, so an operator can
+    tell which socket dropped."""
 
     def __init__(
         self,
         *,
+        name: str,
         config: HyperliquidConfig,
         clock: Clock,
         connect: Connect,
         subscribe: Subscribe,
         consume: Consume,
     ) -> None:
+        self._name = name
         self._config = config
         self._clock = clock
         self._connect = connect
@@ -137,12 +161,47 @@ class WsSession:
                 self._connection = connection
                 await self._subscribe(connection)
             backoff.reset()
-            await self._consume(connection)
+            await self._hold(connection)
             # The consumer is done: a stop() is final; anything else was the
             # venue hanging up, so back off once and go resubscribe.
             if self._stopping:
                 return
+            named_event(NamedEvent.VENUE_SOCKET_DROPPED, subscription=self._name)
             await backoff.sleep_on(self._clock)
+
+    async def _hold(self, connection: WsConnection) -> None:
+        """Consume one connection and ping it, until the consumer is done.
+
+        Returns when the consumer returns. Whichever of the two fails first
+        ends both, and the error leaves wrapped in an ``ExceptionGroup``. The
+        runner unwraps it (#338). A ping bug therefore faults the run at once.
+        It does not wait for the venue to drop the socket it left unpinged.
+        """
+        async with asyncio.TaskGroup() as group:
+            heartbeat = group.create_task(self._ping_until_cancelled(connection))
+            try:
+                await self._consume(connection)
+            finally:
+                heartbeat.cancel()
+
+    async def _ping_until_cancelled(self, connection: WsConnection) -> None:
+        """Ping the socket every ``PING_INTERVAL_SECONDS`` while it is consumed.
+
+        Waits with ``sleep_until`` rather than ``sleep``. Under ``ManualClock``
+        a ``sleep`` advances time itself, so this loop would spin and drag
+        virtual time forward on its own.
+
+        A ``ConnectionError`` means the socket died between two reads. That is
+        the venue hanging up, and the consumer's ended iteration is what
+        answers it with a reconnect. So pinging stops and nothing is raised.
+        """
+        while True:
+            wake_ns = self._clock.timestamp_ns() + PING_INTERVAL_SECONDS * _NS_PER_SECOND
+            await self._clock.sleep_until(wake_ns)
+            try:
+                await connection.send(_PING)
+            except ConnectionError:
+                return
 
     async def stop(self) -> None:
         """End the run: refuse further reconnects and close the live socket.
