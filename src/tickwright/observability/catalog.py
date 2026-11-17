@@ -388,7 +388,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
 #
 # ``venue.socket_dropped`` is a warning even though the engine reconnects by
 # itself. One drop needs nothing. A drop every minute does, and the operator
-# can only see that pattern if each drop is visible (#672).
+# can only see that pattern if each drop is visible (#672, ADR-0020).
 WARNINGS: frozenset[NamedEvent] = frozenset(
     {
         NamedEvent.GUARD_KILL_SWITCH_RESTORED,
