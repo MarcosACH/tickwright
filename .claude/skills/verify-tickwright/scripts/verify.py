@@ -715,6 +715,8 @@ ALARM_EVENTS = (
     "exchange.request_failed",
     "exchange.action_rejected",
     "exchange.order_rejected",
+    # One drop is normal. A drop about once a minute is the #672 regression.
+    "venue.socket_dropped",
 )
 
 
