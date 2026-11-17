@@ -343,6 +343,13 @@ unchanged, since the connect spends from the first window rather than opening on
 Each attempt is still bounded by `WS_OPEN_TIMEOUT_SECONDS`, so a handshake that hangs becomes the
 `OSError` the retry paces rather than a wedged boot.**)**
 
+**(`WsSession` also answers a dead socket during a reconnect subscribe
+([#674](https://github.com/MarcosACH/tickwright/issues/674)).** The blocks above say the session
+answers only a failed connect. The venue can also close a new socket before the subscribe is sent.
+The send then raises `ConnectionError`, and that used to fault the engine. Now the session closes
+the socket, logs the drop, backs off, and reconnects. Any other error from `subscribe` still
+reaches the runner's `TaskGroup`.**)**
+
 ---
 
 ### strategies (`strategies/single_shot.py`)

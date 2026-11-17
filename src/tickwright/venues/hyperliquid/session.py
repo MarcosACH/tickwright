@@ -16,8 +16,9 @@ takes: a ``subscribe`` run on every connection (which is what makes a reconnect
 resume rather than idle) and a ``consume`` that returns when the connection
 dies. Everything else is this module's, once.
 
-**Only a failed connect is answered here.** Anything raised by ``subscribe`` or
-``consume`` leaves the session untouched, because both adapters are supervised
+**Only a dead socket is answered here.** That is a failed connect, or a
+``ConnectionError`` from a reconnect's ``subscribe`` (#674). Anything else raised by
+``subscribe`` or ``consume`` leaves the session untouched, because both adapters are supervised
 in the runner's ``TaskGroup`` (ADR-0024) and that is their fault channel: the
 funding ingest's refusal of a payment it cannot represent has to reach it
 (ADR-0037), and a session that caught it would reconnect forever against a venue
@@ -159,7 +160,18 @@ class WsSession:
                 # Held for stop(), which ends run() by closing the socket the
                 # consumer is blocked on — the one thing that can unblock a reader.
                 self._connection = connection
-                await self._subscribe(connection)
+                try:
+                    await self._subscribe(connection)
+                except ConnectionError:
+                    # The venue closed the socket before the subscribe went out
+                    # (#674). That is a hangup, so it is paced like one. The
+                    # pacing is not reset, because no socket was subscribed.
+                    await connection.close()
+                    if self._stopping:
+                        return
+                    named_event(NamedEvent.VENUE_SOCKET_DROPPED, subscription=self._name)
+                    await backoff.sleep_on(self._clock)
+                    continue
             backoff.reset()
             await self._hold(connection)
             # The consumer is done: a stop() is final; anything else was the

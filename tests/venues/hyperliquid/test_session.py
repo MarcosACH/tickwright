@@ -72,6 +72,10 @@ def _drive(
         await session.start()
         running = asyncio.create_task(session.run())
         while len(driver.consumed) < until_frames:
+            if running.done():
+                # Raise the run's fault here, rather than hang for frames.
+                running.result()
+                raise AssertionError("run() returned before the frames arrived")
             await asyncio.sleep(0)
         await session.stop()
         await asyncio.wait_for(running, timeout=2)
@@ -375,6 +379,38 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
     with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="cannot represent")):
         asyncio.run(main())
     assert len(connector.asked) == 1
+
+
+class _SubscribeFails(FakeWsConnection):
+    """A socket that raises ``error`` on the subscribe send."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__([])
+        self._error = error
+
+    async def send(self, message: str) -> None:
+        raise self._error
+
+
+def test_a_socket_dropped_during_a_reconnect_subscribe_reconnects_rather_than_faulting() -> None:
+    """The venue can close a socket before the reconnect subscribe is sent (#674).
+
+    That is a venue hangup like any other. Faulting on it stopped the engine.
+    """
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    dead = _SubscribeFails(ConnectionError("socket closed"))
+    third = FakeWsConnection(["frame-2"])
+
+    with structlog.testing.capture_logs() as logs:
+        driver, clock, _ = _drive([first, dead, third], until_frames=2)
+
+    assert driver.consumed == ["frame-1", "frame-2"]
+    assert driver.subscribed == [first, dead, third]
+    assert dead.closed, "the dead socket is released, not left open"
+    # The hangup, then the failed subscribe. No reset between them, because no
+    # socket was subscribed, so a venue that keeps doing this is paced.
+    assert clock.sleeps == [1.0, 2.0]
+    assert [log["event"] for log in logs].count("venue.socket_dropped") == 2
 
 
 _NS = 1_000_000_000
