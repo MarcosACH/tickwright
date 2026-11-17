@@ -436,6 +436,49 @@ def test_a_reconnect_subscribe_that_faults_closes_its_socket_first() -> None:
     assert broken.closed
 
 
+def test_a_stop_during_a_reconnect_subscribe_ends_the_run_without_a_drop() -> None:
+    """A stop closes the socket a reconnect subscribe is sending on (#674).
+
+    The send then raises ``ConnectionError``, the same error as a venue hangup.
+    It is a stop, so the run returns. It must not log a drop or wait a backoff.
+    """
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    second = FakeWsConnection([])
+    clock = RecordingClock()
+    connector = FakeConnector([first, second])
+
+    async def subscribe(connection: WsConnection) -> None:
+        if connection is second:
+            await session.stop()
+            # What the transport raises for a send on a socket stop() closed.
+            raise ConnectionError("socket closed")
+
+    async def consume(connection: WsConnection) -> None:
+        async for _ in connection:
+            pass
+
+    session = WsSession(
+        config=CONFIG,
+        name="test",
+        clock=clock,
+        connect=connector,
+        subscribe=subscribe,
+        consume=consume,
+    )
+
+    async def main() -> None:
+        await session.start()
+        await asyncio.wait_for(session.run(), timeout=2)
+
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(main())
+
+    assert second.closed
+    # Only the first socket's hangup. The stop adds no drop and no backoff.
+    assert [log["event"] for log in logs].count("venue.socket_dropped") == 1
+    assert clock.sleeps == [1.0]
+
+
 _NS = 1_000_000_000
 
 
