@@ -113,9 +113,14 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         (live,) = [r for r in reports if isinstance(r, OrderStatusReport)]
         assert live.status is OrderState.LIVE, f"expected a resting order, got {live!r}"
         assert live.cloid == cloid
+        assert live.venue_oid is not None, "a resting ack must carry the venue oid"
 
         # Reconcile-visible: the fetch path sees the resting order as venue truth.
-        view = await exchange.fetch_order(OrderRef(cloid=cloid, symbol=SYMBOL))
+        # Read by the acked oid, as the engine's reconcile does once a saga holds
+        # one. Once in 16 runs a read by cloid right after the ack found no
+        # record, and the engine never makes that read (#660).
+        ref = OrderRef(cloid=cloid, symbol=SYMBOL, venue_oid=live.venue_oid)
+        view = await exchange.fetch_order(ref)
         assert isinstance(view, VenueOrderView) and view.status is not None
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
@@ -129,7 +134,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert cancelled, "the venue-accepted cancel must report CANCELLED"
 
         # And the venue agrees: the order record itself reads canceled.
-        after = await exchange.fetch_order(OrderRef(cloid=cloid, symbol=SYMBOL))
+        after = await exchange.fetch_order(ref)
         assert isinstance(after, VenueOrderView) and after.status is not None
         assert after.status.status is OrderState.CANCELLED
 
