@@ -370,7 +370,9 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
         await session.start()
         await asyncio.wait_for(session.run(), timeout=2)
 
-    with pytest.raises(RuntimeError, match="cannot represent"):
+    # Wrapped, because the consumer shares a TaskGroup with the ping. The
+    # runner unwraps it (#338). Only the consumer's error, not the ping's cancel.
+    with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="cannot represent")):
         asyncio.run(main())
     assert len(connector.asked) == 1
 
@@ -454,7 +456,7 @@ class _PingFails(FakeWsConnection):
 
 
 def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -> None:
-    """Fail the first ping, then let the venue drop the socket nobody pinged."""
+    """Fail the first ping, then let the venue drop the socket."""
     clock = RecordingClock()
 
     async def main() -> None:
@@ -482,14 +484,36 @@ def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -
     asyncio.run(asyncio.wait_for(main(), timeout=2))
 
 
-def test_a_ping_that_fails_for_an_unexpected_reason_faults_the_run() -> None:
+def test_a_ping_that_fails_for_an_unexpected_reason_faults_the_run_at_once() -> None:
     """A ping failure that is not a dead socket is a bug, and it must reach the
     runner the way a consumer's error does (ADR-0024). Swallowed, it would
-    leave the socket unpinged with nothing in the log to say why."""
-    connection = _PingFails(RuntimeError("a bug in the ping"))
+    leave the socket unpinged with nothing in the log to say why.
 
-    with pytest.raises(RuntimeError, match="a bug in the ping"):
-        _run_until_the_ping_fails(connection, FakeWsConnection([]))
+    Nobody closes the socket here. The fault must not wait for the venue to
+    drop the socket the failed ping left unpinged."""
+    connection = _PingFails(RuntimeError("a bug in the ping"))
+    connector = FakeConnector([connection])
+    clock = RecordingClock()
+
+    async def main() -> None:
+        driver = _Driver()
+        session = WsSession(
+            config=CONFIG,
+            name="test",
+            clock=clock,
+            connect=connector,
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        running = asyncio.create_task(session.run())
+        await connection.drained.wait()
+        clock.advance_to(30 * _NS)
+        await asyncio.wait_for(running, timeout=2)
+
+    with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="a bug in the ping")):
+        asyncio.run(main())
+    assert len(connector.asked) == 1, "a fault, not a reconnect"
 
 
 def test_a_ping_into_a_dead_socket_reconnects_rather_than_faulting() -> None:

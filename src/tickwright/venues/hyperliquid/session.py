@@ -158,23 +158,28 @@ class WsSession:
                 self._connection = connection
                 await self._subscribe(connection)
             backoff.reset()
-            heartbeat = asyncio.create_task(self._ping_until_cancelled(connection))
-            try:
-                await self._consume(connection)
-            finally:
-                heartbeat.cancel()
-            # A ping that failed for any reason the heartbeat does not expect
-            # is a bug. Raise it here, so it faults the run like a consumer
-            # error does, rather than vanish with the task.
-            await asyncio.wait([heartbeat])
-            if not heartbeat.cancelled() and (error := heartbeat.exception()) is not None:
-                raise error
+            await self._hold(connection)
             # The consumer is done: a stop() is final; anything else was the
             # venue hanging up, so back off once and go resubscribe.
             if self._stopping:
                 return
             named_event(NamedEvent.VENUE_SOCKET_DROPPED, subscription=self._name)
             await backoff.sleep_on(self._clock)
+
+    async def _hold(self, connection: WsConnection) -> None:
+        """Consume one connection and ping it, until the consumer is done.
+
+        Returns when the consumer returns. Whichever of the two fails first
+        ends both, and the error leaves wrapped in an ``ExceptionGroup``. The
+        runner unwraps it (#338). A ping bug therefore faults the run at once.
+        It does not wait for the venue to drop the socket it left unpinged.
+        """
+        async with asyncio.TaskGroup() as group:
+            heartbeat = group.create_task(self._ping_until_cancelled(connection))
+            try:
+                await self._consume(connection)
+            finally:
+                heartbeat.cancel()
 
     async def _ping_until_cancelled(self, connection: WsConnection) -> None:
         """Ping the socket every ``PING_INTERVAL_SECONDS`` while it is consumed.

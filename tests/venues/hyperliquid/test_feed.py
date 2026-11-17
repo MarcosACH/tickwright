@@ -267,12 +267,11 @@ def test_a_publish_that_raises_tears_the_socket_reader_down_with_it() -> None:
             connect=connection.connect,
         )
         await feed.start()
-        with pytest.raises(ExceptionGroup) as raised:
-            await asyncio.wait_for(feed.run(), timeout=2)
-
         # The subscriber's fault alone: the reader's cancellation is the group's
-        # own doing and is not reported as a second failure.
-        assert [type(error) for error in raised.value.exceptions] == [Boom]
+        # own doing and is not reported as a second failure. Flattened, because
+        # the session's own TaskGroup wraps the feed's group once more.
+        with pytest.RaisesGroup(Boom, flatten_subgroups=True):
+            await asyncio.wait_for(feed.run(), timeout=2)
         return connection
 
     connection = asyncio.run(main())

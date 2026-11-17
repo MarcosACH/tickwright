@@ -357,9 +357,11 @@ def _ingest_refusing(frames: list[str]) -> str:
         await exchange.start()
         await asyncio.wait_for(exchange.run(), timeout=2)
 
-    with pytest.raises(VenueFactUnsupported) as raised:
+    # Wrapped once, by the TaskGroup the session holds each socket in. The
+    # runner unwraps it (#338), so the refusal itself is what it reports.
+    with pytest.RaisesGroup(VenueFactUnsupported) as raised:
         asyncio.run(main())
-    return str(raised.value)
+    return str(raised.value.exceptions[0])
 
 
 @pytest.mark.parametrize(
