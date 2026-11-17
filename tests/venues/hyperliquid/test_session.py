@@ -413,6 +413,17 @@ def test_a_socket_dropped_during_a_reconnect_subscribe_reconnects_rather_than_fa
     assert [log["event"] for log in logs].count("venue.socket_dropped") == 2
 
 
+def test_a_reconnect_subscribe_that_fails_for_an_unexpected_reason_faults_the_run() -> None:
+    """Only a dead socket is a hangup. Any other subscribe failure is a bug, and
+    it must reach the runner (ADR-0024). Answered with a reconnect, it would
+    fail the same way on every new socket, with the engine still RUNNING."""
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    broken = _SubscribeFails(RuntimeError("a bug in the subscribe"))
+
+    with pytest.raises(RuntimeError, match="a bug in the subscribe"):
+        _drive([first, broken], until_frames=2)
+
+
 _NS = 1_000_000_000
 
 
