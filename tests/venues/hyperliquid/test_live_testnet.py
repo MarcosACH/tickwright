@@ -13,6 +13,7 @@ LIMIT → reconcile-visible via ``fetch_order`` → cancel by cloid →
 
 import asyncio
 import os
+import time
 from decimal import Decimal
 
 import pytest
@@ -32,6 +33,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
     derive_cloid,
     quantize_price,
     quantize_size,
@@ -117,10 +119,11 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
 
         # Reconcile-visible: the fetch path sees the resting order as venue truth.
         # Read by the acked oid, as the engine's reconcile does once a saga holds
-        # one. Once in 16 runs a read by cloid right after the ack found no
-        # record, and the engine never makes that read (#660).
+        # one. Testnet can still answer "no record" for up to about 2 s after the
+        # ack, by cloid or by oid. The engine's reconcile windows absorb that lag,
+        # so the test waits it out too (#660).
         ref = OrderRef(cloid=cloid, symbol=SYMBOL, venue_oid=live.venue_oid)
-        view = await exchange.fetch_order(ref)
+        view = await _read_once_recorded(exchange, ref)
         assert isinstance(view, VenueOrderView) and view.status is not None
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
@@ -139,6 +142,29 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert after.status.status is OrderState.CANCELLED
 
     asyncio.run(main())
+
+
+# About 5 times the longest lag a 100-round probe saw (1.76 s, #660).
+_READ_LAG_WINDOW_SECONDS = 10.0
+_READ_LAG_POLL_SECONDS = 0.5
+
+
+async def _read_once_recorded(
+    exchange: HyperliquidExchange, ref: OrderRef
+) -> VenueOrderView | VenueReadFailure:
+    """Read ``ref`` until the venue has a record of it, or the window ends.
+
+    Only "no record" is retried. A failed read returns at once, so an outage
+    still fails the test rather than hiding behind the wait.
+    """
+    deadline = time.monotonic() + _READ_LAG_WINDOW_SECONDS
+    while True:
+        view = await exchange.fetch_order(ref)
+        if not isinstance(view, VenueOrderView) or view.status is not None:
+            return view
+        if time.monotonic() >= deadline:
+            return view
+        await asyncio.sleep(_READ_LAG_POLL_SECONDS)
 
 
 async def _venue_leverage(config: HyperliquidConfig, *, address: str) -> LeverageSpec:
