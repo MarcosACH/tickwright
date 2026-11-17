@@ -133,6 +133,17 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
 
+        # A saga that crashed before the ack holds no oid, so recovery reads by
+        # cloid. Only a live read proves the venue takes a cloid as the key.
+        # This read passes no created_ts_ns, so the age check keeps the record.
+        by_cloid = await _read_once_recorded(exchange, OrderRef(cloid=cloid, symbol=SYMBOL))
+        assert isinstance(by_cloid, VenueOrderView), f"the read by cloid failed: {by_cloid!r}"
+        assert by_cloid.status is not None, (
+            f"the venue still had no record by cloid {_READ_LAG_WINDOW_SECONDS}s after a LIVE ack"
+        )
+        assert by_cloid.status.status is OrderState.LIVE
+        assert by_cloid.status.venue_oid == live.venue_oid
+
         await exchange.cancel([OrderRef(cloid=cloid, symbol=SYMBOL)])
         cancelled = [
             r
