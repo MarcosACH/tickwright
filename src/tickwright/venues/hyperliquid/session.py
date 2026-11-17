@@ -175,11 +175,18 @@ class WsSession:
         Waits with ``sleep_until`` rather than ``sleep``. Under ``ManualClock``
         a ``sleep`` advances time itself, so this loop would spin and drag
         virtual time forward on its own.
+
+        A ``ConnectionError`` means the socket died between two reads. That is
+        the venue hanging up, and the consumer's ended iteration is what
+        answers it with a reconnect. So pinging stops and nothing is raised.
         """
         while True:
             wake_ns = self._clock.timestamp_ns() + PING_INTERVAL_SECONDS * _NS_PER_SECOND
             await self._clock.sleep_until(wake_ns)
-            await connection.send(_PING)
+            try:
+                await connection.send(_PING)
+            except ConnectionError:
+                return
 
     async def stop(self) -> None:
         """End the run: refuse further reconnects and close the live socket.

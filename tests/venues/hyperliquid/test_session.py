@@ -480,3 +480,16 @@ def test_a_ping_that_fails_for_an_unexpected_reason_faults_the_run() -> None:
 
     with pytest.raises(RuntimeError, match="a bug in the ping"):
         _run_until_the_ping_fails(connection, FakeWsConnection([]))
+
+
+def test_a_ping_into_a_dead_socket_reconnects_rather_than_faulting() -> None:
+    """A socket can die between two reads, so a ping can be the first thing to
+    find out. That is the venue hanging up, which the session already answers
+    with a reconnect. Faulting the engine for it would turn every dropped socket
+    into a stopped engine."""
+    connection = _PingFails(ConnectionError("socket closed"))
+    spare = FakeWsConnection(["frame-after-reconnect"])
+
+    _run_until_the_ping_fails(connection, spare)
+
+    assert spare.sent == ["subscribe"]
