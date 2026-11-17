@@ -424,6 +424,18 @@ def test_a_reconnect_subscribe_that_fails_for_an_unexpected_reason_faults_the_ru
         _drive([first, broken], until_frames=2)
 
 
+def test_a_reconnect_subscribe_that_faults_closes_its_socket_first() -> None:
+    """A socket that never subscribed is closed by the session, at boot and on a
+    reconnect alike. The fault does not leave it for the teardown to find."""
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    broken = _SubscribeFails(RuntimeError("a bug in the subscribe"))
+
+    with pytest.raises(RuntimeError):
+        _drive([first, broken], until_frames=2)
+
+    assert broken.closed
+
+
 _NS = 1_000_000_000
 
 

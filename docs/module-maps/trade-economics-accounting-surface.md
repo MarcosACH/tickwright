@@ -348,7 +348,8 @@ Each attempt is still bounded by `WS_OPEN_TIMEOUT_SECONDS`, so a handshake that 
 answers only a failed connect. The venue can also close a new socket before the subscribe is sent.
 The send then raises `ConnectionError`, and that used to fault the engine. Now the session closes
 the socket, logs the drop, backs off, and reconnects. Any other error from `subscribe` still
-reaches the runner's `TaskGroup`.**)**
+reaches the runner's `TaskGroup`. A socket that failed to subscribe is closed first, at boot and on
+a reconnect alike. `start()` and `run()` share one step for this, so the rule lives in one place.**)**
 
 ---
 
