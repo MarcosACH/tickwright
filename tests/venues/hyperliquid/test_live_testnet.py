@@ -13,6 +13,7 @@ LIMIT → reconcile-visible via ``fetch_order`` → cancel by cloid →
 
 import asyncio
 import os
+import time
 from decimal import Decimal
 
 import pytest
@@ -32,6 +33,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
     derive_cloid,
     quantize_price,
     quantize_size,
@@ -113,12 +115,34 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         (live,) = [r for r in reports if isinstance(r, OrderStatusReport)]
         assert live.status is OrderState.LIVE, f"expected a resting order, got {live!r}"
         assert live.cloid == cloid
+        assert live.venue_oid is not None, "a resting ack must carry the venue oid"
 
         # Reconcile-visible: the fetch path sees the resting order as venue truth.
-        view = await exchange.fetch_order(OrderRef(cloid=cloid, symbol=SYMBOL))
-        assert isinstance(view, VenueOrderView) and view.status is not None
+        # Read by the acked oid, as the engine's reconcile does once a saga holds
+        # one. Testnet can still answer "no record" for up to about 2 s after the
+        # ack, by cloid or by oid. The engine's reconcile windows absorb that lag,
+        # so the test waits it out too (#660).
+        ref = OrderRef(cloid=cloid, symbol=SYMBOL, venue_oid=live.venue_oid)
+        view = await _read_once_recorded(exchange, ref)
+        assert isinstance(view, VenueOrderView), f"the read failed: {view!r}"
+        # By oid, the adapter reads "no record" only from the venue's unknownOid.
+        # The earlier-life age check runs only on a read by cloid (#660).
+        assert view.status is not None, (
+            f"the venue still answered unknownOid {_READ_LAG_WINDOW_SECONDS}s after a LIVE ack"
+        )
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
+
+        # A saga that crashed before the ack holds no oid, so recovery reads by
+        # cloid. Only a live read proves the venue takes a cloid as the key.
+        # This read passes no created_ts_ns, so the age check keeps the record.
+        by_cloid = await _read_once_recorded(exchange, OrderRef(cloid=cloid, symbol=SYMBOL))
+        assert isinstance(by_cloid, VenueOrderView), f"the read by cloid failed: {by_cloid!r}"
+        assert by_cloid.status is not None, (
+            f"the venue still had no record by cloid {_READ_LAG_WINDOW_SECONDS}s after a LIVE ack"
+        )
+        assert by_cloid.status.status is OrderState.LIVE
+        assert by_cloid.status.venue_oid == live.venue_oid
 
         await exchange.cancel([OrderRef(cloid=cloid, symbol=SYMBOL)])
         cancelled = [
@@ -129,11 +153,34 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert cancelled, "the venue-accepted cancel must report CANCELLED"
 
         # And the venue agrees: the order record itself reads canceled.
-        after = await exchange.fetch_order(OrderRef(cloid=cloid, symbol=SYMBOL))
+        after = await exchange.fetch_order(ref)
         assert isinstance(after, VenueOrderView) and after.status is not None
         assert after.status.status is OrderState.CANCELLED
 
     asyncio.run(main())
+
+
+# About 5 times the longest lag a 100-round probe saw (1.76 s, #660).
+_READ_LAG_WINDOW_SECONDS = 10.0
+_READ_LAG_POLL_SECONDS = 0.5
+
+
+async def _read_once_recorded(
+    exchange: HyperliquidExchange, ref: OrderRef
+) -> VenueOrderView | VenueReadFailure:
+    """Read ``ref`` until the venue has a record of it, or the window ends.
+
+    Only "no record" is retried. A failed read returns at once, so an outage
+    still fails the test rather than hiding behind the wait.
+    """
+    deadline = time.monotonic() + _READ_LAG_WINDOW_SECONDS
+    while True:
+        view = await exchange.fetch_order(ref)
+        if not isinstance(view, VenueOrderView) or view.status is not None:
+            return view
+        if time.monotonic() >= deadline:
+            return view
+        await asyncio.sleep(_READ_LAG_POLL_SECONDS)
 
 
 async def _venue_leverage(config: HyperliquidConfig, *, address: str) -> LeverageSpec:
