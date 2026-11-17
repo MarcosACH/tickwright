@@ -93,6 +93,23 @@ def test_close_ends_a_reader_parked_on_the_socket() -> None:
     assert asyncio.run(scenario()) == []
 
 
+def test_a_send_on_a_socket_the_peer_dropped_is_a_connection_error() -> None:
+    async def drop_the_socket(peer: ServerConnection) -> None:
+        peer.transport.abort()
+
+    async def scenario() -> None:
+        async with _peer(drop_the_socket) as url:
+            connection = await open_websocket(url)
+            await _drain(connection)  # iteration ends once the drop is seen
+            await connection.send('{"method": "ping"}')
+
+    # The session's ping stops on a ConnectionError and leaves the reconnect to
+    # the reader (#672). Any other error from a send faults the run, so a dead
+    # socket has to surface as this one type.
+    with pytest.raises(ConnectionError):
+        asyncio.run(scenario())
+
+
 def test_a_denied_handshake_is_an_os_error_for_the_backoff_loop() -> None:
     def deny(peer: ServerConnection, request: Request) -> Response:
         return peer.respond(HTTPStatus.FORBIDDEN, "denied")
