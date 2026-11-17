@@ -124,14 +124,12 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         # so the test waits it out too (#660).
         ref = OrderRef(cloid=cloid, symbol=SYMBOL, venue_oid=live.venue_oid)
         view = await _read_once_recorded(exchange, ref)
-        if isinstance(view, VenueOrderView) and view.status is None:
-            # The venue's own answer tells a longer lag from a lost order. The
-            # adapter folds both into "no record", so read it raw (#660).
-            raw = await _raw_order_status(config, ref)
-            pytest.fail(
-                f"no record {_READ_LAG_WINDOW_SECONDS}s after a LIVE ack. Raw orderStatus: {raw!r}"
-            )
-        assert isinstance(view, VenueOrderView) and view.status is not None
+        assert isinstance(view, VenueOrderView), f"the read failed: {view!r}"
+        # By oid, the adapter reads "no record" only from the venue's unknownOid.
+        # The earlier-life age check runs only on a read by cloid (#660).
+        assert view.status is not None, (
+            f"the venue still answered unknownOid {_READ_LAG_WINDOW_SECONDS}s after a LIVE ack"
+        )
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
 
@@ -172,18 +170,6 @@ async def _read_once_recorded(
         if time.monotonic() >= deadline:
             return view
         await asyncio.sleep(_READ_LAG_POLL_SECONDS)
-
-
-async def _raw_order_status(config: HyperliquidConfig, ref: OrderRef) -> object:
-    """The venue's ``orderStatus`` body for ``ref``, unparsed. It reads by the
-    oid when ``ref`` has one, else by the cloid, as the adapter does."""
-    from eth_account import Account
-
-    address = config.account_address or str(Account.from_key(os.environ[SIGNING_KEY_ENV]).address)
-    key = ref.cloid if ref.venue_oid is None else int(ref.venue_oid)
-    return await post_json(
-        f"{config.api_url}/info", {"type": "orderStatus", "user": address, "oid": key}
-    )
 
 
 async def _venue_leverage(config: HyperliquidConfig, *, address: str) -> LeverageSpec:
