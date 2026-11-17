@@ -29,6 +29,7 @@ import json
 from collections.abc import Awaitable, Callable
 
 from tickwright.domain import Backoff, Clock
+from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
 from .transport import Connect, WsConnection
@@ -61,17 +62,22 @@ whether or not a ``stop()`` is behind it, which is the session's to tell apart."
 
 class WsSession:
     """A subscription that survives its sockets: connect, subscribe, consume,
-    reconnect, until stopped."""
+    reconnect, until stopped.
+
+    ``name`` says which subscription this is in the log, so an operator can
+    tell which socket dropped."""
 
     def __init__(
         self,
         *,
+        name: str,
         config: HyperliquidConfig,
         clock: Clock,
         connect: Connect,
         subscribe: Subscribe,
         consume: Consume,
     ) -> None:
+        self._name = name
         self._config = config
         self._clock = clock
         self._connect = connect
@@ -167,6 +173,7 @@ class WsSession:
             # venue hanging up, so back off once and go resubscribe.
             if self._stopping:
                 return
+            named_event(NamedEvent.VENUE_SOCKET_DROPPED, subscription=self._name)
             await backoff.sleep_on(self._clock)
 
     async def _ping_until_cancelled(self, connection: WsConnection) -> None:

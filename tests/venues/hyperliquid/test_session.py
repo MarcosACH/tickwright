@@ -16,6 +16,7 @@ import json
 from collections.abc import Callable
 
 import pytest
+import structlog.testing
 from hyperliquid_fakes import FakeConnector, FakeWsConnection, RecordingClock
 
 from tickwright.venues.hyperliquid.config import HyperliquidConfig
@@ -62,6 +63,7 @@ def _drive(
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=clock,
             connect=connector,
             subscribe=driver.subscribe,
@@ -163,6 +165,7 @@ def test_stopping_a_session_that_never_connected_is_safe() -> None:
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=FakeConnector([]),
             subscribe=_Driver().subscribe,
@@ -197,6 +200,7 @@ def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=connector,
             subscribe=driver.subscribe,
@@ -229,6 +233,7 @@ def test_a_subscribe_that_fails_in_start_closes_the_socket_it_opened() -> None:
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=connector,
             subscribe=refuse,
@@ -264,6 +269,7 @@ def test_a_run_without_a_start_refuses_rather_than_opening_its_own_socket() -> N
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=clock,
             connect=connector,
             subscribe=_Driver().subscribe,
@@ -315,6 +321,7 @@ def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
 
     session = WsSession(
         config=CONFIG,
+        name="test",
         clock=clock,
         connect=connector,
         subscribe=subscribe,
@@ -354,6 +361,7 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=RecordingClock(),
             connect=connector,
             subscribe=subscribe,
@@ -403,6 +411,7 @@ def test_a_quiet_socket_is_pinged_every_30_seconds_so_the_venue_keeps_it_open() 
         driver = _Driver()
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=clock,
             connect=FakeConnector([connection]),
             subscribe=driver.subscribe,
@@ -452,6 +461,7 @@ def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -
         driver = _Driver()
         session = WsSession(
             config=CONFIG,
+            name="test",
             clock=clock,
             connect=FakeConnector([connection, spare]),
             subscribe=driver.subscribe,
@@ -493,3 +503,18 @@ def test_a_ping_into_a_dead_socket_reconnects_rather_than_faulting() -> None:
     _run_until_the_ping_fails(connection, spare)
 
     assert spare.sent == ["subscribe"]
+
+
+def test_a_venue_hangup_logs_a_warning_that_names_the_subscription() -> None:
+    """An operator has to be able to see a socket dropping (#672). The funding
+    socket was dropped about once a minute and the log said nothing.
+
+    A stop ends the last connection too, and logs nothing: only one record."""
+    dropped = FakeWsConnection(["frame-1"], drop_when_drained=True)
+
+    with structlog.testing.capture_logs() as logs:
+        _drive([dropped, FakeWsConnection(["frame-2"])], until_frames=2)
+
+    assert [log for log in logs if log["event"] == "venue.socket_dropped"] == [
+        {"event": "venue.socket_dropped", "subscription": "test", "log_level": "warning"}
+    ]

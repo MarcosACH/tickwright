@@ -57,6 +57,10 @@ class NamedEvent(StrEnum):
     FEED_LAGGED = "feed.lagged"
     FEED_FRAME_DROPPED = "feed.frame_dropped"
 
+    # A venue socket ended without a stop, and the session will reconnect
+    # (``WsSession``, #672). ``subscription`` says which socket it was.
+    VENUE_SOCKET_DROPPED = "venue.socket_dropped"
+
     # Engine lifecycle (``Engine`` runner, ADR-0024).
     ENGINE_BARRIER_CLEARED = "engine.barrier_cleared"
     ENGINE_FEED_STARTED = "engine.feed_started"
@@ -315,6 +319,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ACCOUNT_MATERIALISED: frozenset({"account_id", "genesis_collateral"}),
     NamedEvent.FEED_LAGGED: frozenset({"symbol", "event_id", "stream"}),
     NamedEvent.FEED_FRAME_DROPPED: frozenset({"frame", "row"}),
+    NamedEvent.VENUE_SOCKET_DROPPED: frozenset({"subscription"}),
     NamedEvent.ENGINE_BARRIER_CLEARED: frozenset(),
     NamedEvent.ENGINE_FEED_STARTED: frozenset(),
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
@@ -380,6 +385,14 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
 #
 # ``reconcile.stray_cancelled`` stays ``info``, even with unbooked fills. The
 # engine cancels the order itself, and ledger reconciliation books the position.
+#
+# ``venue.socket_dropped`` is a warning even though the engine reconnects by
+# itself. One drop needs nothing. A drop every minute does, and the operator
+# can only see that pattern if each drop is visible (#672).
 WARNINGS: frozenset[NamedEvent] = frozenset(
-    {NamedEvent.GUARD_KILL_SWITCH_RESTORED, NamedEvent.RECONCILE_EXTERNAL_ORDER}
+    {
+        NamedEvent.GUARD_KILL_SWITCH_RESTORED,
+        NamedEvent.RECONCILE_EXTERNAL_ORDER,
+        NamedEvent.VENUE_SOCKET_DROPPED,
+    }
 )
