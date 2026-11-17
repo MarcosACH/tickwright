@@ -37,11 +37,14 @@ from .transport import Connect, WsConnection
 PING_INTERVAL_SECONDS = 30
 """How often an open socket sends the venue a ping.
 
-Hyperliquid closes a socket that has sent it nothing for 60 s. The funding
+Hyperliquid closes a socket it has had nothing to send on for 60 s. Each ping
+makes it answer with a ``pong``, so the socket never goes quiet. The funding
 socket hears from the venue only on the hour, so without a ping it was dropped
-and resubscribed about once a minute (#672). Half the venue's limit leaves room
-for a late wake-up. A fixed value, not config: the limit is the venue's, so no
-operator has a reason to move it.
+and resubscribed about once a minute (#672). Source:
+https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/timeouts-and-heartbeats
+
+Half the venue's limit leaves room for a late wake-up. A fixed value, not
+config: the limit is the venue's, so no operator has a reason to move it.
 """
 
 _PING = json.dumps({"method": "ping"})

@@ -400,7 +400,7 @@ def _pings(connection: FakeWsConnection) -> list[object]:
 
 
 def test_a_quiet_socket_is_pinged_every_30_seconds_so_the_venue_keeps_it_open() -> None:
-    """Hyperliquid closes a socket that has sent it nothing for 60 s (#672).
+    """Hyperliquid closes a socket it has had nothing to send on for 60 s (#672).
 
     The funding socket hears from the venue only on the hour. Without a ping it
     was dropped and resubscribed about once a minute. Every resubscribe replayed
