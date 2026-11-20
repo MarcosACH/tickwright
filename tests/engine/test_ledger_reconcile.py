@@ -3438,7 +3438,7 @@ def test_account_maintenance_margin_is_compared_against_the_venues_cross_scoped_
         {
             "field": "maintenance_margin",
             "symbol": None,
-            "ledger": "1.6250000",
+            "ledger": "1.625",
             "venue": "1.400",
         }
     ]
@@ -3526,7 +3526,7 @@ def test_a_large_isolated_book_does_not_widen_the_cross_subsets_maintenance_band
         {
             "field": "maintenance_margin",
             "symbol": None,
-            "ledger": "1.6250000",
+            "ledger": "1.625",
             "venue": "1.600",
         }
     ]
@@ -3580,7 +3580,7 @@ def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> 
         {
             "field": "free_margin",
             "symbol": None,
-            "ledger": "100000.000",
+            "ledger": "100000",
             "venue": "99000",
         }
     ]
@@ -3855,7 +3855,7 @@ def test_a_size_finding_on_an_isolated_symbol_does_not_silence_the_cross_mainten
         {
             "field": "maintenance_margin",
             "symbol": None,
-            "ledger": "1.6250000",
+            "ledger": "1.625",
             "venue": "1.600",
         }
     ]
@@ -4279,3 +4279,323 @@ def test_a_widened_band_is_the_one_the_cycle_judges_with() -> None:
         DivergenceField.MARGIN_USED,
     ]
     assert _alerts(logs) == []
+
+
+class _WaitingClock(ManualClock):
+    """A clock whose ``sleep`` waits like a real one (#682).
+
+    ``ManualClock.sleep`` returns at once, as if the time had passed with
+    nothing in it. That is the right answer for "no mark arrived in time". A
+    case that delivers a mark *during* the wait needs the wait to stay open
+    until the case decides what happens in it. ``parked`` tells the case the
+    cycle is now waiting.
+    """
+
+    def __init__(self, start_ns: int = 7) -> None:
+        super().__init__(start_ns)
+        self.parked = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        self.parked.set()
+        await self.sleep_until(self.timestamp_ns() + int(seconds * 1_000_000_000))
+
+
+def _during_the_wait(
+    cycle: LedgerReconciliation, clock: _WaitingClock, *acts: Callable[[], None]
+) -> tuple[Divergence, ...] | None:
+    """Run one pass and do each of ``acts`` while the pass waits for a new mark.
+
+    The loop runs between two acts, so the pass sees each one on its own. A
+    pass that has ended skips the acts left, so the case fails on its
+    assertions instead of hanging.
+    """
+
+    async def scenario() -> tuple[Divergence, ...] | None:
+        task = asyncio.create_task(cycle.reconcile_account())
+        parked = asyncio.create_task(clock.parked.wait())
+        await asyncio.wait((task, parked), return_when=asyncio.FIRST_COMPLETED)
+        parked.cancel()
+        for act in acts:
+            if task.done():
+                break
+            act()
+            for _ in range(10):
+                await asyncio.sleep(0)
+        return await task
+
+    return asyncio.run(scenario())
+
+
+def test_a_gap_the_next_mark_closes_is_not_alerted_and_is_counted_as_cleared() -> None:
+    """The soak's one-step mark race (#682).
+
+    The venue's read is about one mark update ahead of the feed. The ledger
+    values BTC at 65000. The venue's 1.000 of uPnL on 0.002 BTC entered at
+    64809 puts its mark at 65309. That gap is past the band on all four
+    figures. The feed's next mark is 65309, and at that mark the ledger's
+    uPnL is ``0.002 × 500 = 1.000``, the venue's own figure. So the pass
+    waits, checks again, and finds nothing left to alert on.
+
+    The race stays visible on the pass's record as ``cleared``.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 4
+
+
+def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
+    """A real gap survives the second check (#682).
+
+    Same book and same venue as the race above, but the next mark is 65100,
+    not the venue's 65309. At 65100 the ledger's uPnL is
+    ``0.002 × 291 = 0.582`` against the venue's 1.000, still far past the band.
+    So all four figures alert.
+
+    The alert carries the ledger's figures at the new mark. That is the
+    comparison the alert stands on, so it is the one an operator reads.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65100", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.582", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.582", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.200", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.582", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_a_gap_with_no_new_mark_inside_the_wait_is_still_alerted() -> None:
+    """A missing mark never hides a gap (#682).
+
+    The pass waits at most 5 s for the next mark. Here the feed sends nothing
+    and the clock moves 5 s on. So the pass alerts on the comparison it has,
+    the ledger at 65000 against the venue at 65309, as it did before the
+    second check existed.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: clock.advance_to(clock.timestamp_ns() + 5_000_000_000)
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_an_equity_gap_waits_for_a_new_mark_on_every_held_symbol() -> None:
+    """Equity is ``cash + Σ uPnL``, so its second check needs every term fresh (#682).
+
+    The book holds BTC and ETH. ETH agrees with the venue: 0.1 entered at 2990
+    and marked at 3000 is 1.000 of uPnL on both sides. BTC is the same race as
+    above: 65000 against the venue's 65309. So the equity gap is BTC's alone,
+    and the next BTC mark at 65309 closes it.
+
+    But ETH sends no new mark before the 5 s are up. A second check that
+    valued equity off a new BTC mark and an old ETH mark would mix two moments.
+    So the equity alert stands.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3000")
+    venue = _held(
+        "100002.000",
+        ("BTC", "0.002", "1.000"),
+        ("ETH", "0.1", "1.000"),
+        entry={"ETH": "2990"},
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1),
+            lambda: clock.advance_to(clock.timestamp_ns() + 5_000_000_000),
+        )
+
+    assert {"field": "equity", "symbol": None, "ledger": "100001.382", "venue": "100002.000"} in (
+        _alerts(logs)
+    )
+
+
+def test_a_fill_during_the_wait_leaves_the_first_checks_alerts_standing() -> None:
+    """A fill inside the wait must not clear a real gap (#682).
+
+    The gap is real: the next mark is 65100, not the venue's 65309. But a
+    second 0.002 BTC fill lands while the pass waits. The venue snapshot was
+    read before it, so a second check would find a BTC size gap at Tier-1.
+    A Tier-1 finding silences that symbol's Tier-2 figures, and the real gap
+    would vanish from the alerts. So the pass skips the second check and
+    alerts on the first one, as it did before the second check existed.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _book_fill(projection, quantity="0.002", price="65050", seq=2),
+            lambda: _mark(projection, "BTC", "65100", ts_ns=_MARK_TS_NS + 1),
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_a_funding_payment_during_the_wait_leaves_the_first_checks_alerts_standing() -> None:
+    """A funding payment inside the wait must not clear a real gap (#682).
+
+    The gap is real: the next mark is 65100, not the venue's 65309. But a
+    funding payment lands while the pass waits. The venue snapshot was read
+    before it, so a second check would find a cash gap at Tier-1. A cash
+    finding silences every account figure, and the real equity gap would
+    vanish from the alerts. Funding settles on the hour, which is when the
+    soak saw most of these gaps.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    funding = FundingAccrual(
+        ts_event=3_600,
+        ts_init=3_600,
+        account_id=LIVE_ACCOUNT_ID,
+        symbol="BTC",
+        boundary_ts_ns=3_600,
+        amount=Decimal("-0.002762"),
+    )
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: keeper.checkpoint_funding(funding),
+            lambda: _mark(projection, "BTC", "65100", ts_ns=_MARK_TS_NS + 1),
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -> None:
+    """The next unexplained gap can be read from the log alone (#682).
+
+    The soak had to line every alert up against the Kafka topic to learn which
+    mark the ledger used. So the alert now carries it, for every symbol the
+    figure sums over. Here the second check values BTC at 65100, a mark
+    stamped 0.3 s before the clock reads it. Equity sums BTC alone, so it
+    names the same one mark.
+    """
+    clock = _WaitingClock(start_ns=10_000_000_000)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000", ts_ns=9_000_000_000)
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65100", ts_ns=9_700_000_000)
+        )
+
+    marks = {
+        log["field"]: log["marks"]
+        for log in logs
+        if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value
+    }
+    named = "BTC=65100 age=0.300s"
+    assert marks == {
+        "equity": named,
+        "unrealized_pnl": named,
+        "notional": named,
+        "margin_used": named,
+    }
+
+
+def test_an_alert_drops_the_ledger_figures_trailing_zeros_and_no_other_digit() -> None:
+    """The soak logged a ledger equity of ``281.7231110000000000000000000`` (#682).
+
+    The trailing zeros come from the ledger's exact arithmetic and say
+    nothing, so the log drops them. It drops nothing else, so the figure shown
+    is the figure compared, even where it has more decimals than the venue's.
+
+    Here the mark is ``65000.0004`` with a long tail of zeros. So the uPnL is
+    ``0.002 × 191.0004 = 0.3820008`` followed by the same zeros, and the
+    notional is ``0.002 × 65000.0004 = 130.0000008``.
+    """
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000.00040000000000000000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.3820008", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.3820008", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.0000008", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.3820008", "venue": "1.000"},
+    ]

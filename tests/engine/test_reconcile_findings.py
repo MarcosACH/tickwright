@@ -153,6 +153,7 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
         # The margin figures agree outright with the venue double's own zeros,
         # so the three findings this case is about stay the only ones in the pass.
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="8000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -238,6 +239,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     unpriced = LedgerReading(
         account=account,
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional=None)},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -263,6 +265,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     priced = LedgerReading(
         account=account,
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -326,6 +329,7 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
                 leverage=_CROSS_5X,
             )
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -411,6 +415,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
             "BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000"),
             "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None, entry_price="3800"),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
     )
@@ -493,6 +498,7 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
                 leverage=_CROSS_1X,
             )
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -561,6 +567,7 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
                 entry_price="40000",
             ),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
         last_fills={},
     )
@@ -636,6 +643,7 @@ def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenanc
                 entry_price="40000",
             ),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
     )
@@ -686,6 +694,7 @@ def _flat_reading(rows: dict[str, SymbolValuation]) -> LedgerReading:
             effective_leverage=None,
         ),
         rows=rows,
+        mark_prices={},
         mark_observed=dict.fromkeys(rows, _NOW_NS),
         last_fills={},
     )
@@ -806,6 +815,7 @@ def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -835,6 +845,7 @@ def _agreeing_book() -> tuple[VenueAccountState, LedgerReading]:
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -896,6 +907,7 @@ def test_every_account_figure_the_pass_could_not_compute_counts_once_as_unvalued
                 leverage=_CROSS_1X,
             )
         },
+        mark_prices={},
         mark_observed=agreeing.mark_observed,
         last_fills={},
     )
@@ -925,6 +937,7 @@ def _fee_taken_reading(*, net: str, last_fills: dict[str, int]) -> LedgerReading
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net=net, unrealized_pnl="10000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills=last_fills,
     )
@@ -1064,6 +1077,7 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={"BTC": 2},
     )
@@ -1102,6 +1116,7 @@ def test_a_cash_heal_held_behind_an_unpriced_size_is_counted_unpriced() -> None:
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={"BTC": 2},
     )
@@ -1194,3 +1209,115 @@ def test_every_divergence_field_is_produced_by_a_classifier(field: DivergenceFie
 
 def test_the_walk_names_every_divergence_field() -> None:
     assert_covers_exactly(DivergenceField, _PRODUCED_BY, what="_PRODUCED_BY")
+
+
+def _two_leg_venue() -> VenueAccountState:
+    """The venue holds 0.5 BTC with 10,000 of uPnL and 10 ETH with 500.
+
+    BTC's notional is 60,000, so its uPnL band is 60. ETH's is 20,500, so its
+    band is 20.5. The implied cash line is 100,000.
+    """
+    return _venue(
+        equity="110500",
+        free_margin="110500",
+        positions=(
+            _position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),
+            _position(
+                "ETH",
+                signed_size="10",
+                entry_price="2000",
+                notional="20500",
+                unrealized_pnl="500",
+            ),
+        ),
+    )
+
+
+def _two_leg_reading(*, btc_upnl: str, eth_upnl: str) -> LedgerReading:
+    """The ledger's side of ``_two_leg_venue``, with each leg's uPnL as given.
+
+    The account figures are set to agree, so each leg's uPnL is the only figure
+    that can alert.
+    """
+    return LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110500"),
+            total_margin_used=Decimal("0"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("110500"),
+            effective_leverage=None,
+        ),
+        rows={
+            "BTC": _row("BTC", net="0.5", unrealized_pnl=btc_upnl, notional="60000"),
+            "ETH": _row(
+                "ETH", net="10", unrealized_pnl=eth_upnl, notional="20500", entry_price="2000"
+            ),
+        },
+        mark_prices={},
+        mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
+        last_fills={},
+    )
+
+
+def _first_check(reading: LedgerReading) -> ReconcileFindings:
+    return ReconcileFindings.classify(
+        _two_leg_venue(),
+        reading,
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+        fills_before=0,
+        previous=frozenset(),
+    )
+
+
+def test_a_gap_the_newer_reading_closes_no_longer_alerts() -> None:
+    """The second check on the next mark (#682), on its own.
+
+    The first reading values BTC's uPnL 1,000 under the venue's, far past its
+    band. The newer reading values it at the venue's own figure. So nothing is
+    left to alert on.
+    """
+    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500"))
+    assert [(d.field, d.symbol) for d in first.alerts] == [(DivergenceField.UNREALIZED_PNL, "BTC")]
+
+    still = first.still_alerting(
+        _two_leg_venue(),
+        _two_leg_reading(btc_upnl="10000", eth_upnl="500"),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+    )
+
+    assert still == ()
+
+
+def test_the_newer_reading_never_adds_an_alert_the_first_check_did_not_raise() -> None:
+    """The second check can only drop alerts, never add them (#682).
+
+    That matters because the newer reading is taken after this pass's heals.
+    A heal moves figures a Tier-1 finding explained at the first check. Read
+    again, those figures can look like fresh gaps. So a figure only the newer
+    reading puts outside the band waits for the next pass.
+
+    Here BTC's gap stays and comes back at the newer reading's figure. ETH
+    agreed at the first check and is 200 under at the newer one, past its
+    band of 20.5. It is not added.
+    """
+    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500"))
+
+    still = first.still_alerting(
+        _two_leg_venue(),
+        _two_leg_reading(btc_upnl="9500", eth_upnl="300"),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+    )
+
+    assert still == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.UNREALIZED_PNL,
+            symbol="BTC",
+            ledger=Decimal("9500"),
+            venue=Decimal("10000"),
+        ),
+    )

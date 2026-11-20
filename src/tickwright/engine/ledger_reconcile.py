@@ -12,6 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
+import asyncio
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -35,6 +36,12 @@ from .checkpoint import Checkpointer
 from .portfolio import HealChange, LedgerReading
 
 _ZERO = Decimal("0")
+# How long a Tier-2 alert waits for the next mark before it stands (#682).
+# Testnet sends a mark about once a second, and the soak saw the next one
+# 0.0 to 1.1 s after the comparison. Far below the 60 s account interval.
+_RECHECK_WAIT_SECONDS = 5.0
+_NS_PER_SECOND = Decimal(1_000_000_000)
+_MILLISECOND = Decimal("0.001")
 
 
 class _FreezeCaller(Enum):
@@ -252,6 +259,20 @@ class _CashHeal:
     correction: CashCorrection
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Standing:
+    """The Tier-2 alerts a pass raises, with the reading and instant they
+    were compared at (#682).
+
+    The three travel together so the alert can name the mark each figure was
+    valued at, and that mark's age, from the same comparison.
+    """
+
+    alerts: tuple[Divergence, ...]
+    reading: LedgerReading
+    now_ns: int
+
+
 _Finding = tuple[DivergenceField, str | None, Decimal]
 """A finding's identity across passes: its field, its symbol and its gap (#574).
 
@@ -283,7 +304,7 @@ def _healed(divergence: Divergence, *, event_id: str) -> None:
     )
 
 
-def _diverged(divergence: Divergence) -> None:
+def _diverged(divergence: Divergence, standing: _Standing) -> None:
     """Alert on a Tier-2 figure the venue disagrees with (ADR-0040 §6).
 
     The same shape ``_healed`` records, minus the ``event_id`` it has nothing to
@@ -291,14 +312,57 @@ def _diverged(divergence: Divergence) -> None:
     key it was applied under because nothing was applied. That absence *is* the
     tier — an alert here and a heal there are the two responses ADR-0034 splits
     the surface into, and they are deliberately one vocabulary otherwise.
+
+    ``marks`` names the mark behind each term of the figure and its age (#682),
+    as ``"BTC=65100 age=0.300s, ETH=3000 age=0.410s"``. Without it, the soak
+    had to line each alert up against the feed by hand. One string, because
+    ADR-0020 keeps every log value a scalar.
     """
+    reading = standing.reading
+    marks = ", ".join(
+        _mark_text(symbol, reading, now_ns=standing.now_ns)
+        for symbol in sorted(_terms(reading, field=divergence.field, symbol=divergence.symbol))
+    )
     named_event(
         NamedEvent.VALUATION_DIVERGENCE,
         field=divergence.field.value,
         symbol=divergence.symbol,
-        ledger=str(divergence.ledger),
+        ledger=str(_shown(divergence.ledger, beside=divergence.venue)),
         venue=str(divergence.venue),
+        marks=marks,
     )
+
+
+def _shown(ledger: Decimal, *, beside: Decimal) -> Decimal:
+    """The ledger figure without trailing zeros past the venue figure's decimals.
+
+    For the log only (#682). The ledger's exact arithmetic can leave a long
+    tail of zeros, such as ``281.7231110000000000000000000``. Only zeros go,
+    never a nonzero digit, so the value shown is the value compared. They go
+    no further than the venue's decimals, so the two sides line up.
+    """
+    places = beside.as_tuple().exponent
+    own = ledger.as_tuple().exponent
+    bare = ledger.normalize().as_tuple().exponent
+    if not (isinstance(places, int) and isinstance(own, int) and isinstance(bare, int)):
+        return ledger
+    return ledger.quantize(Decimal(1).scaleb(max(own, min(places, bare))))
+
+
+def _mark_text(symbol: str, reading: LedgerReading, *, now_ns: int) -> str:
+    """One symbol's mark and age, as the alert's ``marks`` field shows it.
+
+    A missing price or stamp reads ``none`` rather than failing the pass that
+    is trying to report a gap.
+    """
+    price = reading.mark_prices.get(symbol)
+    observed = reading.mark_observed.get(symbol)
+    age = (
+        "none"
+        if observed is None
+        else f"{(Decimal(now_ns - observed) / _NS_PER_SECOND).quantize(_MILLISECOND)}s"
+    )
+    return f"{symbol}={'none' if price is None else price} age={age}"
 
 
 def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]:
@@ -887,6 +951,58 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     return absent_marks + account_grain
 
 
+def _measured(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Every figure that differs between one reading and one snapshot, at both tiers.
+
+    The Tier-1 findings come first, in the order the record reads them. The
+    Tier-2 rule needs them too, because a Tier-1 finding explains the Tier-2
+    figures it flows into.
+    """
+    size_findings = _sizes(state, reading)
+    divergences = _net_cash(state, reading, size_findings) + size_findings
+    for account_figure in _ACCOUNT_GRAIN:
+        divergences += _account_grain(state, reading, account_figure)
+    for compared in _PER_SYMBOL:
+        divergences += _per_symbol(state, reading, compared)
+    return divergences
+
+
+def _alerting(
+    divergences: tuple[Divergence, ...],
+    reading: LedgerReading,
+    *,
+    band: ValuationBand,
+    now_ns: int,
+) -> tuple[tuple[Divergence, ...], int]:
+    """The Tier-2 rule: which figures alert, and how many a stale mark held back.
+
+    One function, so the first check and the second check on the next mark
+    (#682) apply the same rule. A figure alerts when no Tier-1 finding explains
+    it, the band does not cover it, and no term of it rests on a stale mark.
+    """
+    explained = _tier_1_grains(divergences)
+    stale = _stale_symbols(reading, now_ns=now_ns, band=band)
+    alerts: list[Divergence] = []
+    suppressed = 0
+    for divergence in divergences:
+        if (
+            divergence.tier is not DivergenceTier.TIER_2
+            or _explained_by_tier_1(divergence, explained, reading)
+            or band.covers(divergence, reference=_reference(divergence, reading))
+        ):
+            continue
+        # Staleness is asked **after** the band, so the count means "would
+        # have woken someone": a gap the band absorbs was never going to
+        # alert, and counting it would report a frozen mark stream on every
+        # healthy cycle — the same noise the band exists to prevent, moved
+        # into the record.
+        if _rests_on_stale(divergence, stale, reading):
+            suppressed += 1
+            continue
+        alerts.append(divergence)
+    return tuple(alerts), suppressed
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReconcileFindings:
     """What one pass concluded about one snapshot: the cycle's pure core.
@@ -905,8 +1021,9 @@ class ReconcileFindings:
     ``divergences`` is **everything measured** and ``alerts`` is the subset an
     operator is woken for; the two are deliberately not one filtered list. A
     pass records what it found whatever the band absorbs, so the counts on
-    ``account.reconciled`` come off the first and the ``valuation.divergence``
-    lines off the second.
+    ``account.reconciled`` come off the first. The ``valuation.divergence``
+    lines come off the second, once the cycle has checked them again on the
+    next mark (#682).
 
     The Tier-1 findings come with their heal plan (#335). Which findings heal
     is decided here, once, beside the findings themselves. The cycle applies
@@ -994,32 +1111,14 @@ class ReconcileFindings:
         range over entries the venue never returned, and it cannot disagree
         with the margin figure it sits next to.
         """
-        size_findings = _sizes(state, reading)
-        divergences = _net_cash(state, reading, size_findings) + size_findings
-        for account_figure in _ACCOUNT_GRAIN:
-            divergences += _account_grain(state, reading, account_figure)
-        for compared in _PER_SYMBOL:
-            divergences += _per_symbol(state, reading, compared)
-        explained = _tier_1_grains(divergences)
-        stale = _stale_symbols(reading, now_ns=now_ns, band=band)
-        alerts: list[Divergence] = []
-        suppressed = 0
-        for divergence in divergences:
-            if (
-                divergence.tier is not DivergenceTier.TIER_2
-                or _explained_by_tier_1(divergence, explained, reading)
-                or band.covers(divergence, reference=_reference(divergence, reading))
-            ):
-                continue
-            # Staleness is asked **after** the band, so the count means "would
-            # have woken someone": a gap the band absorbs was never going to
-            # alert, and counting it would report a frozen mark stream on every
-            # healthy cycle — the same noise the band exists to prevent, moved
-            # into the record.
-            if _rests_on_stale(divergence, stale, reading):
-                suppressed += 1
-                continue
-            alerts.append(divergence)
+        divergences = _measured(state, reading)
+        # Only ``_sizes`` makes a ``signed_size`` finding, so this is its output.
+        size_findings = tuple(
+            divergence
+            for divergence in divergences
+            if divergence.field is DivergenceField.SIGNED_SIZE
+        )
+        alerts, suppressed = _alerting(divergences, reading, band=band, now_ns=now_ns)
         # The heal plan. One loop over the Tier-1 findings, so every reason a
         # finding is held back is stated once and counted where it is decided.
         # ``moved`` is the set of symbols a fill touched while the venue read
@@ -1127,7 +1226,7 @@ class ReconcileFindings:
         )
         return cls(
             divergences=divergences,
-            alerts=tuple(alerts),
+            alerts=alerts,
             suppressed=suppressed,
             unvalued=_unvalued(state, reading),
             heals=tuple(heals),
@@ -1137,6 +1236,35 @@ class ReconcileFindings:
             unpriced=unpriced,
             seen=seen,
         )
+
+    def still_alerting(
+        self,
+        state: VenueAccountState,
+        reading: LedgerReading,
+        *,
+        band: ValuationBand,
+        now_ns: int,
+    ) -> tuple[Divergence, ...]:
+        """This pass's alerts that a newer reading still puts outside the band (#682).
+
+        The second check on the next mark. ``state`` is the snapshot this pass
+        classified, and ``reading`` is the ledger read again after a new mark.
+        The Tier-2 rule is the same as ``classify``'s. Each alert comes back
+        with the newer reading's figures, since that is the comparison it now
+        stands on.
+
+        Only figures this pass alerted on can come back. The newer reading is
+        taken after this pass's heals. A heal moves only figures a Tier-1
+        finding explained, so none of them alerted at the first check. Read
+        again, they could look like fresh gaps. A figure only the newer reading
+        puts outside the band waits for the next pass.
+
+        The heal plan is not asked again, so this takes no fill count and no
+        ``previous``.
+        """
+        alerted = {(alert.field, alert.symbol) for alert in self.alerts}
+        again, _ = _alerting(_measured(state, reading), reading, band=band, now_ns=now_ns)
+        return tuple(alert for alert in again if (alert.field, alert.symbol) in alerted)
 
 
 class LedgerReconciliation:
@@ -1254,6 +1382,12 @@ class LedgerReconciliation:
         alert about our own arithmetic, and one no Tier-1 equity finding exists
         to suppress it against.
 
+        The second check on the next mark (#682) does read the ledger again
+        after the heal. That is safe because it can only drop alerts this
+        reading raised, never add one. A heal moves only figures a Tier-1
+        finding explained, so none of them alerted here. See
+        ``ReconcileFindings.still_alerting``.
+
         One thing does come between that reading and the write, and only on a
         pass with a cash gap to close: the mode guard's venue read. What a
         concurrent fill costs there, and why the answer is the next deadline
@@ -1295,16 +1429,17 @@ class LedgerReconciliation:
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
         reading = self._portfolio.ledger_reading(snapshot=state)
+        # The clock is read here rather than inside the classification,
+        # because a mark's age is a fact about the snapshot this pass
+        # compared against: taken beside the alerts instead, it would be
+        # measured against a clock this pass's own heal has moved forward.
+        # The one read also stamps the heal, so both halves share a key.
+        now_ns = self._checkpointer.clock.timestamp_ns()
         findings = ReconcileFindings.classify(
             state,
             reading,
             band=self._band,
-            # The clock is read here rather than inside the classification,
-            # because a mark's age is a fact about the snapshot this pass
-            # compared against: taken beside the alerts instead, it would be
-            # measured against a clock this pass's own heal has moved forward.
-            # The one read also stamps the heal, so both halves share a key.
-            now_ns=self._checkpointer.clock.timestamp_ns(),
+            now_ns=now_ns,
             fills_before=fills_before,
             previous=self._previous,
         )
@@ -1330,12 +1465,16 @@ class LedgerReconciliation:
             snapshot=state,
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
+        # After the heals, so the wait never delays one (#682).
+        standing = await self._recheck(state, findings, reading=reading, now_ns=now_ns)
+        alerts = standing.alerts
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
-        for divergence in findings.alerts:
-            _diverged(divergence)
+        for divergence in alerts:
+            _diverged(divergence, standing)
         self._leverage_drift(state)
-        # A readout of the findings. Every count on the record is theirs.
+        # A readout of the findings, plus ``cleared``, which only the second
+        # check knows (#682).
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
             tier_1=findings.tier_1,
@@ -1345,8 +1484,64 @@ class LedgerReconciliation:
             deferred=findings.deferred,
             unconfirmed=findings.unconfirmed,
             unpriced=findings.unpriced,
+            cleared=len(findings.alerts) - len(alerts),
         )
         return divergences
+
+    async def _recheck(
+        self,
+        state: VenueAccountState,
+        findings: ReconcileFindings,
+        *,
+        reading: LedgerReading,
+        now_ns: int,
+    ) -> _Standing:
+        """The alerts still outside the band after the next mark (#682).
+
+        The venue's read can be one mark update ahead of the feed. On testnet
+        one update can move the mark past the band. So each alert waits for a
+        new mark on every symbol its figure is computed from. The ledger is then
+        read again and compared against the same snapshot. A gap the new mark
+        closes was the race and is not alerted. Which alerts stay is
+        ``ReconcileFindings.still_alerting``'s answer. This method owns the wait.
+
+        The wait is bounded. With no new mark in time, every alert stands. A
+        missing mark must never hide a gap.
+        """
+        first = _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
+        if not first.alerts:
+            return first
+        terms = frozenset().union(
+            *(
+                _terms(first.reading, field=alert.field, symbol=alert.symbol)
+                for alert in first.alerts
+            )
+        )
+        observed = {symbol: first.reading.mark_observed[symbol] for symbol in terms}
+        writes_before = self._portfolio.writes_applied
+        marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
+        timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
+        try:
+            await asyncio.wait((marks, timer), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Also on a cancel mid-wait, so neither task outlives the pass.
+            marks.cancel()
+            timer.cancel()
+        if not marks.done() or marks.cancelled():
+            return first
+        # A fill or a funding payment inside the wait is in the ledger but not
+        # in the snapshot. The second check would see it as a Tier-1 gap. A
+        # size gap silences its symbol's Tier-2 figures, and a cash gap
+        # silences every account figure. Either would hide a real gap.
+        if self._portfolio.writes_applied != writes_before:
+            return first
+        reading = self._portfolio.ledger_reading(snapshot=state)
+        now_ns = self._checkpointer.clock.timestamp_ns()
+        return _Standing(
+            alerts=findings.still_alerting(state, reading, band=self._band, now_ns=now_ns),
+            reading=reading,
+            now_ns=now_ns,
+        )
 
     def _leverage_drift(self, state: VenueAccountState) -> None:
         """Alert on a held symbol whose venue setting no longer matches config

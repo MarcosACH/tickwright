@@ -15,6 +15,7 @@ those reads (ADR-0041 §8). The seam is implemented by ``ScopedPortfolio`` in
 ``scoped_portfolio.py``, which also reads open orders from the ``Cache``.
 """
 
+import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -228,6 +229,10 @@ class LedgerReading:
     mode guard puts a real ``await`` between the classification and that write
     (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
 
+    One part of the pass does take a second reading: the second check on the
+    next mark (#682). It reads after the heal, so it can only drop alerts the
+    first reading raised, never add one. See ``ReconcileFindings.still_alerting``.
+
     Deliberately **not** carrying the leverage book. ``leverage_for`` reads
     configuration resolved at startup, so no fill can move it and there is no
     pass-coherence question for it to be part of; folding it in would make this
@@ -266,6 +271,10 @@ class LedgerReading:
     the reading instead of through a callback."""
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
+    mark_prices: Mapping[str, Decimal]
+    """The mark each row was valued at. Only the ``valuation.divergence`` log
+    reads it (#682). No default, so a reading cannot drop the prices without
+    saying so. An absent price shows as ``none`` in the log."""
     last_fills: Mapping[str, int]
     """The ledger's fill count as of each symbol's last accepted fill (#324).
 
@@ -360,6 +369,9 @@ class PortfolioProjection:
         # starts over at zero on a restart.
         self._fills_applied = 0
         self._last_fills: dict[str, int] = {}
+        # Fills and funding payments together. Run state for the same reason
+        # the fill stamp is. The second Tier-2 check reads it (#682).
+        self._writes_applied = 0
         # The Tier-2 half, and the asymmetry with the line above is the model:
         # accumulated ledger state is ordering-critical and so is written
         # synchronously on the fill path, while a latest-value cache is not —
@@ -367,6 +379,8 @@ class PortfolioProjection:
         # tolerates by construction, being alert-only and never healed
         # (ADR-0039). So this half arrives by plain bus subscription.
         self._marks: dict[str, MarkTick] = {}
+        # Set and replaced on every mark, so a waiter wakes once per mark (#682).
+        self._mark_arrived = asyncio.Event()
         # The **resolved** per-symbol map (ADR-0044 §2), complete over the
         # strategy-traded set and identical to the one the ``Exchange`` holds,
         # because the composition root resolved it once and injected it twice.
@@ -428,6 +442,21 @@ class PortfolioProjection:
         this half of the projection being bus-fed where Tier-1's is not.
         """
         self._marks[mark.symbol] = mark
+        arrived, self._mark_arrived = self._mark_arrived, asyncio.Event()
+        arrived.set()
+
+    async def marks_after(self, observed: Mapping[str, int]) -> None:
+        """Return once every symbol in ``observed`` has a mark newer than its stamp.
+
+        ``observed`` is ``LedgerReading.mark_observed`` or a part of it. The
+        reconcile cycle uses this to check a Tier-2 gap again on the next mark
+        (#682). It never times out. The caller bounds the wait.
+        """
+        while not all(
+            (mark := self._marks.get(symbol)) is not None and mark.ts_event > ts_ns
+            for symbol, ts_ns in observed.items()
+        ):
+            await self._mark_arrived.wait()
 
     def latest_mark(self, symbol: str) -> MarkTick | None:
         """The last mark taken for ``symbol``, or ``None`` before the first one.
@@ -747,6 +776,7 @@ class PortfolioProjection:
             # Stamped behind the same gatekeeper, so a redelivery that moved
             # nothing does not read as movement to the reconcile cycle (#324).
             self._fills_applied += 1
+            self._writes_applied += 1
             self._last_fills[event.symbol] = self._fills_applied
         self._lock_isolated_collateral(position, changes)
         return LedgerChange(account=self._account, position=position, changes=changes)
@@ -762,6 +792,17 @@ class PortfolioProjection:
         saw net movement only.
         """
         return self._fills_applied
+
+    @property
+    def writes_applied(self) -> int:
+        """How many fills and funding payments this ledger has accepted this run.
+
+        These are the two writes that reach the ledger from outside the
+        reconcile cycle. The second Tier-2 check reads it before and after its
+        wait (#682). Either write moves a figure the venue snapshot cannot see,
+        so a change means the second check cannot be trusted.
+        """
+        return self._writes_applied
 
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
@@ -908,6 +949,7 @@ class PortfolioProjection:
         # ``Account`` owns no sign here, unlike the fee's leg: the amount already
         # mirrors the venue's ``usdc``, so a payment arrives negative (ADR-0037).
         self._account.accrue_funding(accrual.amount, event_id=accrual.event_id)
+        self._writes_applied += 1
         return FundingChange(
             account=self._account,
             positions=exposed,
@@ -1286,6 +1328,7 @@ class PortfolioProjection:
             account=account_view(self._account, rows),
             rows=rows,
             mark_observed=self._mark_observed(),
+            mark_prices=self._mark_prices(),
             # A copy, for the reason the folds are: the reading is one instant,
             # and a fill after it must not move a map it already handed out.
             last_fills=dict(self._last_fills),
@@ -1328,8 +1371,9 @@ class PortfolioProjection:
     def _mark_prices(self) -> dict[str, Decimal]:
         """The price half of the mark cache, as every fold below wants it.
 
-        ``_mark_observed``'s counterpart: one cache, read for its two halves by
-        readers that never want both. Written out at each of the five call sites
+        ``_mark_observed``'s counterpart: one cache, read for its two halves.
+        The folds want only the price. The ``valuation.divergence`` log wants
+        both, and reads them off ``LedgerReading`` (#682). Written out at each of the five call sites
         it had, the valuation folds and the account view would each hold their
         own claim about which field values a position — and the one that drifted
         would value the book against a different mark than the reading beside it.

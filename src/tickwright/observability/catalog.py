@@ -349,12 +349,21 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     ),
     NamedEvent.RECONCILE_EXTERNAL_ORDER: frozenset({"venue_oid"}),
     NamedEvent.ACCOUNT_RECONCILED: frozenset(
-        {"tier_1", "tier_2", "unvalued", "suppressed", "deferred", "unconfirmed", "unpriced"}
+        {
+            "tier_1",
+            "tier_2",
+            "unvalued",
+            "suppressed",
+            "deferred",
+            "unconfirmed",
+            "unpriced",
+            "cleared",
+        }
     ),
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: frozenset({"scope"}),
     NamedEvent.ACCOUNT_HEALED: frozenset({"field", "symbol", "ledger", "venue", "event_id"}),
     NamedEvent.ACCOUNT_MODE_UNVERIFIED: frozenset({"reason"}),
-    NamedEvent.VALUATION_DIVERGENCE: frozenset({"field", "symbol", "ledger", "venue"}),
+    NamedEvent.VALUATION_DIVERGENCE: frozenset({"field", "symbol", "ledger", "venue", "marks"}),
     NamedEvent.LEVERAGE_DIVERGENCE: frozenset(
         {
             "symbol",
