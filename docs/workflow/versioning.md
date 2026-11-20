@@ -173,3 +173,10 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   the strategy snapshot is also saved after `on_wake` (#657). Dependabot keeps the image on
   Python 3.13 (#661). Runtime bumps: pydantic 2.14.3 and pydantic-settings 2.16.2. Bump PR
   backed by #670.
+- **v0.8.4** (2026-11-20). Fixes from the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. The Hyperliquid sockets now send a ping every
+  30 s. So the funding socket stays open between hourly payments and no longer replays its
+  history about once a minute (#672). A dropped socket logs a `venue.socket_dropped` warning
+  (#672). A socket the venue drops during a resubscribe now reconnects. It no longer faults the
+  engine (#674). The live round trip test waits out the testnet read lag after a resting ack
+  (#660). Bump PR backed by #677.
