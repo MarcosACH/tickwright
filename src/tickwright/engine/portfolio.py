@@ -17,7 +17,7 @@ those reads (ADR-0041 §8). The seam is implemented by ``ScopedPortfolio`` in
 
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -267,9 +267,10 @@ class LedgerReading:
     the reading instead of through a callback."""
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
-    mark_prices: Mapping[str, Decimal] = field(default_factory=dict)
+    mark_prices: Mapping[str, Decimal]
     """The mark each row was valued at. Only the ``valuation.divergence`` log
-    reads it (#682), so a reading built for classification alone may omit it."""
+    reads it (#682). No default, so a reading cannot drop the prices without
+    saying so. An absent price shows as ``none`` in the log."""
     last_fills: Mapping[str, int]
     """The ledger's fill count as of each symbol's last accepted fill (#324).
 
@@ -1350,8 +1351,9 @@ class PortfolioProjection:
     def _mark_prices(self) -> dict[str, Decimal]:
         """The price half of the mark cache, as every fold below wants it.
 
-        ``_mark_observed``'s counterpart: one cache, read for its two halves by
-        readers that never want both. Written out at each of the five call sites
+        ``_mark_observed``'s counterpart: one cache, read for its two halves.
+        The folds want only the price. The ``valuation.divergence`` log wants
+        both, and reads them off ``LedgerReading`` (#682). Written out at each of the five call sites
         it had, the valuation folds and the account view would each hold their
         own claim about which field values a position — and the one that drifted
         would value the book against a different mark than the reading beside it.

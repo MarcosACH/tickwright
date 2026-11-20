@@ -153,6 +153,7 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
         # The margin figures agree outright with the venue double's own zeros,
         # so the three findings this case is about stay the only ones in the pass.
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="8000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -238,6 +239,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     unpriced = LedgerReading(
         account=account,
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional=None)},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -263,6 +265,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     priced = LedgerReading(
         account=account,
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -326,6 +329,7 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
                 leverage=_CROSS_5X,
             )
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -411,6 +415,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
             "BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000"),
             "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None, entry_price="3800"),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
     )
@@ -493,6 +498,7 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
                 leverage=_CROSS_1X,
             )
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -561,6 +567,7 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
                 entry_price="40000",
             ),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
         last_fills={},
     )
@@ -636,6 +643,7 @@ def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenanc
                 entry_price="40000",
             ),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
     )
@@ -686,6 +694,7 @@ def _flat_reading(rows: dict[str, SymbolValuation]) -> LedgerReading:
             effective_leverage=None,
         ),
         rows=rows,
+        mark_prices={},
         mark_observed=dict.fromkeys(rows, _NOW_NS),
         last_fills={},
     )
@@ -806,6 +815,7 @@ def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -835,6 +845,7 @@ def _agreeing_book() -> tuple[VenueAccountState, LedgerReading]:
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={},
     )
@@ -896,6 +907,7 @@ def test_every_account_figure_the_pass_could_not_compute_counts_once_as_unvalued
                 leverage=_CROSS_1X,
             )
         },
+        mark_prices={},
         mark_observed=agreeing.mark_observed,
         last_fills={},
     )
@@ -925,6 +937,7 @@ def _fee_taken_reading(*, net: str, last_fills: dict[str, int]) -> LedgerReading
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net=net, unrealized_pnl="10000", notional="60000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills=last_fills,
     )
@@ -1064,6 +1077,7 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={"BTC": 2},
     )
@@ -1102,6 +1116,7 @@ def test_a_cash_heal_held_behind_an_unpriced_size_is_counted_unpriced() -> None:
             effective_leverage=None,
         ),
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS},
         last_fills={"BTC": 2},
     )
@@ -1239,6 +1254,7 @@ def _two_leg_reading(*, btc_upnl: str, eth_upnl: str) -> LedgerReading:
                 "ETH", net="10", unrealized_pnl=eth_upnl, notional="20500", entry_price="2000"
             ),
         },
+        mark_prices={},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
     )
