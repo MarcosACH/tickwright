@@ -15,6 +15,7 @@ those reads (ADR-0041 §8). The seam is implemented by ``ScopedPortfolio`` in
 ``scoped_portfolio.py``, which also reads open orders from the ``Cache``.
 """
 
+import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -367,6 +368,8 @@ class PortfolioProjection:
         # tolerates by construction, being alert-only and never healed
         # (ADR-0039). So this half arrives by plain bus subscription.
         self._marks: dict[str, MarkTick] = {}
+        # Set and replaced on every mark, so a waiter wakes once per mark (#682).
+        self._mark_arrived = asyncio.Event()
         # The **resolved** per-symbol map (ADR-0044 §2), complete over the
         # strategy-traded set and identical to the one the ``Exchange`` holds,
         # because the composition root resolved it once and injected it twice.
@@ -428,6 +431,21 @@ class PortfolioProjection:
         this half of the projection being bus-fed where Tier-1's is not.
         """
         self._marks[mark.symbol] = mark
+        arrived, self._mark_arrived = self._mark_arrived, asyncio.Event()
+        arrived.set()
+
+    async def marks_after(self, observed: Mapping[str, int]) -> None:
+        """Return once every symbol in ``observed`` has a mark newer than its stamp.
+
+        ``observed`` is ``LedgerReading.mark_observed`` or a part of it. The
+        reconcile cycle uses this to check a Tier-2 gap again on the next mark
+        (#682). It never times out. The caller bounds the wait.
+        """
+        while not all(
+            (mark := self._marks.get(symbol)) is not None and mark.ts_event > ts_ns
+            for symbol, ts_ns in observed.items()
+        ):
+            await self._mark_arrived.wait()
 
     def latest_mark(self, symbol: str) -> MarkTick | None:
         """The last mark taken for ``symbol``, or ``None`` before the first one.

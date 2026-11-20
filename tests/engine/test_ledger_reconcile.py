@@ -4279,3 +4279,72 @@ def test_a_widened_band_is_the_one_the_cycle_judges_with() -> None:
         DivergenceField.MARGIN_USED,
     ]
     assert _alerts(logs) == []
+
+
+class _WaitingClock(ManualClock):
+    """A clock whose ``sleep`` waits like a real one (#682).
+
+    ``ManualClock.sleep`` returns at once, as if the time had passed with
+    nothing in it. That is the right answer for "no mark arrived in time". A
+    case that delivers a mark *during* the wait needs the wait to stay open
+    until the case decides what happens in it. ``parked`` tells the case the
+    cycle is now waiting.
+    """
+
+    def __init__(self, start_ns: int = 7) -> None:
+        super().__init__(start_ns)
+        self.parked = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        self.parked.set()
+        await self.sleep_until(self.timestamp_ns() + int(seconds * 1_000_000_000))
+
+
+def _during_the_wait(
+    cycle: LedgerReconciliation, clock: _WaitingClock, act: Callable[[], None]
+) -> tuple[Divergence, ...] | None:
+    """Run one pass and do ``act`` once the pass waits for a new mark.
+
+    A pass that ends without waiting skips ``act``, so the case fails on its
+    assertions instead of hanging.
+    """
+
+    async def scenario() -> tuple[Divergence, ...] | None:
+        task = asyncio.create_task(cycle.reconcile_account())
+        parked = asyncio.create_task(clock.parked.wait())
+        await asyncio.wait((task, parked), return_when=asyncio.FIRST_COMPLETED)
+        parked.cancel()
+        if not task.done():
+            act()
+        return await task
+
+    return asyncio.run(scenario())
+
+
+def test_a_gap_the_next_mark_closes_is_not_alerted_and_is_counted_as_cleared() -> None:
+    """The soak's one-step mark race (#682).
+
+    The venue's read is about one mark update ahead of the feed. The ledger
+    values BTC at 65000. The venue's 1.000 of uPnL on 0.002 BTC entered at
+    64809 puts its mark at 65309. That gap is past the band on all four
+    figures. The feed's next mark is 65309, and at that mark the ledger's
+    uPnL is ``0.002 × 500 = 1.000``, the venue's own figure. So the pass
+    waits, checks again, and finds nothing left to alert on.
+
+    The race stays visible on the pass's record as ``cleared``.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 4

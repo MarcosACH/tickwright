@@ -12,6 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
+import asyncio
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -35,6 +36,10 @@ from .checkpoint import Checkpointer
 from .portfolio import HealChange, LedgerReading
 
 _ZERO = Decimal("0")
+# How long a Tier-2 alert waits for the next mark before it stands (#682).
+# Testnet sends a mark about once a second, and the soak saw the next one
+# 0.0 to 1.1 s after the comparison. Far below the 60 s account interval.
+_RECHECK_WAIT_SECONDS = 5.0
 
 
 class _FreezeCaller(Enum):
@@ -1330,9 +1335,11 @@ class LedgerReconciliation:
             snapshot=state,
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
+        # After the heals, so the wait never delays one (#682).
+        alerts = await self._recheck(state, reading, findings.alerts)
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
-        for divergence in findings.alerts:
+        for divergence in alerts:
             _diverged(divergence)
         self._leverage_drift(state)
         # A readout of the findings. Every count on the record is theirs.
@@ -1345,8 +1352,53 @@ class LedgerReconciliation:
             deferred=findings.deferred,
             unconfirmed=findings.unconfirmed,
             unpriced=findings.unpriced,
+            cleared=len(findings.alerts) - len(alerts),
         )
         return divergences
+
+    async def _recheck(
+        self,
+        state: VenueAccountState,
+        reading: LedgerReading,
+        alerts: tuple[Divergence, ...],
+    ) -> tuple[Divergence, ...]:
+        """The alerts still outside the band after the next mark (#682).
+
+        The venue's read can be one mark update ahead of the feed. On testnet
+        one update can move the mark past the band. So each alert waits for a
+        new mark on every symbol its figure is computed from. The ledger is then
+        read again and compared against the same snapshot. A gap the new mark
+        closes was the race and is not alerted.
+
+        The wait is bounded. With no new mark in time, every alert stands. A
+        missing mark must never hide a gap.
+        """
+        if not alerts:
+            return alerts
+        terms = frozenset().union(
+            *(_terms(reading, field=alert.field, symbol=alert.symbol) for alert in alerts)
+        )
+        observed = {symbol: reading.mark_observed[symbol] for symbol in terms}
+        marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
+        timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
+        try:
+            await asyncio.wait((marks, timer), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Also on a cancel mid-wait, so neither task outlives the pass.
+            marks.cancel()
+            timer.cancel()
+        if not marks.done() or marks.cancelled():
+            return alerts
+        again = ReconcileFindings.classify(
+            state,
+            self._portfolio.ledger_reading(snapshot=state),
+            band=self._band,
+            now_ns=self._checkpointer.clock.timestamp_ns(),
+            fills_before=self._portfolio.fills_applied,
+            previous=self._previous,
+        )
+        still = {(alert.field, alert.symbol) for alert in again.alerts}
+        return tuple(alert for alert in alerts if (alert.field, alert.symbol) in still)
 
     def _leverage_drift(self, state: VenueAccountState) -> None:
         """Alert on a held symbol whose venue setting no longer matches config
