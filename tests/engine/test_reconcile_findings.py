@@ -1273,3 +1273,35 @@ def test_a_gap_the_newer_reading_closes_no_longer_alerts() -> None:
     )
 
     assert still == ()
+
+
+def test_the_newer_reading_never_adds_an_alert_the_first_check_did_not_raise() -> None:
+    """The second check can only drop alerts, never add them (#682).
+
+    That matters because the newer reading is taken after this pass's heals.
+    A heal moves figures a Tier-1 finding explained at the first check. Read
+    again, those figures can look like fresh gaps. So a figure only the newer
+    reading puts outside the band waits for the next pass.
+
+    Here BTC's gap stays and comes back at the newer reading's figure. ETH
+    agreed at the first check and is 200 under at the newer one, past its
+    band of 20.5. It is not added.
+    """
+    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500"))
+
+    still = first.still_alerting(
+        _two_leg_venue(),
+        _two_leg_reading(btc_upnl="9500", eth_upnl="300"),
+        band=ValuationBand(),
+        now_ns=_NOW_NS,
+    )
+
+    assert still == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.UNREALIZED_PNL,
+            symbol="BTC",
+            ledger=Decimal("9500"),
+            venue=Decimal("10000"),
+        ),
+    )

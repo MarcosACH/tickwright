@@ -1253,11 +1253,18 @@ class ReconcileFindings:
         with the newer reading's figures, since that is the comparison it now
         stands on.
 
+        Only figures this pass alerted on can come back. The newer reading is
+        taken after this pass's heals. A heal moves only figures a Tier-1
+        finding explained, so none of them alerted at the first check. Read
+        again, they could look like fresh gaps. A figure only the newer reading
+        puts outside the band waits for the next pass.
+
         The heal plan is not asked again, so this takes no fill count and no
         ``previous``.
         """
+        alerted = {(alert.field, alert.symbol) for alert in self.alerts}
         again, _ = _alerting(_measured(state, reading), reading, band=band, now_ns=now_ns)
-        return again
+        return tuple(alert for alert in again if (alert.field, alert.symbol) in alerted)
 
 
 class LedgerReconciliation:
