@@ -4381,3 +4381,33 @@ def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
         {"field": "margin_used", "symbol": "BTC", "ledger": "0.582", "venue": "1.000"},
     ]
     assert _recorded(logs)["cleared"] == 0
+
+
+def test_a_gap_with_no_new_mark_inside_the_wait_is_still_alerted() -> None:
+    """A missing mark never hides a gap (#682).
+
+    The pass waits at most 5 s for the next mark. Here the feed sends nothing
+    and the clock moves 5 s on. So the pass alerts on the comparison it has,
+    the ledger at 65000 against the venue at 65309, as it did before the
+    second check existed.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: clock.advance_to(clock.timestamp_ns() + 5_000_000_000)
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
