@@ -969,8 +969,9 @@ class ReconcileFindings:
     ``divergences`` is **everything measured** and ``alerts`` is the subset an
     operator is woken for; the two are deliberately not one filtered list. A
     pass records what it found whatever the band absorbs, so the counts on
-    ``account.reconciled`` come off the first and the ``valuation.divergence``
-    lines off the second.
+    ``account.reconciled`` come off the first. The ``valuation.divergence``
+    lines come off the second, once the cycle has checked them again on the
+    next mark (#682).
 
     The Tier-1 findings come with their heal plan (#335). Which findings heal
     is decided here, once, beside the findings themselves. The cycle applies
@@ -1405,7 +1406,8 @@ class LedgerReconciliation:
         for divergence in alerts:
             _diverged(divergence, standing)
         self._leverage_drift(state)
-        # A readout of the findings. Every count on the record is theirs.
+        # A readout of the findings, plus ``cleared``, which only the second
+        # check knows (#682).
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
             tier_1=findings.tier_1,
