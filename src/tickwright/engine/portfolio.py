@@ -229,6 +229,10 @@ class LedgerReading:
     mode guard puts a real ``await`` between the classification and that write
     (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
 
+    One part of the pass does take a second reading: the second check on the
+    next mark (#682). It reads after the heal, so it can only drop alerts the
+    first reading raised, never add one. See ``ReconcileFindings.still_alerting``.
+
     Deliberately **not** carrying the leverage book. ``leverage_for`` reads
     configuration resolved at startup, so no fill can move it and there is no
     pass-coherence question for it to be part of; folding it in would make this

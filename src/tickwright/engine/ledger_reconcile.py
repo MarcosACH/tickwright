@@ -1382,6 +1382,12 @@ class LedgerReconciliation:
         alert about our own arithmetic, and one no Tier-1 equity finding exists
         to suppress it against.
 
+        The second check on the next mark (#682) does read the ledger again
+        after the heal. That is safe because it can only drop alerts this
+        reading raised, never add one. A heal moves only figures a Tier-1
+        finding explained, so none of them alerted here. See
+        ``ReconcileFindings.still_alerting``.
+
         One thing does come between that reading and the write, and only on a
         pass with a cash gap to close: the mode guard's venue read. What a
         concurrent fill costs there, and why the answer is the next deadline
