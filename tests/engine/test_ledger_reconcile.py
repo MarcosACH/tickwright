@@ -4493,6 +4493,49 @@ def test_a_fill_during_the_wait_leaves_the_first_checks_alerts_standing() -> Non
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_a_funding_payment_during_the_wait_leaves_the_first_checks_alerts_standing() -> None:
+    """A funding payment inside the wait must not clear a real gap (#682).
+
+    The gap is real: the next mark is 65100, not the venue's 65309. But a
+    funding payment lands while the pass waits. The venue snapshot was read
+    before it, so a second check would find a cash gap at Tier-1. A cash
+    finding silences every account figure, and the real equity gap would
+    vanish from the alerts. Funding settles on the hour, which is when the
+    soak saw most of these gaps.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    funding = FundingAccrual(
+        ts_event=3_600,
+        ts_init=3_600,
+        account_id=LIVE_ACCOUNT_ID,
+        symbol="BTC",
+        boundary_ts_ns=3_600,
+        amount=Decimal("-0.002762"),
+    )
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: keeper.checkpoint_funding(funding),
+            lambda: _mark(projection, "BTC", "65100", ts_ns=_MARK_TS_NS + 1),
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -> None:
     """The next unexplained gap can be read from the log alone (#682).
 

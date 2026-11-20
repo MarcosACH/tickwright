@@ -1518,7 +1518,7 @@ class LedgerReconciliation:
             )
         )
         observed = {symbol: first.reading.mark_observed[symbol] for symbol in terms}
-        fills_before = self._portfolio.fills_applied
+        writes_before = self._portfolio.writes_applied
         marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
         try:
@@ -1529,10 +1529,11 @@ class LedgerReconciliation:
             timer.cancel()
         if not marks.done() or marks.cancelled():
             return first
-        # A fill inside the wait is in the ledger but not in the snapshot. The
-        # second check would see it as a Tier-1 size gap, which silences that
-        # symbol's Tier-2 figures and would hide a real gap behind it.
-        if self._portfolio.fills_applied != fills_before:
+        # A fill or a funding payment inside the wait is in the ledger but not
+        # in the snapshot. The second check would see it as a Tier-1 gap. A
+        # size gap silences its symbol's Tier-2 figures, and a cash gap
+        # silences every account figure. Either would hide a real gap.
+        if self._portfolio.writes_applied != writes_before:
             return first
         reading = self._portfolio.ledger_reading(snapshot=state)
         now_ns = self._checkpointer.clock.timestamp_ns()

@@ -205,7 +205,7 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   - After the Tier-1 heals, a pass with alerts waits for a new mark on every symbol those figures sum over. It waits at most 5 s.
   - It then reads the ledger again and compares it against the same venue snapshot. A figure alerts only if this second check still puts it outside the band. The alert carries the second check's figures.
-  - With no new mark in time, every alert stands. A fill during the wait also leaves every alert standing, because the second check would read that fill as a Tier-1 size gap and silence the figure.
+  - With no new mark in time, every alert stands. A fill or a funding payment during the wait also leaves every alert standing. The second check would read it as a Tier-1 gap and silence the figure. A fill is a size gap on its symbol. A funding payment is a cash gap, which silences every account figure.
   - `account.reconciled` counts the figures the second check cleared as `cleared`.
   - `valuation.divergence` carries `marks`, the mark behind each term of the figure and its age, as `"BTC=65100 age=0.300s"`. Its `ledger` figure drops trailing zeros, but no other digit.
 

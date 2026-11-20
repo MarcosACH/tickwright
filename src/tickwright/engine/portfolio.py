@@ -369,6 +369,9 @@ class PortfolioProjection:
         # starts over at zero on a restart.
         self._fills_applied = 0
         self._last_fills: dict[str, int] = {}
+        # Fills and funding payments together. Run state for the same reason
+        # the fill stamp is. The second Tier-2 check reads it (#682).
+        self._writes_applied = 0
         # The Tier-2 half, and the asymmetry with the line above is the model:
         # accumulated ledger state is ordering-critical and so is written
         # synchronously on the fill path, while a latest-value cache is not —
@@ -773,6 +776,7 @@ class PortfolioProjection:
             # Stamped behind the same gatekeeper, so a redelivery that moved
             # nothing does not read as movement to the reconcile cycle (#324).
             self._fills_applied += 1
+            self._writes_applied += 1
             self._last_fills[event.symbol] = self._fills_applied
         self._lock_isolated_collateral(position, changes)
         return LedgerChange(account=self._account, position=position, changes=changes)
@@ -788,6 +792,17 @@ class PortfolioProjection:
         saw net movement only.
         """
         return self._fills_applied
+
+    @property
+    def writes_applied(self) -> int:
+        """How many fills and funding payments this ledger has accepted this run.
+
+        These are the two writes that reach the ledger from outside the
+        reconcile cycle. The second Tier-2 check reads it before and after its
+        wait (#682). Either write moves a figure the venue snapshot cannot see,
+        so a change means the second check cannot be trusted.
+        """
+        return self._writes_applied
 
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
@@ -934,6 +949,7 @@ class PortfolioProjection:
         # ``Account`` owns no sign here, unlike the fee's leg: the amount already
         # mirrors the venue's ``usdc``, so a payment arrives negative (ADR-0037).
         self._account.accrue_funding(accrual.amount, event_id=accrual.event_id)
+        self._writes_applied += 1
         return FundingChange(
             account=self._account,
             positions=exposed,
