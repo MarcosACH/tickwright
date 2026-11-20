@@ -3438,7 +3438,7 @@ def test_account_maintenance_margin_is_compared_against_the_venues_cross_scoped_
         {
             "field": "maintenance_margin",
             "symbol": None,
-            "ledger": "1.6250000",
+            "ledger": "1.625",
             "venue": "1.400",
         }
     ]
@@ -3526,7 +3526,7 @@ def test_a_large_isolated_book_does_not_widen_the_cross_subsets_maintenance_band
         {
             "field": "maintenance_margin",
             "symbol": None,
-            "ledger": "1.6250000",
+            "ledger": "1.625",
             "venue": "1.600",
         }
     ]
@@ -3580,7 +3580,7 @@ def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> 
         {
             "field": "free_margin",
             "symbol": None,
-            "ledger": "100000.000",
+            "ledger": "100000",
             "venue": "99000",
         }
     ]
@@ -3855,7 +3855,7 @@ def test_a_size_finding_on_an_isolated_symbol_does_not_silence_the_cross_mainten
         {
             "field": "maintenance_margin",
             "symbol": None,
-            "ledger": "1.6250000",
+            "ledger": "1.625",
             "venue": "1.600",
         }
     ]
@@ -4527,3 +4527,32 @@ def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -
         "notional": named,
         "margin_used": named,
     }
+
+
+def test_an_alert_drops_the_ledger_figures_trailing_zeros_and_no_other_digit() -> None:
+    """The soak logged a ledger equity of ``281.7231110000000000000000000`` (#682).
+
+    The trailing zeros come from the ledger's exact arithmetic and say
+    nothing, so the log drops them. It drops nothing else, so the figure shown
+    is the figure compared, even where it has more decimals than the venue's.
+
+    Here the mark is ``65000.0004`` with a long tail of zeros. So the uPnL is
+    ``0.002 × 191.0004 = 0.3820008`` followed by the same zeros, and the
+    notional is ``0.002 × 65000.0004 = 130.0000008``.
+    """
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000.00040000000000000000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.3820008", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.3820008", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.0000008", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.3820008", "venue": "1.000"},
+    ]

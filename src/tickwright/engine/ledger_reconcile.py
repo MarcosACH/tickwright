@@ -327,10 +327,26 @@ def _diverged(divergence: Divergence, standing: _Standing) -> None:
         NamedEvent.VALUATION_DIVERGENCE,
         field=divergence.field.value,
         symbol=divergence.symbol,
-        ledger=str(divergence.ledger),
+        ledger=str(_shown(divergence.ledger, beside=divergence.venue)),
         venue=str(divergence.venue),
         marks=marks,
     )
+
+
+def _shown(ledger: Decimal, *, beside: Decimal) -> Decimal:
+    """The ledger figure without trailing zeros past the venue figure's decimals.
+
+    For the log only (#682). The ledger's exact arithmetic can leave a long
+    tail of zeros, such as ``281.7231110000000000000000000``. Only zeros go,
+    never a nonzero digit, so the value shown is the value compared. They go
+    no further than the venue's decimals, so the two sides line up.
+    """
+    places = beside.as_tuple().exponent
+    own = ledger.as_tuple().exponent
+    bare = ledger.normalize().as_tuple().exponent
+    if not (isinstance(places, int) and isinstance(own, int) and isinstance(bare, int)):
+        return ledger
+    return ledger.quantize(Decimal(1).scaleb(max(own, min(places, bare))))
 
 
 def _mark_text(symbol: str, reading: LedgerReading, *, now_ns: int) -> str:
