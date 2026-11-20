@@ -1460,9 +1460,7 @@ class LedgerReconciliation:
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
         # After the heals, so the wait never delays one (#682).
-        standing = await self._recheck(
-            state, _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
-        )
+        standing = await self._recheck(state, findings, reading=reading, now_ns=now_ns)
         alerts = standing.alerts
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
@@ -1484,18 +1482,27 @@ class LedgerReconciliation:
         )
         return divergences
 
-    async def _recheck(self, state: VenueAccountState, first: "_Standing") -> "_Standing":
+    async def _recheck(
+        self,
+        state: VenueAccountState,
+        findings: ReconcileFindings,
+        *,
+        reading: LedgerReading,
+        now_ns: int,
+    ) -> _Standing:
         """The alerts still outside the band after the next mark (#682).
 
         The venue's read can be one mark update ahead of the feed. On testnet
         one update can move the mark past the band. So each alert waits for a
         new mark on every symbol its figure is computed from. The ledger is then
         read again and compared against the same snapshot. A gap the new mark
-        closes was the race and is not alerted.
+        closes was the race and is not alerted. Which alerts stay is
+        ``ReconcileFindings.still_alerting``'s answer. This method owns the wait.
 
         The wait is bounded. With no new mark in time, every alert stands. A
         missing mark must never hide a gap.
         """
+        first = _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
         if not first.alerts:
             return first
         terms = frozenset().union(
@@ -1523,20 +1530,8 @@ class LedgerReconciliation:
             return first
         reading = self._portfolio.ledger_reading(snapshot=state)
         now_ns = self._checkpointer.clock.timestamp_ns()
-        again = ReconcileFindings.classify(
-            state,
-            reading,
-            band=self._band,
-            now_ns=now_ns,
-            fills_before=self._portfolio.fills_applied,
-            previous=self._previous,
-        )
-        # The second check's own figures, since that comparison is the one the
-        # alert stands on. Only figures the first check alerted on, so a figure
-        # the new mark pushed out of the band waits for the next pass to confirm.
-        alerted = {(alert.field, alert.symbol) for alert in first.alerts}
         return _Standing(
-            alerts=tuple(alert for alert in again.alerts if (alert.field, alert.symbol) in alerted),
+            alerts=findings.still_alerting(state, reading, band=self._band, now_ns=now_ns),
             reading=reading,
             now_ns=now_ns,
         )
