@@ -4301,11 +4301,12 @@ class _WaitingClock(ManualClock):
 
 
 def _during_the_wait(
-    cycle: LedgerReconciliation, clock: _WaitingClock, act: Callable[[], None]
+    cycle: LedgerReconciliation, clock: _WaitingClock, *acts: Callable[[], None]
 ) -> tuple[Divergence, ...] | None:
-    """Run one pass and do ``act`` once the pass waits for a new mark.
+    """Run one pass and do each of ``acts`` while the pass waits for a new mark.
 
-    A pass that ends without waiting skips ``act``, so the case fails on its
+    The loop runs between two acts, so the pass sees each one on its own. A
+    pass that has ended skips the acts left, so the case fails on its
     assertions instead of hanging.
     """
 
@@ -4314,8 +4315,12 @@ def _during_the_wait(
         parked = asyncio.create_task(clock.parked.wait())
         await asyncio.wait((task, parked), return_when=asyncio.FIRST_COMPLETED)
         parked.cancel()
-        if not task.done():
+        for act in acts:
+            if task.done():
+                break
             act()
+            for _ in range(10):
+                await asyncio.sleep(0)
         return await task
 
     return asyncio.run(scenario())
@@ -4411,3 +4416,43 @@ def test_a_gap_with_no_new_mark_inside_the_wait_is_still_alerted() -> None:
         {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
     ]
     assert _recorded(logs)["cleared"] == 0
+
+
+def test_an_equity_gap_waits_for_a_new_mark_on_every_held_symbol() -> None:
+    """Equity is ``cash + Σ uPnL``, so its second check needs every term fresh (#682).
+
+    The book holds BTC and ETH. ETH agrees with the venue: 0.1 entered at 2990
+    and marked at 3000 is 1.000 of uPnL on both sides. BTC is the same race as
+    above: 65000 against the venue's 65309. So the equity gap is BTC's alone,
+    and the next BTC mark at 65309 closes it.
+
+    But ETH sends no new mark before the 5 s are up. A second check that
+    valued equity off a new BTC mark and an old ETH mark would mix two moments.
+    So the equity alert stands.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3000")
+    venue = _held(
+        "100002.000",
+        ("BTC", "0.002", "1.000"),
+        ("ETH", "0.1", "1.000"),
+        entry={"ETH": "2990"},
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1),
+            lambda: clock.advance_to(clock.timestamp_ns() + 5_000_000_000),
+        )
+
+    assert {"field": "equity", "symbol": None, "ledger": "100001.382", "venue": "100002.000"} in (
+        _alerts(logs)
+    )
