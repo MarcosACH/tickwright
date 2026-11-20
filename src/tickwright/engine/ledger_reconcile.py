@@ -951,6 +951,58 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     return absent_marks + account_grain
 
 
+def _measured(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Every figure that differs between one reading and one snapshot, at both tiers.
+
+    The Tier-1 findings come first, in the order the record reads them. The
+    Tier-2 rule needs them too, because a Tier-1 finding explains the Tier-2
+    figures it flows into.
+    """
+    size_findings = _sizes(state, reading)
+    divergences = _net_cash(state, reading, size_findings) + size_findings
+    for account_figure in _ACCOUNT_GRAIN:
+        divergences += _account_grain(state, reading, account_figure)
+    for compared in _PER_SYMBOL:
+        divergences += _per_symbol(state, reading, compared)
+    return divergences
+
+
+def _alerting(
+    divergences: tuple[Divergence, ...],
+    reading: LedgerReading,
+    *,
+    band: ValuationBand,
+    now_ns: int,
+) -> tuple[tuple[Divergence, ...], int]:
+    """The Tier-2 rule: which figures alert, and how many a stale mark held back.
+
+    One function, so the first check and the second check on the next mark
+    (#682) apply the same rule. A figure alerts when no Tier-1 finding explains
+    it, the band does not cover it, and no term of it rests on a stale mark.
+    """
+    explained = _tier_1_grains(divergences)
+    stale = _stale_symbols(reading, now_ns=now_ns, band=band)
+    alerts: list[Divergence] = []
+    suppressed = 0
+    for divergence in divergences:
+        if (
+            divergence.tier is not DivergenceTier.TIER_2
+            or _explained_by_tier_1(divergence, explained, reading)
+            or band.covers(divergence, reference=_reference(divergence, reading))
+        ):
+            continue
+        # Staleness is asked **after** the band, so the count means "would
+        # have woken someone": a gap the band absorbs was never going to
+        # alert, and counting it would report a frozen mark stream on every
+        # healthy cycle — the same noise the band exists to prevent, moved
+        # into the record.
+        if _rests_on_stale(divergence, stale, reading):
+            suppressed += 1
+            continue
+        alerts.append(divergence)
+    return tuple(alerts), suppressed
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReconcileFindings:
     """What one pass concluded about one snapshot: the cycle's pure core.
@@ -1059,32 +1111,14 @@ class ReconcileFindings:
         range over entries the venue never returned, and it cannot disagree
         with the margin figure it sits next to.
         """
-        size_findings = _sizes(state, reading)
-        divergences = _net_cash(state, reading, size_findings) + size_findings
-        for account_figure in _ACCOUNT_GRAIN:
-            divergences += _account_grain(state, reading, account_figure)
-        for compared in _PER_SYMBOL:
-            divergences += _per_symbol(state, reading, compared)
-        explained = _tier_1_grains(divergences)
-        stale = _stale_symbols(reading, now_ns=now_ns, band=band)
-        alerts: list[Divergence] = []
-        suppressed = 0
-        for divergence in divergences:
-            if (
-                divergence.tier is not DivergenceTier.TIER_2
-                or _explained_by_tier_1(divergence, explained, reading)
-                or band.covers(divergence, reference=_reference(divergence, reading))
-            ):
-                continue
-            # Staleness is asked **after** the band, so the count means "would
-            # have woken someone": a gap the band absorbs was never going to
-            # alert, and counting it would report a frozen mark stream on every
-            # healthy cycle — the same noise the band exists to prevent, moved
-            # into the record.
-            if _rests_on_stale(divergence, stale, reading):
-                suppressed += 1
-                continue
-            alerts.append(divergence)
+        divergences = _measured(state, reading)
+        # Only ``_sizes`` makes a ``signed_size`` finding, so this is its output.
+        size_findings = tuple(
+            divergence
+            for divergence in divergences
+            if divergence.field is DivergenceField.SIGNED_SIZE
+        )
+        alerts, suppressed = _alerting(divergences, reading, band=band, now_ns=now_ns)
         # The heal plan. One loop over the Tier-1 findings, so every reason a
         # finding is held back is stated once and counted where it is decided.
         # ``moved`` is the set of symbols a fill touched while the venue read
@@ -1192,7 +1226,7 @@ class ReconcileFindings:
         )
         return cls(
             divergences=divergences,
-            alerts=tuple(alerts),
+            alerts=alerts,
             suppressed=suppressed,
             unvalued=_unvalued(state, reading),
             heals=tuple(heals),
@@ -1202,6 +1236,28 @@ class ReconcileFindings:
             unpriced=unpriced,
             seen=seen,
         )
+
+    def still_alerting(
+        self,
+        state: VenueAccountState,
+        reading: LedgerReading,
+        *,
+        band: ValuationBand,
+        now_ns: int,
+    ) -> tuple[Divergence, ...]:
+        """This pass's alerts that a newer reading still puts outside the band (#682).
+
+        The second check on the next mark. ``state`` is the snapshot this pass
+        classified, and ``reading`` is the ledger read again after a new mark.
+        The Tier-2 rule is the same as ``classify``'s. Each alert comes back
+        with the newer reading's figures, since that is the comparison it now
+        stands on.
+
+        The heal plan is not asked again, so this takes no fill count and no
+        ``previous``.
+        """
+        again, _ = _alerting(_measured(state, reading), reading, band=band, now_ns=now_ns)
+        return again
 
 
 class LedgerReconciliation:
