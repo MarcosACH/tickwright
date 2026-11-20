@@ -4348,3 +4348,36 @@ def test_a_gap_the_next_mark_closes_is_not_alerted_and_is_counted_as_cleared() -
 
     assert _alerts(logs) == []
     assert _recorded(logs)["cleared"] == 4
+
+
+def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
+    """A real gap survives the second check (#682).
+
+    Same book and same venue as the race above, but the next mark is 65100,
+    not the venue's 65309. At 65100 the ledger's uPnL is
+    ``0.002 × 291 = 0.582`` against the venue's 1.000, still far past the band.
+    So all four figures alert.
+
+    The alert carries the ledger's figures at the new mark. That is the
+    comparison the alert stands on, so it is the one an operator reads.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65100", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.582", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.582", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.200", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.582", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0

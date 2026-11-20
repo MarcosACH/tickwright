@@ -1397,8 +1397,11 @@ class LedgerReconciliation:
             fills_before=self._portfolio.fills_applied,
             previous=self._previous,
         )
-        still = {(alert.field, alert.symbol) for alert in again.alerts}
-        return tuple(alert for alert in alerts if (alert.field, alert.symbol) in still)
+        # The second check's own figures, since that comparison is the one the
+        # alert stands on. Only figures the first check alerted on, so a figure
+        # the new mark pushed out of the band waits for the next pass to confirm.
+        first = {(alert.field, alert.symbol) for alert in alerts}
+        return tuple(alert for alert in again.alerts if (alert.field, alert.symbol) in first)
 
     def _leverage_drift(self, state: VenueAccountState) -> None:
         """Alert on a held symbol whose venue setting no longer matches config
