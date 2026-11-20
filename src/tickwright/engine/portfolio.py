@@ -17,7 +17,7 @@ those reads (ADR-0041 §8). The seam is implemented by ``ScopedPortfolio`` in
 
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -267,6 +267,9 @@ class LedgerReading:
     the reading instead of through a callback."""
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
+    mark_prices: Mapping[str, Decimal] = field(default_factory=dict)
+    """The mark each row was valued at. Only the ``valuation.divergence`` log
+    reads it (#682), so a reading built for classification alone may omit it."""
     last_fills: Mapping[str, int]
     """The ledger's fill count as of each symbol's last accepted fill (#324).
 
@@ -1304,6 +1307,7 @@ class PortfolioProjection:
             account=account_view(self._account, rows),
             rows=rows,
             mark_observed=self._mark_observed(),
+            mark_prices=self._mark_prices(),
             # A copy, for the reason the folds are: the reading is one instant,
             # and a fill after it must not move a map it already handed out.
             last_fills=dict(self._last_fills),

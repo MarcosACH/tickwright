@@ -4491,3 +4491,39 @@ def test_a_fill_during_the_wait_leaves_the_first_checks_alerts_standing() -> Non
         {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
     ]
     assert _recorded(logs)["cleared"] == 0
+
+
+def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -> None:
+    """The next unexplained gap can be read from the log alone (#682).
+
+    The soak had to line every alert up against the Kafka topic to learn which
+    mark the ledger used. So the alert now carries it, for every symbol the
+    figure sums over. Here the second check values BTC at 65100, a mark
+    stamped 0.3 s before the clock reads it. Equity sums BTC alone, so it
+    names the same one mark.
+    """
+    clock = _WaitingClock(start_ns=10_000_000_000)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000", ts_ns=9_000_000_000)
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65100", ts_ns=9_700_000_000)
+        )
+
+    marks = {
+        log["field"]: log["marks"]
+        for log in logs
+        if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value
+    }
+    named = "BTC=65100 age=0.300s"
+    assert marks == {
+        "equity": named,
+        "unrealized_pnl": named,
+        "notional": named,
+        "margin_used": named,
+    }

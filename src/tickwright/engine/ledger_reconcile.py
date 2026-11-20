@@ -40,6 +40,8 @@ _ZERO = Decimal("0")
 # Testnet sends a mark about once a second, and the soak saw the next one
 # 0.0 to 1.1 s after the comparison. Far below the 60 s account interval.
 _RECHECK_WAIT_SECONDS = 5.0
+_NS_PER_SECOND = Decimal(1_000_000_000)
+_MILLISECOND = Decimal("0.001")
 
 
 class _FreezeCaller(Enum):
@@ -257,6 +259,20 @@ class _CashHeal:
     correction: CashCorrection
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Standing:
+    """The Tier-2 alerts a pass raises, with the reading and instant they
+    were compared at (#682).
+
+    The three travel together so the alert can name the mark each figure was
+    valued at, and that mark's age, from the same comparison.
+    """
+
+    alerts: tuple[Divergence, ...]
+    reading: LedgerReading
+    now_ns: int
+
+
 _Finding = tuple[DivergenceField, str | None, Decimal]
 """A finding's identity across passes: its field, its symbol and its gap (#574).
 
@@ -288,7 +304,7 @@ def _healed(divergence: Divergence, *, event_id: str) -> None:
     )
 
 
-def _diverged(divergence: Divergence) -> None:
+def _diverged(divergence: Divergence, standing: _Standing) -> None:
     """Alert on a Tier-2 figure the venue disagrees with (ADR-0040 §6).
 
     The same shape ``_healed`` records, minus the ``event_id`` it has nothing to
@@ -296,14 +312,41 @@ def _diverged(divergence: Divergence) -> None:
     key it was applied under because nothing was applied. That absence *is* the
     tier — an alert here and a heal there are the two responses ADR-0034 splits
     the surface into, and they are deliberately one vocabulary otherwise.
+
+    ``marks`` names the mark behind each term of the figure and its age (#682),
+    as ``"BTC=65100 age=0.300s, ETH=3000 age=0.410s"``. Without it, the soak
+    had to line each alert up against the feed by hand. One string, because
+    ADR-0020 keeps every log value a scalar.
     """
+    reading = standing.reading
+    marks = ", ".join(
+        _mark_text(symbol, reading, now_ns=standing.now_ns)
+        for symbol in sorted(_terms(reading, field=divergence.field, symbol=divergence.symbol))
+    )
     named_event(
         NamedEvent.VALUATION_DIVERGENCE,
         field=divergence.field.value,
         symbol=divergence.symbol,
         ledger=str(divergence.ledger),
         venue=str(divergence.venue),
+        marks=marks,
     )
+
+
+def _mark_text(symbol: str, reading: LedgerReading, *, now_ns: int) -> str:
+    """One symbol's mark and age, as the alert's ``marks`` field shows it.
+
+    A missing price or stamp reads ``none`` rather than failing the pass that
+    is trying to report a gap.
+    """
+    price = reading.mark_prices.get(symbol)
+    observed = reading.mark_observed.get(symbol)
+    age = (
+        "none"
+        if observed is None
+        else f"{(Decimal(now_ns - observed) / _NS_PER_SECOND).quantize(_MILLISECOND)}s"
+    )
+    return f"{symbol}={'none' if price is None else price} age={age}"
 
 
 def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]:
@@ -1300,16 +1343,17 @@ class LedgerReconciliation:
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
         reading = self._portfolio.ledger_reading(snapshot=state)
+        # The clock is read here rather than inside the classification,
+        # because a mark's age is a fact about the snapshot this pass
+        # compared against: taken beside the alerts instead, it would be
+        # measured against a clock this pass's own heal has moved forward.
+        # The one read also stamps the heal, so both halves share a key.
+        now_ns = self._checkpointer.clock.timestamp_ns()
         findings = ReconcileFindings.classify(
             state,
             reading,
             band=self._band,
-            # The clock is read here rather than inside the classification,
-            # because a mark's age is a fact about the snapshot this pass
-            # compared against: taken beside the alerts instead, it would be
-            # measured against a clock this pass's own heal has moved forward.
-            # The one read also stamps the heal, so both halves share a key.
-            now_ns=self._checkpointer.clock.timestamp_ns(),
+            now_ns=now_ns,
             fills_before=fills_before,
             previous=self._previous,
         )
@@ -1336,11 +1380,14 @@ class LedgerReconciliation:
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
         # After the heals, so the wait never delays one (#682).
-        alerts = await self._recheck(state, reading, findings.alerts)
+        standing = await self._recheck(
+            state, _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
+        )
+        alerts = standing.alerts
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
         for divergence in alerts:
-            _diverged(divergence)
+            _diverged(divergence, standing)
         self._leverage_drift(state)
         # A readout of the findings. Every count on the record is theirs.
         named_event(
@@ -1356,12 +1403,7 @@ class LedgerReconciliation:
         )
         return divergences
 
-    async def _recheck(
-        self,
-        state: VenueAccountState,
-        reading: LedgerReading,
-        alerts: tuple[Divergence, ...],
-    ) -> tuple[Divergence, ...]:
+    async def _recheck(self, state: VenueAccountState, first: "_Standing") -> "_Standing":
         """The alerts still outside the band after the next mark (#682).
 
         The venue's read can be one mark update ahead of the feed. On testnet
@@ -1373,12 +1415,15 @@ class LedgerReconciliation:
         The wait is bounded. With no new mark in time, every alert stands. A
         missing mark must never hide a gap.
         """
-        if not alerts:
-            return alerts
+        if not first.alerts:
+            return first
         terms = frozenset().union(
-            *(_terms(reading, field=alert.field, symbol=alert.symbol) for alert in alerts)
+            *(
+                _terms(first.reading, field=alert.field, symbol=alert.symbol)
+                for alert in first.alerts
+            )
         )
-        observed = {symbol: reading.mark_observed[symbol] for symbol in terms}
+        observed = {symbol: first.reading.mark_observed[symbol] for symbol in terms}
         fills_before = self._portfolio.fills_applied
         marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
@@ -1389,25 +1434,31 @@ class LedgerReconciliation:
             marks.cancel()
             timer.cancel()
         if not marks.done() or marks.cancelled():
-            return alerts
+            return first
         # A fill inside the wait is in the ledger but not in the snapshot. The
         # second check would see it as a Tier-1 size gap, which silences that
         # symbol's Tier-2 figures and would hide a real gap behind it.
         if self._portfolio.fills_applied != fills_before:
-            return alerts
+            return first
+        reading = self._portfolio.ledger_reading(snapshot=state)
+        now_ns = self._checkpointer.clock.timestamp_ns()
         again = ReconcileFindings.classify(
             state,
-            self._portfolio.ledger_reading(snapshot=state),
+            reading,
             band=self._band,
-            now_ns=self._checkpointer.clock.timestamp_ns(),
+            now_ns=now_ns,
             fills_before=self._portfolio.fills_applied,
             previous=self._previous,
         )
         # The second check's own figures, since that comparison is the one the
         # alert stands on. Only figures the first check alerted on, so a figure
         # the new mark pushed out of the band waits for the next pass to confirm.
-        first = {(alert.field, alert.symbol) for alert in alerts}
-        return tuple(alert for alert in again.alerts if (alert.field, alert.symbol) in first)
+        alerted = {(alert.field, alert.symbol) for alert in first.alerts}
+        return _Standing(
+            alerts=tuple(alert for alert in again.alerts if (alert.field, alert.symbol) in alerted),
+            reading=reading,
+            now_ns=now_ns,
+        )
 
     def _leverage_drift(self, state: VenueAccountState) -> None:
         """Alert on a held symbol whose venue setting no longer matches config
