@@ -1379,6 +1379,7 @@ class LedgerReconciliation:
             *(_terms(reading, field=alert.field, symbol=alert.symbol) for alert in alerts)
         )
         observed = {symbol: reading.mark_observed[symbol] for symbol in terms}
+        fills_before = self._portfolio.fills_applied
         marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
         try:
@@ -1388,6 +1389,11 @@ class LedgerReconciliation:
             marks.cancel()
             timer.cancel()
         if not marks.done() or marks.cancelled():
+            return alerts
+        # A fill inside the wait is in the ledger but not in the snapshot. The
+        # second check would see it as a Tier-1 size gap, which silences that
+        # symbol's Tier-2 figures and would hide a real gap behind it.
+        if self._portfolio.fills_applied != fills_before:
             return alerts
         again = ReconcileFindings.classify(
             state,

@@ -4456,3 +4456,38 @@ def test_an_equity_gap_waits_for_a_new_mark_on_every_held_symbol() -> None:
     assert {"field": "equity", "symbol": None, "ledger": "100001.382", "venue": "100002.000"} in (
         _alerts(logs)
     )
+
+
+def test_a_fill_during_the_wait_leaves_the_first_checks_alerts_standing() -> None:
+    """A fill inside the wait must not clear a real gap (#682).
+
+    The gap is real: the next mark is 65100, not the venue's 65309. But a
+    second 0.002 BTC fill lands while the pass waits. The venue snapshot was
+    read before it, so a second check would find a BTC size gap at Tier-1.
+    A Tier-1 finding silences that symbol's Tier-2 figures, and the real gap
+    would vanish from the alerts. So the pass skips the second check and
+    alerts on the first one, as it did before the second check existed.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _book_fill(projection, quantity="0.002", price="65050", seq=2),
+            lambda: _mark(projection, "BTC", "65100", ts_ns=_MARK_TS_NS + 1),
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "130.6180"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
