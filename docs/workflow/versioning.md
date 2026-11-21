@@ -180,3 +180,10 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   (#672). A socket the venue drops during a resubscribe now reconnects. It no longer faults the
   engine (#674). The live round trip test waits out the testnet read lag after a resting ack
   (#660). Bump PR backed by #677.
+- **v0.8.5** (2026-11-21). A fix from the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. A pass with valuation alerts now checks them
+  again on the next mark. It waits at most 5 s. Only the figures still outside the band alert.
+  So a one-update mark race no longer raises `valuation.divergence` (#682). No new mark in time,
+  or a fill or funding payment during the wait, leaves every alert standing (#682).
+  `account.reconciled` counts the cleared figures as `cleared`. `valuation.divergence` logs each
+  mark and its age (#682). Runtime bump: pydantic-settings 2.16.3. Bump PR backed by #684.
