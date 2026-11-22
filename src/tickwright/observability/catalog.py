@@ -319,7 +319,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ACCOUNT_MATERIALISED: frozenset({"account_id", "genesis_collateral"}),
     NamedEvent.FEED_LAGGED: frozenset({"symbol", "event_id", "stream"}),
     NamedEvent.FEED_FRAME_DROPPED: frozenset({"frame", "row"}),
-    NamedEvent.VENUE_SOCKET_DROPPED: frozenset({"subscription"}),
+    NamedEvent.VENUE_SOCKET_DROPPED: frozenset(
+        {"subscription", "closed_by", "close_code", "close_reason"}
+    ),
     NamedEvent.ENGINE_BARRIER_CLEARED: frozenset(),
     NamedEvent.ENGINE_FEED_STARTED: frozenset(),
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),

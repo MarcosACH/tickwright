@@ -15,6 +15,7 @@ from decimal import Decimal
 import pytest
 from eth_account import Account
 from hyperliquid_fakes import (
+    VENUE_EXPIRED,
     FakeConnector,
     FakeExchangeApi,
     FakeWsConnection,
@@ -594,13 +595,6 @@ def test_a_funding_socket_blip_that_clears_inside_the_budget_boots_normally() ->
     asyncio.run(main())
 
 
-class _DroppedBeforeSubscribe(FakeWsConnection):
-    """A socket the venue drops right after the connect, so the subscribe fails."""
-
-    async def send(self, message: str) -> None:
-        raise ConnectionError("hyperliquid websocket closed")
-
-
 def test_a_socket_dropped_during_the_boot_subscribe_is_retried_like_a_refused_connect() -> None:
     """The transport raises ``ConnectionError`` on a send to a dead socket (#672).
 
@@ -611,7 +605,9 @@ def test_a_socket_dropped_during_the_boot_subscribe_is_retried_like_a_refused_co
 
     async def main() -> None:
         clock = ManualClock()
-        dropped = _DroppedBeforeSubscribe([])
+        # The venue drops the socket right after the connect, so the subscribe fails.
+        dropped = FakeWsConnection([])
+        dropped.hang_up(VENUE_EXPIRED)
         connection = FakeWsConnection([])
         connect = FakeConnector([dropped, connection])
         exchange = make_exchange(aligned_venue(), bus=InMemoryBus(), clock=clock, connect=connect)

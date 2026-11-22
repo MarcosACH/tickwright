@@ -14,6 +14,7 @@ import signal
 from collections.abc import Sequence
 
 from tickwright.adapters.clock import ManualClock
+from tickwright.venues.hyperliquid.transport import NO_CLOSE_FRAME, WsClose
 
 TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 """Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
@@ -254,25 +255,48 @@ def fill_entry(
     }
 
 
+VENUE_EXPIRED = WsClose(closed_by="venue", code=1000, reason="Expired")
+"""What the testnet sends when it expires a socket after about 11 minutes (#686)."""
+
+
 class FakeWsConnection:
     """A recorded-frame WS connection: replays frames, records sends, then idles
     (a live socket delivers nothing between trades) until closed. ``drained``
     fires once every frame has been read *and processed* — it is set when the
-    reader comes back for the frame after the last one."""
+    reader comes back for the frame after the last one.
 
-    def __init__(self, frames: list[str], *, drop_when_drained: bool = False) -> None:
+    ``hang_up()`` is the venue closing the socket. ``drop_when_drained`` hangs
+    up with ``close_info`` once the frames run out. A hung-up socket follows the
+    real one's rules: a send raises ``ConnectionError``, and ``close_info``
+    reads ``None`` until a send or a read finds the socket dead (#686)."""
+
+    def __init__(
+        self,
+        frames: list[str],
+        *,
+        drop_when_drained: bool = False,
+        close_info: WsClose = NO_CLOSE_FRAME,
+    ) -> None:
         self.sent: list[str] = []
         self.drained = asyncio.Event()
         self._frames = list(frames)
         self._closed = asyncio.Event()
+        # Set by a close() or a hang_up(). Either one ends the reader's idle wait.
+        self._ended = asyncio.Event()
         self._drop_when_drained = drop_when_drained
+        self._drop_close_info = close_info
+        self._hung_up: WsClose | None = None
+        self._close_info: WsClose | None = None
+
+    @property
+    def close_info(self) -> WsClose | None:
+        return self._close_info
 
     @property
     def closed(self) -> bool:
         """Whether ``close()`` was reached — a release is only observable here.
 
-        The ``_closed`` event exists for ``__anext__`` to park on, which makes a
-        closed socket indistinguishable from an idle one to a *reader*. A caller
+        To a *reader*, a closed socket and a hung-up one both just end. A caller
         asserting that something was released has no reader to ask, so it reads
         this instead.
         """
@@ -284,11 +308,24 @@ class FakeWsConnection:
         A test counting or refusing connects uses ``FakeConnector``."""
         return self
 
+    def hang_up(self, close: WsClose) -> None:
+        """The venue closes the socket, as ``close`` says.
+
+        Frames already sent can still be read. After them, iteration ends
+        without a stop() being asked.
+        """
+        self._hung_up = close
+        self._ended.set()
+
     async def send(self, message: str) -> None:
+        if self._hung_up is not None:
+            self._close_info = self._hung_up
+            raise ConnectionError("hyperliquid websocket closed")
         self.sent.append(message)
 
     async def close(self) -> None:
         self._closed.set()
+        self._ended.set()
 
     def __aiter__(self) -> "FakeWsConnection":
         return self
@@ -301,9 +338,10 @@ class FakeWsConnection:
             return self._frames.pop(0)
         self.drained.set()
         if self._drop_when_drained:
-            # The venue hung up: iteration ends without a stop() being asked.
-            raise StopAsyncIteration
-        await self._closed.wait()
+            self.hang_up(self._drop_close_info)
+        await self._ended.wait()
+        if self._hung_up is not None:
+            self._close_info = self._hung_up
         raise StopAsyncIteration
 
 

@@ -17,7 +17,7 @@ from collections.abc import Callable
 
 import pytest
 import structlog.testing
-from hyperliquid_fakes import FakeConnector, FakeWsConnection, RecordingClock
+from hyperliquid_fakes import VENUE_EXPIRED, FakeConnector, FakeWsConnection, RecordingClock
 
 from tickwright.venues.hyperliquid.config import HyperliquidConfig
 from tickwright.venues.hyperliquid.session import WsSession
@@ -382,7 +382,7 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
 
 
 class _SubscribeFails(FakeWsConnection):
-    """A socket that raises ``error`` on the subscribe send."""
+    """A socket whose subscribe send raises ``error``: a bug, not a dead socket."""
 
     def __init__(self, error: Exception) -> None:
         super().__init__([])
@@ -392,13 +392,41 @@ class _SubscribeFails(FakeWsConnection):
         raise self._error
 
 
+def _hung_up_before_subscribe() -> FakeWsConnection:
+    """A socket the venue closes before the subscribe goes out (#674)."""
+    dead = FakeWsConnection([])
+    dead.hang_up(VENUE_EXPIRED)
+    return dead
+
+
+def test_a_drop_during_the_reconnect_subscribe_logs_who_closed_the_socket() -> None:
+    """The subscribe-time drop (#674) is a venue hangup too. Its log needs the
+    same close details as any other drop (#686)."""
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    dead = _hung_up_before_subscribe()
+    third = FakeWsConnection(["frame-2"])
+
+    with structlog.testing.capture_logs() as logs:
+        _drive([first, dead, third], until_frames=2)
+
+    drops = [log for log in logs if log["event"] == "venue.socket_dropped"]
+    assert drops[1] == {
+        "event": "venue.socket_dropped",
+        "subscription": "test",
+        "closed_by": "venue",
+        "close_code": 1000,
+        "close_reason": "Expired",
+        "log_level": "warning",
+    }
+
+
 def test_a_socket_dropped_during_a_reconnect_subscribe_reconnects_rather_than_faulting() -> None:
     """The venue can close a socket before the reconnect subscribe is sent (#674).
 
     That is a venue hangup like any other. Faulting on it stopped the engine.
     """
     first = FakeWsConnection(["frame-1"], drop_when_drained=True)
-    dead = _SubscribeFails(ConnectionError("socket closed"))
+    dead = _hung_up_before_subscribe()
     third = FakeWsConnection(["frame-2"])
 
     with structlog.testing.capture_logs() as logs:
@@ -542,23 +570,34 @@ def test_a_quiet_socket_is_pinged_every_30_seconds_so_the_venue_keeps_it_open() 
 
 
 class _PingFails(FakeWsConnection):
-    """An idle socket that takes the subscribe and then refuses every ping."""
+    """An idle socket that takes the subscribe and then refuses every ping with
+    ``error``: a bug, not a dead socket."""
 
     def __init__(self, error: Exception) -> None:
         super().__init__([])
-        self.ping_failed = asyncio.Event()
         self._error = error
 
     async def send(self, message: str) -> None:
         if message == "subscribe":
             await super().send(message)
             return
-        self.ping_failed.set()
         raise self._error
 
 
-def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -> None:
-    """Fail the first ping, then let the venue drop the socket."""
+class _DiesAtFirstPing(FakeWsConnection):
+    """An idle socket the venue closes just before the first ping.
+
+    The ping is the first to find the socket dead. The read finds out after it.
+    """
+
+    async def send(self, message: str) -> None:
+        if message != "subscribe":
+            self.hang_up(VENUE_EXPIRED)
+        await super().send(message)
+
+
+def _run_until_the_ping_fails(connection: _DiesAtFirstPing, spare: FakeWsConnection) -> None:
+    """Send the first ping into a dead socket, then wait for the reconnect."""
     clock = RecordingClock()
 
     async def main() -> None:
@@ -575,8 +614,6 @@ def _run_until_the_ping_fails(connection: _PingFails, spare: FakeWsConnection) -
         running = asyncio.create_task(session.run())
         await connection.drained.wait()
         clock.advance_to(30 * _NS)
-        await connection.ping_failed.wait()
-        await connection.close()
         try:
             await spare.drained.wait()
         finally:
@@ -623,7 +660,7 @@ def test_a_ping_into_a_dead_socket_reconnects_rather_than_faulting() -> None:
     find out. That is the venue hanging up, which the session already answers
     with a reconnect. Faulting the engine for it would turn every dropped socket
     into a stopped engine."""
-    connection = _PingFails(ConnectionError("socket closed"))
+    connection = _DiesAtFirstPing([])
     spare = FakeWsConnection(["frame-after-reconnect"])
 
     _run_until_the_ping_fails(connection, spare)
@@ -631,16 +668,45 @@ def test_a_ping_into_a_dead_socket_reconnects_rather_than_faulting() -> None:
     assert spare.sent == ["subscribe"]
 
 
+def test_a_ping_into_a_dead_socket_logs_the_venue_close() -> None:
+    """The ping can be the first to find the socket dead. The drop log still
+    says who closed it and why, the same as for a drop the read finds (#686)."""
+    connection = _DiesAtFirstPing([])
+    spare = FakeWsConnection(["frame-after-reconnect"])
+
+    with structlog.testing.capture_logs() as logs:
+        _run_until_the_ping_fails(connection, spare)
+
+    drops = [log for log in logs if log["event"] == "venue.socket_dropped"]
+    assert [(d["closed_by"], d["close_code"], d["close_reason"]) for d in drops] == [
+        ("venue", 1000, "Expired")
+    ]
+
+
 def test_a_venue_hangup_logs_a_warning_that_names_the_subscription() -> None:
     """An operator has to be able to see a socket dropping (#672). The funding
     socket was dropped about once a minute and the log said nothing.
 
-    A stop ends the last connection too, and logs nothing: only one record."""
-    dropped = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    A stop ends the last connection too, and logs nothing: only one record.
+
+    The record also says who closed the socket and why (#686). Testnet expires
+    a socket after about 11 minutes, and only the close reason can prove it."""
+    dropped = FakeWsConnection(
+        ["frame-1"],
+        drop_when_drained=True,
+        close_info=VENUE_EXPIRED,
+    )
 
     with structlog.testing.capture_logs() as logs:
         _drive([dropped, FakeWsConnection(["frame-2"])], until_frames=2)
 
     assert [log for log in logs if log["event"] == "venue.socket_dropped"] == [
-        {"event": "venue.socket_dropped", "subscription": "test", "log_level": "warning"}
+        {
+            "event": "venue.socket_dropped",
+            "subscription": "test",
+            "closed_by": "venue",
+            "close_code": 1000,
+            "close_reason": "Expired",
+            "log_level": "warning",
+        }
     ]

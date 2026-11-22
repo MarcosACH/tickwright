@@ -22,7 +22,7 @@ from local_peers import silent_peer
 from websockets.asyncio.server import Request, Response, ServerConnection, serve
 
 from tickwright.venues.hyperliquid import transport
-from tickwright.venues.hyperliquid.transport import WsConnection, open_websocket
+from tickwright.venues.hyperliquid.transport import WsClose, WsConnection, open_websocket
 
 type _Handler = Callable[[ServerConnection], Awaitable[None]]
 type _Gate = Callable[[ServerConnection, Request], Response | None]
@@ -51,6 +51,91 @@ def test_bytes_frames_decode_to_str() -> None:
     # A normal close ends iteration too: the handler returning is the peer
     # closing with 1000, and the frame before it still arrives as ``str``.
     assert asyncio.run(scenario()) == ['{"channel": "pong"}']
+
+
+def test_a_venue_close_reads_as_the_venue_with_its_code_and_reason() -> None:
+    async def expire_the_socket(peer: ServerConnection) -> None:
+        # What the testnet sends after about 11 minutes (#686).
+        await peer.close(code=1000, reason="Expired")
+
+    async def scenario() -> WsClose | None:
+        async with _peer(expire_the_socket) as url:
+            connection = await open_websocket(url)
+            await _drain(connection)
+            return connection.close_info
+
+    assert asyncio.run(scenario()) == WsClose(closed_by="venue", code=1000, reason="Expired")
+
+
+def test_a_send_on_a_socket_the_venue_closed_records_the_close() -> None:
+    """A reconnect's subscribe can be the first to find a socket dead (#674).
+
+    No read has run yet, so only the failed send can record the close. The drop
+    log reads it from there (#686).
+    """
+
+    async def scenario() -> WsClose | None:
+        expired = asyncio.Event()
+
+        async def expire_the_socket(peer: ServerConnection) -> None:
+            # This returns once the client has answered the close frame.
+            await peer.close(code=1000, reason="Expired")
+            expired.set()
+
+        async with _peer(expire_the_socket) as url:
+            connection = await open_websocket(url)
+            await expired.wait()
+            with pytest.raises(ConnectionError):
+                await connection.send('{"method": "subscribe"}')
+            return connection.close_info
+
+    assert asyncio.run(scenario()) == WsClose(closed_by="venue", code=1000, reason="Expired")
+
+
+def test_a_socket_cut_with_no_close_frame_reads_as_unknown_with_no_code() -> None:
+    async def cut_the_socket(peer: ServerConnection) -> None:
+        peer.transport.abort()
+
+    async def scenario() -> WsClose | None:
+        async with _peer(cut_the_socket) as url:
+            connection = await open_websocket(url)
+            await _drain(connection)
+            return connection.close_info
+
+    # Neither side sent a close frame, so nothing says who ended it (#686).
+    assert asyncio.run(scenario()) == WsClose(closed_by="unknown", code=None, reason=None)
+
+
+def test_a_keepalive_timeout_reads_as_the_client_closing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A peer that stops answering pings is closed by our client, not the venue.
+
+    The constants are patched down so the timeout fires in well under a second.
+    With them left to ``websockets``, this would wait 50 s. The close wait is
+    patched too, because a peer that reads nothing never answers our close.
+    """
+    monkeypatch.setattr(transport, "WS_PING_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(transport, "WS_PING_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(transport, "WS_CLOSE_TIMEOUT_SECONDS", 0.1)
+
+    async def scenario() -> WsClose | None:
+        client_done = asyncio.Event()
+
+        async def stop_answering(peer: ServerConnection) -> None:
+            # A peer that reads nothing never sends a pong. It also never sees
+            # the client leave, so it is cut once the client is done.
+            peer.transport.pause_reading()
+            await client_done.wait()
+            peer.transport.abort()
+
+        async with _peer(stop_answering) as url:
+            connection = await open_websocket(url)
+            await asyncio.wait_for(_drain(connection), timeout=5)
+            client_done.set()
+            return connection.close_info
+
+    assert asyncio.run(scenario()) == WsClose(
+        closed_by="client", code=1011, reason="keepalive ping timeout"
+    )
 
 
 def test_an_abnormal_close_ends_iteration_instead_of_raising() -> None:

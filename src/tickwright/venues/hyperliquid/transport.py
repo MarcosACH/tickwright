@@ -9,10 +9,12 @@ caller keys on.
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
+    from websockets.exceptions import ConnectionClosed
 
 type PostJson = Callable[[str, dict[str, Any]], Awaitable[object]]
 """POSTs ``payload`` as JSON to ``url`` and returns the decoded response,
@@ -56,6 +58,24 @@ async def post_json(url: str, payload: dict[str, Any]) -> object:
         raise ConnectionError(f"hyperliquid request to {url} failed: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class WsClose:
+    """How a websocket ended, so a drop log can say who closed it and why (#686).
+
+    ``closed_by`` is the side that sent the first close frame. ``code`` and
+    ``reason`` come from that frame. A socket cut with no close frame at all
+    is ``"unknown"``, with no code and no reason.
+    """
+
+    closed_by: Literal["venue", "client", "unknown"]
+    code: int | None
+    reason: str | None
+
+
+NO_CLOSE_FRAME = WsClose(closed_by="unknown", code=None, reason=None)
+"""How a socket reads after a cut with no close frame from either side."""
+
+
 class WsConnection(Protocol):
     """The slice of a websocket connection its callers use (the mockable boundary).
 
@@ -63,7 +83,13 @@ class WsConnection(Protocol):
     connection dies — however it dies — and never raises for it; ``close()``
     also ends iteration (that is how ``stop`` unblocks the reader).
     ``send()`` on a dead connection raises ``ConnectionError``.
+
+    ``close_info`` says how the socket ended. It is ``None`` while the socket
+    is open, and set once iteration has ended or a send has failed.
     """
+
+    @property
+    def close_info(self) -> WsClose | None: ...
 
     async def send(self, message: str) -> None: ...
 
@@ -104,13 +130,41 @@ on. Both transports pin it against a real local socket that never answers
 """
 
 
+WS_PING_INTERVAL_SECONDS = 20.0
+"""How often the client sends a websocket-level ping frame.
+
+This is the client's keepalive, not the session's JSON ping that keeps the venue
+from closing an idle socket. Pinned for the reason ``WS_OPEN_TIMEOUT_SECONDS``
+gives. The value matches the client's default, so behavior does not change.
+A test patches it down to make a keepalive timeout fire fast (#686)."""
+
+WS_PING_TIMEOUT_SECONDS = 20.0
+"""How long the client waits for a pong before it closes the socket itself.
+
+Such a close is the client's, with code 1011. The drop log says so (#686).
+The value matches the client's default, so behavior does not change."""
+
+WS_CLOSE_TIMEOUT_SECONDS = 10.0
+"""How long the client waits for the peer to answer its close frame.
+
+After a keepalive timeout the peer is usually gone, so the socket ends only
+when this wait runs out. Pinned so a test can shorten it. The value matches the
+client's default, so behavior does not change."""
+
+
 async def open_websocket(url: str) -> WsConnection:
     """The real client, adapted to the seam: a failed connect is an ``OSError``
     (handshake refusals included), so the backoff loop owns every failure."""
     import websockets
 
     try:
-        connection = await websockets.connect(url, open_timeout=WS_OPEN_TIMEOUT_SECONDS)
+        connection = await websockets.connect(
+            url,
+            open_timeout=WS_OPEN_TIMEOUT_SECONDS,
+            ping_interval=WS_PING_INTERVAL_SECONDS,
+            ping_timeout=WS_PING_TIMEOUT_SECONDS,
+            close_timeout=WS_CLOSE_TIMEOUT_SECONDS,
+        )
         return _RealWsConnection(connection)
     except websockets.exceptions.WebSocketException as exc:
         raise ConnectionError(f"hyperliquid websocket connect failed: {exc}") from exc
@@ -126,11 +180,32 @@ class _RealWsConnection:
 
         self._connection = connection
         self._closed_exc = ConnectionClosed
+        self._close_info: WsClose | None = None
+
+    @property
+    def close_info(self) -> WsClose | None:
+        return self._close_info
+
+    def _record_close(self, exc: "ConnectionClosed") -> None:
+        # The side whose close frame came first closed the socket. The other
+        # frame, if any, is only the echo of it.
+        if exc.rcvd is not None and (exc.sent is None or exc.rcvd_then_sent):
+            self._close_info = WsClose(
+                closed_by="venue", code=exc.rcvd.code, reason=exc.rcvd.reason
+            )
+        elif exc.sent is not None:
+            # Our own close, such as a keepalive timeout (1011).
+            self._close_info = WsClose(
+                closed_by="client", code=exc.sent.code, reason=exc.sent.reason
+            )
+        else:
+            self._close_info = NO_CLOSE_FRAME
 
     async def send(self, message: str) -> None:
         try:
             await self._connection.send(message)
         except self._closed_exc as exc:
+            self._record_close(exc)
             # One type for a dead socket, so the session's ping can tell it
             # apart from a bug (#672).
             raise ConnectionError(f"hyperliquid websocket closed: {exc}") from exc
@@ -144,6 +219,7 @@ class _RealWsConnection:
     async def __anext__(self) -> str:
         try:
             message = await self._connection.recv()
-        except self._closed_exc:
+        except self._closed_exc as exc:
+            self._record_close(exc)
             raise StopAsyncIteration from None
         return message if isinstance(message, str) else message.decode()
