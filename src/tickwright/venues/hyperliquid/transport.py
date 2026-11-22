@@ -126,13 +126,41 @@ on. Both transports pin it against a real local socket that never answers
 """
 
 
+WS_PING_INTERVAL_SECONDS = 20.0
+"""How often the client sends a websocket-level ping frame.
+
+This is the client's keepalive, not the session's JSON ping that keeps the venue
+from closing an idle socket. Pinned for the reason ``WS_OPEN_TIMEOUT_SECONDS``
+gives. The value matches the client's default, so behavior does not change.
+A test patches it down to make a keepalive timeout fire fast (#686)."""
+
+WS_PING_TIMEOUT_SECONDS = 20.0
+"""How long the client waits for a pong before it closes the socket itself.
+
+Such a close is the client's, with code 1011. The drop log says so (#686).
+The value matches the client's default, so behavior does not change."""
+
+WS_CLOSE_TIMEOUT_SECONDS = 10.0
+"""How long the client waits for the peer to answer its close frame.
+
+After a keepalive timeout the peer is usually gone, so the socket ends only
+when this wait runs out. Pinned so a test can shorten it. The value matches the
+client's default, so behavior does not change."""
+
+
 async def open_websocket(url: str) -> WsConnection:
     """The real client, adapted to the seam: a failed connect is an ``OSError``
     (handshake refusals included), so the backoff loop owns every failure."""
     import websockets
 
     try:
-        connection = await websockets.connect(url, open_timeout=WS_OPEN_TIMEOUT_SECONDS)
+        connection = await websockets.connect(
+            url,
+            open_timeout=WS_OPEN_TIMEOUT_SECONDS,
+            ping_interval=WS_PING_INTERVAL_SECONDS,
+            ping_timeout=WS_PING_TIMEOUT_SECONDS,
+            close_timeout=WS_CLOSE_TIMEOUT_SECONDS,
+        )
         return _RealWsConnection(connection)
     except websockets.exceptions.WebSocketException as exc:
         raise ConnectionError(f"hyperliquid websocket connect failed: {exc}") from exc
@@ -155,9 +183,16 @@ class _RealWsConnection:
         return self._close_info
 
     def _record_close(self, exc: "ConnectionClosed") -> None:
-        if exc.rcvd is not None:
+        # The side whose close frame came first closed the socket. The other
+        # frame, if any, is only the echo of it.
+        if exc.rcvd is not None and (exc.sent is None or exc.rcvd_then_sent):
             self._close_info = WsClose(
                 closed_by="venue", code=exc.rcvd.code, reason=exc.rcvd.reason
+            )
+        elif exc.sent is not None:
+            # Our own close, such as a keepalive timeout (1011).
+            self._close_info = WsClose(
+                closed_by="client", code=exc.sent.code, reason=exc.sent.reason
             )
         else:
             self._close_info = WsClose(closed_by="unknown", code=None, reason=None)

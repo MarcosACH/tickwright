@@ -81,6 +81,38 @@ def test_a_socket_cut_with_no_close_frame_reads_as_unknown_with_no_code() -> Non
     assert asyncio.run(scenario()) == WsClose(closed_by="unknown", code=None, reason=None)
 
 
+def test_a_keepalive_timeout_reads_as_the_client_closing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A peer that stops answering pings is closed by our client, not the venue.
+
+    The constants are patched down so the timeout fires in well under a second.
+    With them left to ``websockets``, this would wait 50 s. The close wait is
+    patched too, because a peer that reads nothing never answers our close.
+    """
+    monkeypatch.setattr(transport, "WS_PING_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(transport, "WS_PING_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(transport, "WS_CLOSE_TIMEOUT_SECONDS", 0.1)
+
+    async def scenario() -> WsClose | None:
+        client_done = asyncio.Event()
+
+        async def stop_answering(peer: ServerConnection) -> None:
+            # A peer that reads nothing never sends a pong. It also never sees
+            # the client leave, so it is cut once the client is done.
+            peer.transport.pause_reading()
+            await client_done.wait()
+            peer.transport.abort()
+
+        async with _peer(stop_answering) as url:
+            connection = await open_websocket(url)
+            await asyncio.wait_for(_drain(connection), timeout=5)
+            client_done.set()
+            return connection.close_info
+
+    assert asyncio.run(scenario()) == WsClose(
+        closed_by="client", code=1011, reason="keepalive ping timeout"
+    )
+
+
 def test_an_abnormal_close_ends_iteration_instead_of_raising() -> None:
     async def send_then_drop_the_socket(peer: ServerConnection) -> None:
         await peer.send("frame-1")
