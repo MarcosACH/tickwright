@@ -67,6 +67,31 @@ def test_a_venue_close_reads_as_the_venue_with_its_code_and_reason() -> None:
     assert asyncio.run(scenario()) == WsClose(closed_by="venue", code=1000, reason="Expired")
 
 
+def test_a_send_on_a_socket_the_venue_closed_records_the_close() -> None:
+    """A reconnect's subscribe can be the first to find a socket dead (#674).
+
+    No read has run yet, so only the failed send can record the close. The drop
+    log reads it from there (#686).
+    """
+
+    async def scenario() -> WsClose | None:
+        expired = asyncio.Event()
+
+        async def expire_the_socket(peer: ServerConnection) -> None:
+            # This returns once the client has answered the close frame.
+            await peer.close(code=1000, reason="Expired")
+            expired.set()
+
+        async with _peer(expire_the_socket) as url:
+            connection = await open_websocket(url)
+            await expired.wait()
+            with pytest.raises(ConnectionError):
+                await connection.send('{"method": "subscribe"}')
+            return connection.close_info
+
+    assert asyncio.run(scenario()) == WsClose(closed_by="venue", code=1000, reason="Expired")
+
+
 def test_a_socket_cut_with_no_close_frame_reads_as_unknown_with_no_code() -> None:
     async def cut_the_socket(peer: ServerConnection) -> None:
         peer.transport.abort()
