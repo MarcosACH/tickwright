@@ -72,6 +72,10 @@ class WsClose:
     reason: str | None
 
 
+NO_CLOSE_FRAME = WsClose(closed_by="unknown", code=None, reason=None)
+"""How a socket reads after a cut with no close frame from either side."""
+
+
 class WsConnection(Protocol):
     """The slice of a websocket connection its callers use (the mockable boundary).
 
@@ -195,7 +199,7 @@ class _RealWsConnection:
                 closed_by="client", code=exc.sent.code, reason=exc.sent.reason
             )
         else:
-            self._close_info = WsClose(closed_by="unknown", code=None, reason=None)
+            self._close_info = NO_CLOSE_FRAME
 
     async def send(self, message: str) -> None:
         try:

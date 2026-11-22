@@ -33,7 +33,7 @@ from tickwright.domain import Backoff, Clock
 from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
-from .transport import Connect, WsClose, WsConnection
+from .transport import NO_CLOSE_FRAME, Connect, WsConnection
 
 PING_INTERVAL_SECONDS = 30
 """How often an open socket sends the venue a ping.
@@ -174,7 +174,7 @@ class WsSession:
         A socket that cannot say how it ended logs as ``unknown``. That is
         the honest answer, and it keeps one shape for the event.
         """
-        close = connection.close_info or WsClose(closed_by="unknown", code=None, reason=None)
+        close = connection.close_info or NO_CLOSE_FRAME
         named_event(
             NamedEvent.VENUE_SOCKET_DROPPED,
             subscription=self._name,

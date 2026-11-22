@@ -14,7 +14,7 @@ import signal
 from collections.abc import Sequence
 
 from tickwright.adapters.clock import ManualClock
-from tickwright.venues.hyperliquid.transport import WsClose
+from tickwright.venues.hyperliquid.transport import NO_CLOSE_FRAME, WsClose
 
 TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 """Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
@@ -254,9 +254,6 @@ def fill_entry(
         "tid": tid,
     }
 
-
-NO_CLOSE_FRAME = WsClose(closed_by="unknown", code=None, reason=None)
-"""How a real socket reads after a cut with no close frame from either side."""
 
 VENUE_EXPIRED = WsClose(closed_by="venue", code=1000, reason="Expired")
 """What the testnet sends when it expires a socket after about 11 minutes (#686)."""
