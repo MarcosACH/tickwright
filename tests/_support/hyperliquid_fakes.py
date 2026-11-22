@@ -14,6 +14,7 @@ import signal
 from collections.abc import Sequence
 
 from tickwright.adapters.clock import ManualClock
+from tickwright.venues.hyperliquid.transport import WsClose
 
 TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 """Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
@@ -258,14 +259,29 @@ class FakeWsConnection:
     """A recorded-frame WS connection: replays frames, records sends, then idles
     (a live socket delivers nothing between trades) until closed. ``drained``
     fires once every frame has been read *and processed* — it is set when the
-    reader comes back for the frame after the last one."""
+    reader comes back for the frame after the last one.
 
-    def __init__(self, frames: list[str], *, drop_when_drained: bool = False) -> None:
+    ``close_info`` is how the venue ended a dropped socket. It reads ``None``
+    until the drop, like a real socket that is still open."""
+
+    def __init__(
+        self,
+        frames: list[str],
+        *,
+        drop_when_drained: bool = False,
+        close_info: WsClose | None = None,
+    ) -> None:
         self.sent: list[str] = []
         self.drained = asyncio.Event()
         self._frames = list(frames)
         self._closed = asyncio.Event()
         self._drop_when_drained = drop_when_drained
+        self._drop_close_info = close_info
+        self._close_info: WsClose | None = None
+
+    @property
+    def close_info(self) -> WsClose | None:
+        return self._close_info
 
     @property
     def closed(self) -> bool:
@@ -302,6 +318,7 @@ class FakeWsConnection:
         self.drained.set()
         if self._drop_when_drained:
             # The venue hung up: iteration ends without a stop() being asked.
+            self._close_info = self._drop_close_info
             raise StopAsyncIteration
         await self._closed.wait()
         raise StopAsyncIteration

@@ -22,7 +22,7 @@ from local_peers import silent_peer
 from websockets.asyncio.server import Request, Response, ServerConnection, serve
 
 from tickwright.venues.hyperliquid import transport
-from tickwright.venues.hyperliquid.transport import WsConnection, open_websocket
+from tickwright.venues.hyperliquid.transport import WsClose, WsConnection, open_websocket
 
 type _Handler = Callable[[ServerConnection], Awaitable[None]]
 type _Gate = Callable[[ServerConnection, Request], Response | None]
@@ -51,6 +51,20 @@ def test_bytes_frames_decode_to_str() -> None:
     # A normal close ends iteration too: the handler returning is the peer
     # closing with 1000, and the frame before it still arrives as ``str``.
     assert asyncio.run(scenario()) == ['{"channel": "pong"}']
+
+
+def test_a_venue_close_reads_as_the_venue_with_its_code_and_reason() -> None:
+    async def expire_the_socket(peer: ServerConnection) -> None:
+        # What the testnet sends after about 11 minutes (#686).
+        await peer.close(code=1000, reason="Expired")
+
+    async def scenario() -> WsClose | None:
+        async with _peer(expire_the_socket) as url:
+            connection = await open_websocket(url)
+            await _drain(connection)
+            return connection.close_info
+
+    assert asyncio.run(scenario()) == WsClose(closed_by="venue", code=1000, reason="Expired")
 
 
 def test_an_abnormal_close_ends_iteration_instead_of_raising() -> None:

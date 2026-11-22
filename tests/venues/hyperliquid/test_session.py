@@ -21,7 +21,7 @@ from hyperliquid_fakes import FakeConnector, FakeWsConnection, RecordingClock
 
 from tickwright.venues.hyperliquid.config import HyperliquidConfig
 from tickwright.venues.hyperliquid.session import WsSession
-from tickwright.venues.hyperliquid.transport import WsConnection
+from tickwright.venues.hyperliquid.transport import WsClose, WsConnection
 
 CONFIG = HyperliquidConfig(symbols=["BTC"])
 
@@ -384,12 +384,41 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
 class _SubscribeFails(FakeWsConnection):
     """A socket that raises ``error`` on the subscribe send."""
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception, *, close_info: WsClose | None = None) -> None:
         super().__init__([])
         self._error = error
+        self._failed_close_info = close_info
+
+    @property
+    def close_info(self) -> WsClose | None:
+        return self._failed_close_info
 
     async def send(self, message: str) -> None:
         raise self._error
+
+
+def test_a_drop_during_the_reconnect_subscribe_logs_who_closed_the_socket() -> None:
+    """The subscribe-time drop (#674) is a venue hangup too. Its log needs the
+    same close details as any other drop (#686)."""
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    dead = _SubscribeFails(
+        ConnectionError("socket closed"),
+        close_info=WsClose(closed_by="venue", code=1000, reason="Expired"),
+    )
+    third = FakeWsConnection(["frame-2"])
+
+    with structlog.testing.capture_logs() as logs:
+        _drive([first, dead, third], until_frames=2)
+
+    drops = [log for log in logs if log["event"] == "venue.socket_dropped"]
+    assert drops[1] == {
+        "event": "venue.socket_dropped",
+        "subscription": "test",
+        "closed_by": "venue",
+        "close_code": 1000,
+        "close_reason": "Expired",
+        "log_level": "warning",
+    }
 
 
 def test_a_socket_dropped_during_a_reconnect_subscribe_reconnects_rather_than_faulting() -> None:
@@ -635,12 +664,26 @@ def test_a_venue_hangup_logs_a_warning_that_names_the_subscription() -> None:
     """An operator has to be able to see a socket dropping (#672). The funding
     socket was dropped about once a minute and the log said nothing.
 
-    A stop ends the last connection too, and logs nothing: only one record."""
-    dropped = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    A stop ends the last connection too, and logs nothing: only one record.
+
+    The record also says who closed the socket and why (#686). Testnet expires
+    a socket after about 11 minutes, and only the close reason can prove it."""
+    dropped = FakeWsConnection(
+        ["frame-1"],
+        drop_when_drained=True,
+        close_info=WsClose(closed_by="venue", code=1000, reason="Expired"),
+    )
 
     with structlog.testing.capture_logs() as logs:
         _drive([dropped, FakeWsConnection(["frame-2"])], until_frames=2)
 
     assert [log for log in logs if log["event"] == "venue.socket_dropped"] == [
-        {"event": "venue.socket_dropped", "subscription": "test", "log_level": "warning"}
+        {
+            "event": "venue.socket_dropped",
+            "subscription": "test",
+            "closed_by": "venue",
+            "close_code": 1000,
+            "close_reason": "Expired",
+            "log_level": "warning",
+        }
     ]

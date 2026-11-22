@@ -33,7 +33,7 @@ from tickwright.domain import Backoff, Clock
 from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
-from .transport import Connect, WsConnection
+from .transport import Connect, WsClose, WsConnection
 
 PING_INTERVAL_SECONDS = 30
 """How often an open socket sends the venue a ping.
@@ -156,7 +156,7 @@ class WsSession:
                     # pacing is not reset, because no socket was subscribed.
                     if self._stopping:
                         return
-                    named_event(NamedEvent.VENUE_SOCKET_DROPPED, subscription=self._name)
+                    self._log_drop(connection)
                     await backoff.sleep_on(self._clock)
                     continue
             backoff.reset()
@@ -165,8 +165,23 @@ class WsSession:
             # venue hanging up, so back off once and go resubscribe.
             if self._stopping:
                 return
-            named_event(NamedEvent.VENUE_SOCKET_DROPPED, subscription=self._name)
+            self._log_drop(connection)
             await backoff.sleep_on(self._clock)
+
+    def _log_drop(self, connection: WsConnection) -> None:
+        """Name the drop, with who closed the socket and why (#686).
+
+        A socket that cannot say how it ended logs as ``unknown``. That is
+        the honest answer, and it keeps one shape for the event.
+        """
+        close = connection.close_info or WsClose(closed_by="unknown", code=None, reason=None)
+        named_event(
+            NamedEvent.VENUE_SOCKET_DROPPED,
+            subscription=self._name,
+            closed_by=close.closed_by,
+            close_code=close.code,
+            close_reason=close.reason,
+        )
 
     async def _subscribe_or_close(self, connection: WsConnection) -> None:
         """Subscribe a socket that was just opened, or close it and raise.
