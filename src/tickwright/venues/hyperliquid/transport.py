@@ -159,6 +159,8 @@ class _RealWsConnection:
             self._close_info = WsClose(
                 closed_by="venue", code=exc.rcvd.code, reason=exc.rcvd.reason
             )
+        else:
+            self._close_info = WsClose(closed_by="unknown", code=None, reason=None)
 
     async def send(self, message: str) -> None:
         try:

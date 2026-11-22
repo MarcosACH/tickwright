@@ -67,6 +67,20 @@ def test_a_venue_close_reads_as_the_venue_with_its_code_and_reason() -> None:
     assert asyncio.run(scenario()) == WsClose(closed_by="venue", code=1000, reason="Expired")
 
 
+def test_a_socket_cut_with_no_close_frame_reads_as_unknown_with_no_code() -> None:
+    async def cut_the_socket(peer: ServerConnection) -> None:
+        peer.transport.abort()
+
+    async def scenario() -> WsClose | None:
+        async with _peer(cut_the_socket) as url:
+            connection = await open_websocket(url)
+            await _drain(connection)
+            return connection.close_info
+
+    # Neither side sent a close frame, so nothing says who ended it (#686).
+    assert asyncio.run(scenario()) == WsClose(closed_by="unknown", code=None, reason=None)
+
+
 def test_an_abnormal_close_ends_iteration_instead_of_raising() -> None:
     async def send_then_drop_the_socket(peer: ServerConnection) -> None:
         await peer.send("frame-1")
