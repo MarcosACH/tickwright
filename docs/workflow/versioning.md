@@ -187,3 +187,7 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   or a fill or funding payment during the wait, leaves every alert standing (#682).
   `account.reconciled` counts the cleared figures as `cleared`. `valuation.divergence` logs each
   mark and its age (#682). Runtime bump: pydantic-settings 2.16.3. Bump PR backed by #684.
+- **v0.8.6** (2026-11-22). A diagnostic for the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. `venue.socket_dropped` now logs `closed_by`,
+  `close_code` and `close_reason`. So an operator can tell a venue close from a client close. A
+  keepalive ping timeout logs as a client close with code `1011` (#686). Bump PR backed by #688.
