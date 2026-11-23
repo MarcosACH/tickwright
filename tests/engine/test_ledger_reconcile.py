@@ -4420,6 +4420,74 @@ def test_a_gap_only_repeated_prices_follow_is_alerted_with_the_updates_it_checke
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_a_cost_basis_gap_a_mark_move_shifts_to_another_figure_is_still_alerted() -> None:
+    """A real gap must not hide behind a price move (#690).
+
+    The venue entered BTC at 64709, the ledger at 64809. The venue's cash is
+    0.2 lower to match, so net cash agrees and Tier-1 finds nothing. Its free
+    margin is pinned to the ledger's, so the case watches the mark-driven
+    figures alone. At the venue's own mark of 65309, notional and equity
+    agree. But ``unrealized_pnl`` is 1.000 against the venue's 1.200, a 0.2
+    gap past the band.
+
+    At 65409 the ledger's uPnL is 1.200 and that gap closes. Now notional and
+    equity are 0.2 out instead. No update cleared every figure at once, so the
+    pass alerts on the figures outside the band at the last update checked.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65309")
+    venue = _held(
+        "100001.000",
+        ("BTC", "0.002", "1.200"),
+        entry={"BTC": "64709"},
+        free_margin="100000.000",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65409", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100001.200", "venue": "100001.000"},
+        {"field": "notional", "symbol": "BTC", "ledger": "130.818", "venue": "130.618"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
+    """``cleared`` is 0 or every alert, never a part (#690).
+
+    The same cost basis gap, first marked at 65000. Four figures alert. At
+    65409 only notional and equity are still out. That update did not clear
+    the account, so nothing was cleared, even though two figures closed.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held(
+        "100001.000",
+        ("BTC", "0.002", "1.200"),
+        entry={"BTC": "64709"},
+        free_margin="100000.000",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65409", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert [alert["field"] for alert in _alerts(logs)] == ["equity", "notional"]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_gap_with_no_new_mark_says_it_checked_no_update() -> None:
     """``rechecked`` is 0 when the feed sends nothing in the wait (#690)."""
     clock = _WaitingClock()

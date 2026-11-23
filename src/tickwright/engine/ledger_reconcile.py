@@ -1253,26 +1253,29 @@ class ReconcileFindings:
         band: ValuationBand,
         now_ns: int,
     ) -> tuple[Divergence, ...]:
-        """This pass's alerts that a newer reading still puts outside the band (#682).
+        """Every figure a newer reading puts outside the band (#682, #690).
 
-        The second check on the next mark. ``state`` is the snapshot this pass
+        The check on each new mark. ``state`` is the snapshot this pass
         classified, and ``reading`` is the ledger read again after a new mark.
         The Tier-2 rule is the same as ``classify``'s. Each alert comes back
         with the newer reading's figures, since that is the comparison it now
         stands on.
 
-        Only figures this pass alerted on can come back. The newer reading is
-        taken after this pass's heals. A heal moves only figures a Tier-1
-        finding explained, so none of them alerted at the first check. Read
-        again, they could look like fresh gaps. A figure only the newer reading
-        puts outside the band waits for the next pass.
+        Every figure is judged, not only the ones this pass alerted on (#690).
+        A mark move can close one figure's gap and open another's. Judging
+        only the first would let a real gap hide behind a price move.
+
+        One exception. The newer reading is taken after this pass's heals. A
+        heal moves only figures a Tier-1 finding explained. Read again, they
+        could look like fresh gaps. So a figure this pass's Tier-1 findings
+        explained stays out, as it did at the first check.
 
         The heal plan is not asked again, so this takes no fill count and no
         ``previous``.
         """
-        alerted = {(alert.field, alert.symbol) for alert in self.alerts}
+        healed = _tier_1_grains(self.divergences)
         again, _ = _alerting(_measured(state, reading), reading, band=band, now_ns=now_ns)
-        return tuple(alert for alert in again if (alert.field, alert.symbol) in alerted)
+        return tuple(alert for alert in again if not _explained_by_tier_1(alert, healed, reading))
 
 
 class LedgerReconciliation:
@@ -1482,7 +1485,7 @@ class LedgerReconciliation:
             _diverged(divergence, standing)
         self._leverage_drift(state)
         # A readout of the findings, plus ``cleared``, which only the second
-        # check knows (#682).
+        # check knows (#682). One update clears every alert or none (#690).
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
             tier_1=findings.tier_1,
@@ -1492,7 +1495,7 @@ class LedgerReconciliation:
             deferred=findings.deferred,
             unconfirmed=findings.unconfirmed,
             unpriced=findings.unpriced,
-            cleared=len(findings.alerts) - len(alerts),
+            cleared=0 if alerts else len(findings.alerts),
         )
         return divergences
 
