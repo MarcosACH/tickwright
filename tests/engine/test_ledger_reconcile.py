@@ -4307,7 +4307,8 @@ def _during_the_wait(
 
     The loop runs between two acts, so the pass sees each one on its own. A
     pass that has ended skips the acts left, so the case fails on its
-    assertions instead of hanging.
+    assertions instead of hanging. After the last act the 5 s run out, since
+    the pass checks every update until then (#690).
     """
 
     async def scenario() -> tuple[Divergence, ...] | None:
@@ -4321,6 +4322,8 @@ def _during_the_wait(
             act()
             for _ in range(10):
                 await asyncio.sleep(0)
+        if not task.done():
+            clock.advance_to(clock.timestamp_ns() + 5_000_000_000)
         return await task
 
     return asyncio.run(scenario())
@@ -4349,6 +4352,34 @@ def test_a_gap_the_next_mark_closes_is_not_alerted_and_is_counted_as_cleared() -
     with capture_events() as logs:
         _during_the_wait(
             cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 4
+
+
+def test_a_gap_a_later_mark_closes_after_a_repeated_price_is_not_alerted() -> None:
+    """The soak's race on a repeated price (#690).
+
+    Hyperliquid pushes a mark about once a second but moves the price only
+    about every 3 s. So the next mark often repeats the old price with a newer
+    stamp. Here the feed pushes 65000 again, then the venue's 65309. The pass
+    must keep checking until 65309 arrives, and then nothing is left to alert.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65000", ts_ns=_MARK_TS_NS + 1),
+            lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 2),
         )
 
     assert _alerts(logs) == []

@@ -1496,16 +1496,19 @@ class LedgerReconciliation:
         reading: LedgerReading,
         now_ns: int,
     ) -> _Standing:
-        """The alerts still outside the band after the next mark (#682).
+        """The alerts still outside the band after each new mark (#682, #690).
 
         The venue's read can be one mark update ahead of the feed. On testnet
         one update can move the mark past the band. So each alert waits for a
         new mark on every symbol its figure is computed from. The ledger is then
-        read again and compared against the same snapshot. A gap the new mark
+        read again and compared against the same snapshot. A gap a new mark
         closes was the race and is not alerted. Which alerts stay is
         ``ReconcileFindings.still_alerting``'s answer. This method owns the wait.
 
-        The wait is bounded. With no new mark in time, every alert stands. A
+        The feed often repeats the old price with a newer stamp (#690). So the
+        check runs on every update in the wait, not only the first.
+
+        The wait is bounded. With no closing mark in time, the alerts stand. A
         missing mark must never hide a gap.
         """
         first = _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
@@ -1517,31 +1520,43 @@ class LedgerReconciliation:
                 for alert in first.alerts
             )
         )
-        observed = {symbol: first.reading.mark_observed[symbol] for symbol in terms}
         writes_before = self._portfolio.writes_applied
-        marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
+        standing = first
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
         try:
-            await asyncio.wait((marks, timer), return_when=asyncio.FIRST_COMPLETED)
+            # Every update in the wait, not only the first (#690). The feed
+            # often repeats the old price with a newer stamp. A check on the
+            # first update alone would compare the same gap twice.
+            while True:
+                observed = {symbol: standing.reading.mark_observed[symbol] for symbol in terms}
+                marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
+                try:
+                    await asyncio.wait((marks, timer), return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    # Also on a cancel mid-wait, so no task outlives the pass.
+                    marks.cancel()
+                if timer.done() or not marks.done() or marks.cancelled():
+                    return standing
+                # A failed wait must not count as a new mark.
+                marks.result()
+                # A fill or a funding payment inside the wait is in the ledger
+                # but not in the snapshot. A check would see it as a Tier-1
+                # gap. A size gap silences its symbol's Tier-2 figures, and a
+                # cash gap silences every account figure. Either would hide a
+                # real gap.
+                if self._portfolio.writes_applied != writes_before:
+                    return first
+                reading = self._portfolio.ledger_reading(snapshot=state)
+                now_ns = self._checkpointer.clock.timestamp_ns()
+                standing = _Standing(
+                    alerts=findings.still_alerting(state, reading, band=self._band, now_ns=now_ns),
+                    reading=reading,
+                    now_ns=now_ns,
+                )
+                if not standing.alerts:
+                    return standing
         finally:
-            # Also on a cancel mid-wait, so neither task outlives the pass.
-            marks.cancel()
             timer.cancel()
-        if not marks.done() or marks.cancelled():
-            return first
-        # A fill or a funding payment inside the wait is in the ledger but not
-        # in the snapshot. The second check would see it as a Tier-1 gap. A
-        # size gap silences its symbol's Tier-2 figures, and a cash gap
-        # silences every account figure. Either would hide a real gap.
-        if self._portfolio.writes_applied != writes_before:
-            return first
-        reading = self._portfolio.ledger_reading(snapshot=state)
-        now_ns = self._checkpointer.clock.timestamp_ns()
-        return _Standing(
-            alerts=findings.still_alerting(state, reading, band=self._band, now_ns=now_ns),
-            reading=reading,
-            now_ns=now_ns,
-        )
 
     def _leverage_drift(self, state: VenueAccountState) -> None:
         """Alert on a held symbol whose venue setting no longer matches config
