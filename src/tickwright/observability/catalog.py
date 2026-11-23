@@ -365,7 +365,9 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: frozenset({"scope"}),
     NamedEvent.ACCOUNT_HEALED: frozenset({"field", "symbol", "ledger", "venue", "event_id"}),
     NamedEvent.ACCOUNT_MODE_UNVERIFIED: frozenset({"reason"}),
-    NamedEvent.VALUATION_DIVERGENCE: frozenset({"field", "symbol", "ledger", "venue", "marks"}),
+    NamedEvent.VALUATION_DIVERGENCE: frozenset(
+        {"field", "symbol", "ledger", "venue", "marks", "rechecked"}
+    ),
     NamedEvent.LEVERAGE_DIVERGENCE: frozenset(
         {
             "symbol",

@@ -266,11 +266,16 @@ class _Standing:
 
     The three travel together so the alert can name the mark each figure was
     valued at, and that mark's age, from the same comparison.
+
+    ``rechecked`` counts the mark updates checked in the wait (#690). Zero
+    means no new mark arrived. It tells that apart from several marks that
+    all left the gap open.
     """
 
     alerts: tuple[Divergence, ...]
     reading: LedgerReading
     now_ns: int
+    rechecked: int = 0
 
 
 _Finding = tuple[DivergenceField, str | None, Decimal]
@@ -317,6 +322,8 @@ def _diverged(divergence: Divergence, standing: _Standing) -> None:
     as ``"BTC=65100 age=0.300s, ETH=3000 age=0.410s"``. Without it, the soak
     had to line each alert up against the feed by hand. One string, because
     ADR-0020 keeps every log value a scalar.
+
+    ``rechecked`` is the number of mark updates the wait checked (#690).
     """
     reading = standing.reading
     marks = ", ".join(
@@ -330,6 +337,7 @@ def _diverged(divergence: Divergence, standing: _Standing) -> None:
         ledger=str(_shown(divergence.ledger, beside=divergence.venue)),
         venue=str(divergence.venue),
         marks=marks,
+        rechecked=standing.rechecked,
     )
 
 
@@ -1552,6 +1560,7 @@ class LedgerReconciliation:
                     alerts=findings.still_alerting(state, reading, band=self._band, now_ns=now_ns),
                     reading=reading,
                     now_ns=now_ns,
+                    rechecked=standing.rechecked + 1,
                 )
                 if not standing.alerts:
                     return standing

@@ -4386,6 +4386,58 @@ def test_a_gap_a_later_mark_closes_after_a_repeated_price_is_not_alerted() -> No
     assert _recorded(logs)["cleared"] == 4
 
 
+def test_a_gap_only_repeated_prices_follow_is_alerted_with_the_updates_it_checked() -> None:
+    """Repeats of the old price never close a gap (#690).
+
+    The feed pushes 65000 twice more with newer stamps, then the 5 s run out.
+    Every alert stands. Each one names the mark of the last update checked,
+    0.5 s old, and ``rechecked`` says two updates were checked. So "no new
+    mark" and "two marks, none matched" read differently in the log.
+    """
+    clock = _WaitingClock(start_ns=10_000_000_000)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000", ts_ns=9_000_000_000)
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65000", ts_ns=9_400_000_000),
+            lambda: _mark(projection, "BTC", "65000", ts_ns=9_500_000_000),
+        )
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["marks"], log["rechecked"]) for log in alerts] == [
+        ("equity", "BTC=65000 age=0.500s", 2),
+        ("unrealized_pnl", "BTC=65000 age=0.500s", 2),
+        ("notional", "BTC=65000 age=0.500s", 2),
+        ("margin_used", "BTC=65000 age=0.500s", 2),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_a_gap_with_no_new_mark_says_it_checked_no_update() -> None:
+    """``rechecked`` is 0 when the feed sends nothing in the wait (#690)."""
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock)
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert len(alerts) == 4
+    assert {log["rechecked"] for log in alerts} == {0}
+
+
 def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
     """A real gap survives the second check (#682).
 
