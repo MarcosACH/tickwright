@@ -36,7 +36,7 @@ from .checkpoint import Checkpointer
 from .portfolio import HealChange, LedgerReading
 
 _ZERO = Decimal("0")
-# How long a Tier-2 alert waits for the next mark before it stands (#682).
+# How long a Tier-2 alert waits for a closing mark before it stands (#682, #690).
 # Testnet sends a mark about once a second, and the soak saw the next one
 # 0.0 to 1.1 s after the comparison. Far below the 60 s account interval.
 _RECHECK_WAIT_SECONDS = 5.0
@@ -984,8 +984,8 @@ def _alerting(
 ) -> tuple[tuple[Divergence, ...], int]:
     """The Tier-2 rule: which figures alert, and how many a stale mark held back.
 
-    One function, so the first check and the second check on the next mark
-    (#682) apply the same rule. A figure alerts when no Tier-1 finding explains
+    One function, so the first check and each check in the wait (#682, #690)
+    apply the same rule. A figure alerts when no Tier-1 finding explains
     it, the band does not cover it, and no term of it rests on a stale mark.
     """
     explained = _tier_1_grains(divergences)
@@ -1030,8 +1030,8 @@ class ReconcileFindings:
     operator is woken for; the two are deliberately not one filtered list. A
     pass records what it found whatever the band absorbs, so the counts on
     ``account.reconciled`` come off the first. The ``valuation.divergence``
-    lines come off the second, once the cycle has checked them again on the
-    next mark (#682).
+    lines come off the second, once the cycle has checked them again on each
+    new mark in the wait (#682, #690).
 
     The Tier-1 findings come with their heal plan (#335). Which findings heal
     is decided here, once, beside the findings themselves. The cycle applies
@@ -1393,10 +1393,9 @@ class LedgerReconciliation:
         alert about our own arithmetic, and one no Tier-1 equity finding exists
         to suppress it against.
 
-        The second check on the next mark (#682) does read the ledger again
-        after the heal. That is safe because it can only drop alerts this
-        reading raised, never add one. A heal moves only figures a Tier-1
-        finding explained, so none of them alerted here. See
+        The checks in the wait (#682, #690) do read the ledger again after
+        the heal. That is safe because a heal moves only figures a Tier-1
+        finding explained, and those checks leave every such figure out. See
         ``ReconcileFindings.still_alerting``.
 
         One thing does come between that reading and the write, and only on a
