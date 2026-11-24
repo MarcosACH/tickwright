@@ -4644,6 +4644,42 @@ def test_a_fill_during_the_wait_leaves_the_first_checks_alerts_standing() -> Non
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_a_fill_after_a_repeated_price_ends_the_wait_with_every_alert_standing() -> None:
+    """A fill still ends the wait after an update was checked (#690).
+
+    The feed repeats 65000 and the pass checks it. Then a 0.002 BTC fill
+    lands, and then the venue's 65309. At 65309 the fill's size gap would
+    silence BTC's figures and the pass would look clear. So the fill ends the
+    wait. The alerts stand at the last update checked, the repeat, and
+    ``rechecked`` says one update was checked.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65000", ts_ns=_MARK_TS_NS + 1),
+            lambda: _book_fill(projection, quantity="0.002", price="65050", seq=2),
+            lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 2),
+        )
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["ledger"], log["rechecked"]) for log in alerts] == [
+        ("equity", "100000.382", 1),
+        ("unrealized_pnl", "0.382", 1),
+        ("notional", "130.000", 1),
+        ("margin_used", "0.382", 1),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_funding_payment_during_the_wait_leaves_the_first_checks_alerts_standing() -> None:
     """A funding payment inside the wait must not clear a real gap (#682).
 

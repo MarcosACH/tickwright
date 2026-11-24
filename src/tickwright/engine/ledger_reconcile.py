@@ -1554,9 +1554,10 @@ class LedgerReconciliation:
                 # but not in the snapshot. A check would see it as a Tier-1
                 # gap. A size gap silences its symbol's Tier-2 figures, and a
                 # cash gap silences every account figure. Either would hide a
-                # real gap.
+                # real gap. So the wait ends on the last update checked before
+                # the write (#690).
                 if self._portfolio.writes_applied != writes_before:
-                    return first
+                    return standing
                 reading = self._portfolio.ledger_reading(snapshot=state)
                 now_ns = self._checkpointer.clock.timestamp_ns()
                 standing = _Standing(
