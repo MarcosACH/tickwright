@@ -229,9 +229,10 @@ class LedgerReading:
     mode guard puts a real ``await`` between the classification and that write
     (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
 
-    One part of the pass does take a second reading: the second check on the
-    next mark (#682). It reads after the heal, so it can only drop alerts the
-    first reading raised, never add one. See ``ReconcileFindings.still_alerting``.
+    One part of the pass does take more readings: the checks on each new mark
+    in the wait (#682, #690). They read after the heal, so they leave out
+    every figure the first reading's Tier-1 findings explained. See
+    ``ReconcileFindings.still_alerting``.
 
     Deliberately **not** carrying the leverage book. ``leverage_for`` reads
     configuration resolved at startup, so no fill can move it and there is no
@@ -798,9 +799,9 @@ class PortfolioProjection:
         """How many fills and funding payments this ledger has accepted this run.
 
         These are the two writes that reach the ledger from outside the
-        reconcile cycle. The second Tier-2 check reads it before and after its
-        wait (#682). Either write moves a figure the venue snapshot cannot see,
-        so a change means the second check cannot be trusted.
+        reconcile cycle. The Tier-2 recheck reads it before its wait and on
+        each new mark (#682, #690). Either write moves a figure the venue
+        snapshot cannot see, so a change means no later check can be trusted.
         """
         return self._writes_applied
 

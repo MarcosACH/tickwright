@@ -1233,11 +1233,12 @@ def _two_leg_venue() -> VenueAccountState:
     )
 
 
-def _two_leg_reading(*, btc_upnl: str, eth_upnl: str) -> LedgerReading:
+def _two_leg_reading(*, btc_upnl: str, eth_upnl: str, eth_net: str = "10") -> LedgerReading:
     """The ledger's side of ``_two_leg_venue``, with each leg's uPnL as given.
 
     The account figures are set to agree, so each leg's uPnL is the only figure
-    that can alert.
+    that can alert. ``eth_net`` other than the venue's 10 is a Tier-1 size
+    finding on ETH.
     """
     return LedgerReading(
         account=AccountView(
@@ -1251,7 +1252,7 @@ def _two_leg_reading(*, btc_upnl: str, eth_upnl: str) -> LedgerReading:
         rows={
             "BTC": _row("BTC", net="0.5", unrealized_pnl=btc_upnl, notional="60000"),
             "ETH": _row(
-                "ETH", net="10", unrealized_pnl=eth_upnl, notional="20500", entry_price="2000"
+                "ETH", net=eth_net, unrealized_pnl=eth_upnl, notional="20500", entry_price="2000"
             ),
         },
         mark_prices={},
@@ -1291,19 +1292,20 @@ def test_a_gap_the_newer_reading_closes_no_longer_alerts() -> None:
     assert still == ()
 
 
-def test_the_newer_reading_never_adds_an_alert_the_first_check_did_not_raise() -> None:
-    """The second check can only drop alerts, never add them (#682).
+def test_the_newer_reading_never_alerts_on_a_symbol_the_first_check_found_at_tier_1() -> None:
+    """A heal's own symbol never blocks the clear (#690).
 
-    That matters because the newer reading is taken after this pass's heals.
-    A heal moves figures a Tier-1 finding explained at the first check. Read
-    again, those figures can look like fresh gaps. So a figure only the newer
-    reading puts outside the band waits for the next pass.
+    The newer reading is taken after this pass's heals. A heal moves figures
+    a Tier-1 finding explained at the first check. Read again, those figures
+    can look like fresh gaps. They are the heal's to report, not the band's.
 
-    Here BTC's gap stays and comes back at the newer reading's figure. ETH
-    agreed at the first check and is 200 under at the newer one, past its
-    band of 20.5. It is not added.
+    Here the ledger holds 9 ETH against the venue's 10 at the first check.
+    That size finding explains ETH's Tier-2 figures. The heal books the
+    missing ETH, and at the newer reading ETH's uPnL is 200 under, past its
+    band of 20.5. It is not added. BTC's gap stays and comes back at the
+    newer reading's figure.
     """
-    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500"))
+    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500", eth_net="9"))
 
     still = first.still_alerting(
         _two_leg_venue(),

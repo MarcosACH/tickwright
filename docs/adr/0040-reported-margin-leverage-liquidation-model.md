@@ -211,6 +211,19 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   The band, `rtol` and `mark_max_age_seconds` do not change. A wrong but fresh feed mark still alerts, because it stays wrong after the next update. A wider `rtol` was rejected because it would also hide real errors. Alerting only after two passes in a row was rejected because the soak saw this race on back-to-back passes.**)**
 
+**(Corrected by [#690](https://github.com/MarcosACH/tickwright/issues/690): the #682 block above checks only the first new mark. The wait now checks every update.** Hyperliquid pushes `activeAssetCtx` about once a second, but the price changes only about every 3 s. So most pushes repeat the old price with a newer stamp. The #682 recheck woke on a repeat, compared the same gap again, and alerted. The soak failed two days this way on v0.8.5 and v0.8.6. Both times the venue's mark reached the feed about 1 s later.
+
+  - The wait is still at most 5 s, and it still starts after the heals.
+  - Each check waits until every symbol the alerts sum over has a newer mark than the last check. One check never mixes an old mark on one symbol with a new mark on another. It also keeps the number of checks low. Each check is a chance for a real gap to clear by luck.
+  - On each check the pass reads the ledger again and compares it against the same venue snapshot, on the first check's rules.
+  - The alerts clear only on a check where **no** Tier-2 figure on the account is outside the band. One check must clear every figure at once. The #682 rule judged only the figures that alerted first. A mark move can close an `unrealized_pnl` gap while it opens a `notional` gap, so a real cost basis gap could clear.
+  - One exception. A figure the first check's Tier-1 findings explained stays out of every check. The checks read the ledger after this pass's heals, and a healed figure can look like a fresh gap.
+  - With no clearing check in 5 s, the alerts stand. They carry the figures outside the band at the last check, and that check's marks. A fill or a funding payment during the wait still ends it, at the last check before the write.
+  - `valuation.divergence` carries `rechecked`, the number of checks made. Zero means no new mark arrived.
+  - `account.reconciled` keeps `cleared`. It is now 0 or every alert.
+
+  The band, `rtol`, `atol`, `mark_max_age_seconds`, the 5 s limit and the heals do not change. A real gap now alerts after 5 s, not after about 1 s. Valuing the ledger at the venue's own mark was rejected. It needs a new `Exchange` seam field and a mark history, and the evidence shows the cause is the wait.**)**
+
 ## 7. Paper account genesis numbers
 
 Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-check against. Given the genesis collateral configured by [#136](https://github.com/MarcosACH/tickwright/issues/136) (that ticket owns the *config*; this owns the *formulas*) — **since settled by ADR-0042**, which makes it a strictly positive `PaperExchangeConfig` field with no default, **demanded by `AppConfig`'s validator whenever `exchange == "paper"`** (never required at field level, which would force a paper number onto a live run — ADR-0042 §1), and ingests the live path's from the venue:
