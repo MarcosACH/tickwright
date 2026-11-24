@@ -191,3 +191,10 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   `TICKWRIGHT_*` variable, or CLI command changed. `venue.socket_dropped` now logs `closed_by`,
   `close_code` and `close_reason`. So an operator can tell a venue close from a client close. A
   keepalive ping timeout logs as a client close with code `1011` (#686). Bump PR backed by #688.
+- **v0.8.7** (2026-11-24). A fix from the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. The valuation recheck now checks every mark
+  update in its 5 s wait, not only the first. So a repeated mark price no longer raises
+  `valuation.divergence`. The alerts clear only when one update puts every Tier-2 figure in the
+  band, so a real gap can no longer hide behind a price move. `valuation.divergence` logs
+  `rechecked`, the number of updates checked. `cleared` on `account.reconciled` is now 0 or
+  every alert (#690). Bump PR backed by #692.
