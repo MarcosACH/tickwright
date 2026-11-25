@@ -14,7 +14,7 @@ with itself. What paper has in its place is the atomic ledger write.
 
 import asyncio
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
@@ -462,6 +462,28 @@ def _counted(reading: LedgerReading, symbol: str, *, field: DivergenceField) -> 
         return True
     row = reading.rows.get(symbol)
     return row is not None and row.margin_mode == "cross"
+
+
+def _at_venue_marks(
+    state: VenueAccountState, reading: LedgerReading, terms: frozenset[str]
+) -> bool:
+    """Whether the ledger marks every symbol in ``terms`` at the venue's price (#695).
+
+    The venue's mark is ``notional / |signed_size|``. The sides are compared
+    as notionals, so nothing divides by a size.
+
+    A symbol the venue does not hold has no mark to match, so the answer is
+    no. That errs toward alerting.
+    """
+    held = {position.symbol: position for position in state.positions if position.signed_size}
+    for symbol in terms:
+        position = held.get(symbol)
+        mark = reading.mark_prices.get(symbol)
+        if position is None or mark is None:
+            return False
+        if mark * abs(position.signed_size) != position.notional:
+            return False
+    return True
 
 
 def _sum(figures: Iterable[Decimal | None]) -> Decimal | None:
@@ -1556,7 +1578,10 @@ class LedgerReconciliation:
             # often repeats the old price with a newer stamp. A check on the
             # first update alone would compare the same gap twice.
             while True:
-                observed = {symbol: standing.reading.mark_observed[symbol] for symbol in terms}
+                # From the newest reading, not from ``standing``. A check that
+                # kept the older alerts would otherwise see its own mark as new
+                # again, and the loop would spin (#695).
+                observed = {symbol: reading.mark_observed[symbol] for symbol in terms}
                 marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
                 try:
                     await asyncio.wait((marks, timer), return_when=asyncio.FIRST_COMPLETED)
@@ -1577,12 +1602,18 @@ class LedgerReconciliation:
                     return standing
                 reading = self._portfolio.ledger_reading(snapshot=state)
                 now_ns = self._checkpointer.clock.timestamp_ns()
-                standing = _Standing(
-                    alerts=findings.still_alerting(state, reading, band=self._band, now_ns=now_ns),
-                    reading=reading,
-                    now_ns=now_ns,
-                    rechecked=standing.rechecked + 1,
-                )
+                alerts = findings.still_alerting(state, reading, band=self._band, now_ns=now_ns)
+                rechecked = standing.rechecked + 1
+                if alerts or _at_venue_marks(state, reading, terms):
+                    standing = _Standing(
+                        alerts=alerts, reading=reading, now_ns=now_ns, rechecked=rechecked
+                    )
+                else:
+                    # In band at a mark the venue did not have. A price move
+                    # can split one real gap into two small ones, so this check
+                    # cannot clear. It has no figure to log, so the older
+                    # alerts stand (#695).
+                    standing = replace(standing, rechecked=rechecked)
                 if not standing.alerts:
                     return standing
         finally:
