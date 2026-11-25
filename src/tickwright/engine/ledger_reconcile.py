@@ -264,12 +264,18 @@ class _CashHeal:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _Standing:
+class Standing:
     """The Tier-2 alerts a pass raises, with the reading and instant they
     were compared at (#682).
 
     The three travel together so the alert can name the mark each figure was
-    valued at, and that mark's age, from the same comparison.
+    valued at, and that mark's age, from the same comparison. No alerts means
+    the pass has nothing left to raise.
+
+    ``terms`` are the symbols the alerts sum over, of every check so far and
+    not only the one the alerts come from. A symbol that alerts for the first
+    time in the wait joins them. The wait is for a new mark on each, and the
+    alerts clear only with each at the venue's mark (#695).
 
     ``rechecked`` counts the mark updates checked in the wait (#690). Zero
     means no new mark arrived, or the pass did not wait (#694, #696). It tells
@@ -280,6 +286,7 @@ class _Standing:
     alerts: tuple[Divergence, ...]
     reading: LedgerReading
     now_ns: int
+    terms: frozenset[str]
     rechecked: int = 0
 
 
@@ -314,7 +321,7 @@ def _healed(divergence: Divergence, *, event_id: str) -> None:
     )
 
 
-def _diverged(divergence: Divergence, standing: _Standing) -> None:
+def _diverged(divergence: Divergence, standing: Standing) -> None:
     """Alert on a Tier-2 figure the venue disagrees with (ADR-0040 §6).
 
     The same shape ``_healed`` records, minus the ``event_id`` it has nothing to
@@ -467,6 +474,13 @@ def _counted(reading: LedgerReading, symbol: str, *, field: DivergenceField) -> 
         return True
     row = reading.rows.get(symbol)
     return row is not None and row.margin_mode == "cross"
+
+
+def _alert_terms(alerts: tuple[Divergence, ...], reading: LedgerReading) -> frozenset[str]:
+    """Every symbol that at least one of these alerts sums over."""
+    return frozenset().union(
+        *(_terms(reading, field=alert.field, symbol=alert.symbol) for alert in alerts)
+    )
 
 
 def _at_venue_marks(
@@ -1273,40 +1287,64 @@ class ReconcileFindings:
             seen=seen,
         )
 
-    def still_alerting(
+    def standing(self, reading: LedgerReading, *, now_ns: int) -> Standing:
+        """The first check's alerts as they stand, before any wait.
+
+        ``reading`` and ``now_ns`` are the pair ``classify`` was given.
+        """
+        return Standing(
+            alerts=self.alerts,
+            reading=reading,
+            now_ns=now_ns,
+            terms=_alert_terms(self.alerts, reading),
+        )
+
+    def recheck(
         self,
+        standing: Standing,
         state: VenueAccountState,
         reading: LedgerReading,
         *,
         band: ValuationBand,
         now_ns: int,
-    ) -> tuple[Divergence, ...]:
-        """Every figure a newer reading puts outside the band (#682, #690).
+    ) -> Standing:
+        """What stands after one check on a new mark (#682, #690, #695).
 
-        The check on each new mark. ``state`` is the snapshot this pass
-        classified, and ``reading`` is the ledger read again after a new mark.
-        The Tier-2 rule is the same as ``classify``'s. Each alert comes back
-        with the newer reading's figures, since that is the comparison it now
-        stands on.
+        ``state`` is the snapshot this pass classified, ``reading`` is the
+        ledger read again after a new mark, and ``standing`` is the answer of
+        the check before. A check has one of three outcomes.
 
-        Every figure is judged, not only the ones this pass alerted on (#690).
-        A mark move can close one figure's gap and open another's. Judging
-        only the first would let a real gap hide behind a price move.
+        - A figure is outside the band. The alerts are this check's, with this
+          reading's figures, since that is the comparison they now stand on.
+        - No figure is, and every term is at the venue's mark. The gap was the
+          race, so no alert stands.
+        - No figure is, but a term is at another mark. There, a price move can
+          split one real gap into two small ones, so the check proves nothing.
+          It has no figure to log, so the older alerts stand.
+
+        The Tier-2 rule is the same as ``classify``'s. Every figure is judged,
+        not only the ones this pass alerted on (#690). A mark move can close
+        one figure's gap and open another's. Judging only the first would let a
+        real gap hide behind a price move.
 
         One exception. The newer reading is taken after this pass's heals. A
         heal moves only figures a Tier-1 finding explained. Read again, they
         could look like fresh gaps. So a figure this pass's Tier-1 findings
         explained stays out, as it did at the first check.
 
-        An empty answer is not enough to clear. ``_recheck`` also needs the
-        venue's own mark (#695).
-
         The heal plan is not asked again, so this takes no fill count and no
         ``previous``.
         """
         healed = _tier_1_grains(self.divergences)
         again, _ = _alerting(_measured(state, reading), reading, band=band, now_ns=now_ns)
-        return tuple(alert for alert in again if not _explained_by_tier_1(alert, healed, reading))
+        alerts = tuple(alert for alert in again if not _explained_by_tier_1(alert, healed, reading))
+        terms = standing.terms | _alert_terms(alerts, reading)
+        rechecked = standing.rechecked + 1
+        if alerts or _at_venue_marks(state, reading, terms):
+            return Standing(
+                alerts=alerts, reading=reading, now_ns=now_ns, terms=terms, rechecked=rechecked
+            )
+        return replace(standing, rechecked=rechecked)
 
 
 class LedgerReconciliation:
@@ -1429,7 +1467,7 @@ class LedgerReconciliation:
         The checks in the wait (#682, #690) do read the ledger again after
         the heal. That is safe because a heal moves only figures a Tier-1
         finding explained, and those checks leave every such figure out. See
-        ``ReconcileFindings.still_alerting``.
+        ``ReconcileFindings.recheck``.
 
         ``wait_for_marks=False`` skips those checks, so the first comparison's
         alerts stand. Flatten passes it, because it holds back every close
@@ -1513,11 +1551,10 @@ class LedgerReconciliation:
             snapshot=state,
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
+        standing = findings.standing(reading, now_ns=now_ns)
         # After the heals, so the wait never delays one (#682).
         if wait_for_marks:
-            standing = await self._recheck(state, findings, reading=reading, now_ns=now_ns)
-        else:
-            standing = _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
+            standing = await self._recheck(state, findings, standing)
         alerts = standing.alerts
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
@@ -1543,20 +1580,16 @@ class LedgerReconciliation:
         self,
         state: VenueAccountState,
         findings: ReconcileFindings,
-        *,
-        reading: LedgerReading,
-        now_ns: int,
-    ) -> _Standing:
-        """The alerts still outside the band after each new mark (#682, #690).
+        standing: Standing,
+    ) -> Standing:
+        """The alerts still standing after the wait for new marks (#682, #690).
 
         The venue's read can be one mark update ahead of the feed. On testnet
         one update can move the mark past the band. So each alert waits for a
         new mark on every symbol its figure is computed from. The ledger is then
-        read again and compared against the same snapshot. A gap that closes at
-        the venue's own mark was the race and is not alerted. At any other mark
-        a price move can hide a real gap, so the wait goes on (#695). Which
-        figures are outside the band is ``ReconcileFindings.still_alerting``'s
-        answer. This method owns the wait.
+        read again and compared against the same snapshot. What stands after
+        each check is ``ReconcileFindings.recheck``'s answer. This method owns
+        the wait.
 
         The feed often repeats the old price with a newer stamp (#690). So the
         check runs on every update in the wait, not only the first.
@@ -1564,25 +1597,17 @@ class LedgerReconciliation:
         The wait is bounded. With no closing mark in time, the alerts stand. A
         missing mark must never hide a gap.
         """
-        first = _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
-        if not first.alerts:
-            return first
-        terms = frozenset().union(
-            *(
-                _terms(first.reading, field=alert.field, symbol=alert.symbol)
-                for alert in first.alerts
-            )
-        )
-        # An account figure can have no terms. For example, a
-        # ``maintenance_margin`` alert has none when the ledger holds no cross
-        # position. There is then no mark to wait for, and ``marks_after``
-        # returns at once for no symbols, so the loop below would spin (#696).
-        # This pass's heal may already have closed the gap. The alert still
-        # stands, and the next pass compares the healed ledger (ADR-0040 §6).
-        if not terms:
-            return first
+        # With no alert there is nothing to check again. An account figure can
+        # also have no terms. For example, a ``maintenance_margin`` alert has
+        # none when the ledger holds no cross position. There is then no mark to
+        # wait for, and ``marks_after`` returns at once for no symbols, so the
+        # loop below would spin (#696). This pass's heal may already have closed
+        # the gap. The alert still stands, and the next pass compares the healed
+        # ledger (ADR-0040 §6).
+        if not standing.terms:
+            return standing
         writes_before = self._portfolio.writes_applied
-        standing = first
+        reading = standing.reading
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))
         try:
             # Every update in the wait, not only the first (#690). The feed
@@ -1592,7 +1617,7 @@ class LedgerReconciliation:
                 # From the newest reading, not from ``standing``. A check that
                 # kept the older alerts would otherwise see its own mark as new
                 # again, and the loop would spin (#695).
-                observed = {symbol: reading.mark_observed[symbol] for symbol in terms}
+                observed = {symbol: reading.mark_observed[symbol] for symbol in standing.terms}
                 marks = asyncio.ensure_future(self._portfolio.marks_after(observed))
                 try:
                     await asyncio.wait((marks, timer), return_when=asyncio.FIRST_COMPLETED)
@@ -1612,24 +1637,13 @@ class LedgerReconciliation:
                 if self._portfolio.writes_applied != writes_before:
                     return standing
                 reading = self._portfolio.ledger_reading(snapshot=state)
-                now_ns = self._checkpointer.clock.timestamp_ns()
-                alerts = findings.still_alerting(state, reading, band=self._band, now_ns=now_ns)
-                rechecked = standing.rechecked + 1
-                # A figure can leave the band for the first time here. Its
-                # symbols join the wait and must reach the venue's mark too.
-                terms = terms.union(
-                    *(_terms(reading, field=alert.field, symbol=alert.symbol) for alert in alerts)
+                standing = findings.recheck(
+                    standing,
+                    state,
+                    reading,
+                    band=self._band,
+                    now_ns=self._checkpointer.clock.timestamp_ns(),
                 )
-                if alerts or _at_venue_marks(state, reading, terms):
-                    standing = _Standing(
-                        alerts=alerts, reading=reading, now_ns=now_ns, rechecked=rechecked
-                    )
-                else:
-                    # In band at a mark the venue did not have. A price move
-                    # can split one real gap into two small ones, so this check
-                    # cannot clear. It has no figure to log, so the older
-                    # alerts stand (#695).
-                    standing = replace(standing, rechecked=rechecked)
                 if not standing.alerts:
                     return standing
         finally:
