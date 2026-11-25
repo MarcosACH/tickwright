@@ -25,6 +25,7 @@ import signal
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from functools import partial
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -454,11 +455,12 @@ class Engine:
             pass_interval_seconds=self._reconcile_config.inflight_interval_seconds,
             open_window_seconds=self._reconcile_config.longest_open_window_seconds,
             # The same test as the account cadence: a venue that declares
-            # genesis has no account truth to reconcile against.
+            # genesis has no account truth to reconcile against. A pass here
+            # holds back every close, so it never waits for a mark (#694).
             reconcile_account=(
                 None
                 if self._exchange.account_spec().declares_genesis
-                else self._ledger_reconciler.reconcile_account
+                else partial(self._ledger_reconciler.reconcile_account, wait_for_marks=False)
             ),
         )
         self._exit_outcome = await job.run(context)

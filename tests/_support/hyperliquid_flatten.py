@@ -27,7 +27,7 @@ from pydantic import SecretStr
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import Account, InstrumentSpec
+from tickwright.domain import Account, InstrumentSpec, Position
 from tickwright.engine.exit_run import Flatten
 from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.venues.hyperliquid import (
@@ -102,16 +102,21 @@ def _short(coin: str, size: str, entry: str) -> dict:
     }
 
 
-class _SocketPacedClock(ManualClock):
-    """A ``ManualClock`` whose ``sleep`` also lets the socket reader run.
+class _TurnPacedClock(ManualClock):
+    """A ``ManualClock`` whose ``sleep`` lets the loop run many turns before time moves.
 
     A plain ``ManualClock`` returns from ``sleep`` without yielding, so flatten's
     first-price wait would always time out before the feed reads a frame. On a
     real clock the venue's subscribe answer arrives well inside that wait.
+
+    The fakes do no real IO, so every answer takes a few loop turns. A count of
+    turns gives them the same room on any machine. A real sleep does not, because
+    a slow frame can use it up. These runs need 11 turns, so 100 leaves room.
     """
 
     async def sleep(self, seconds: float) -> None:
-        await asyncio.sleep(0.001)
+        for _ in range(100):
+            await asyncio.sleep(0)
         await super().sleep(seconds)
 
 
@@ -123,7 +128,7 @@ class HeldShort:
 
     def __init__(self) -> None:
         self.held = True
-        self.clock = _SocketPacedClock(start_ns=START_MS * 1_000_000)
+        self.clock = _TurnPacedClock(start_ns=START_MS * 1_000_000)
 
     def account(self, payload: dict) -> dict:
         return _account(_short("HYPE", "-2.0", "25.0")) if self.held else _account()
@@ -189,6 +194,69 @@ class HalfClosesBesideAGap(HeldShort):
         ]
 
 
+class BookedLongBesideAGap(HeldShort):
+    """A BTC long the books hold, beside the HYPE short opened by hand.
+
+    The venue values the BTC long at 65309. Its uPnL is 0.002 x (65309 - 64809).
+    ``closed_at`` is how long after the start each close came in, on the run's clock.
+    """
+
+    BOOKED = Position(
+        strategy_id="opened",
+        symbol="BTC",
+        signed_size=Decimal("0.002"),
+        entry_price=Decimal("64809"),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_at: dict[str, int] = {}
+        self._filled: list[dict] = []
+
+    def account(self, payload: dict) -> dict:
+        btc = _short("BTC", "0.002", "64809.0")
+        btc["position"] |= {"positionValue": "130.618", "unrealizedPnl": "1.0"}
+        hype = _short("HYPE", "-2.0", "25.0")
+        return _account(
+            *(row for row in (btc, hype) if row["position"]["coin"] not in self.closed_at)
+        )
+
+    def order(self, payload: dict) -> object:
+        order = payload["action"]["orders"][0]
+        coin, size, price, held, side = (
+            ("HYPE", "2.0", "25.0", "-2.0", "B")
+            if order["a"] == HYPE_ASSET
+            else ("BTC", "0.002", "65000.0", "0.002", "A")
+        )
+        self.closed_at[coin] = self.clock.timestamp_ns() - START_MS * 1_000_000
+        oid = CLOSE_OID + len(self._filled)
+        fill = fill_entry(oid=oid, tid=oid, px=price, sz=size, time=START_MS + 500)
+        self._filled.append(fill | {"coin": coin, "side": side, "startPosition": held})
+        return filled_response(oid=oid, total_sz=size, avg_px=price)
+
+    def fills(self, payload: dict) -> list[dict]:
+        return self._filled
+
+
+class HeldShortWithMaintenance(HeldShort):
+    """The HYPE short alone, with a maintenance margin the ledger has no row for.
+
+    ``closed_at`` is how long after the start the close came in, on the run's clock.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_at: int | None = None
+
+    def account(self, payload: dict) -> dict:
+        maintenance = "30.0" if self.held else "0.0"
+        return super().account(payload) | {"crossMaintenanceMarginUsed": maintenance}
+
+    def order(self, payload: dict) -> object:
+        self.closed_at = self.clock.timestamp_ns() - START_MS * 1_000_000
+        return super().order(payload)
+
+
 class FillsHalfAfterOracleRejects(HeldShort):
     """Rejects closes against its oracle, but fills half the short once ``fill_after_s`` passed.
 
@@ -224,11 +292,15 @@ def run_flatten(
     *,
     engine_config: EngineConfig | None = None,
     transport: Callable[[FakeExchangeApi], PostJson] | None = None,
+    booked: tuple[Position, ...] = (),
+    cash: str = "0",
 ) -> tuple[int, FakeExchangeApi, FakeWsConnection]:
     """Run ``flatten`` once and return its exit code, the HTTP fake and the socket fake.
 
     ``engine_config`` lets a test change the reconcile timing. ``None`` keeps the defaults.
     ``transport`` wraps the HTTP fake, so a test can hold an answer open.
+    ``booked`` and ``cash`` are what the ledger already holds at boot. The venue's
+    cash is 100, so the default leaves a cash gap.
     """
     post = FakeExchangeApi(
         {
@@ -266,9 +338,10 @@ def run_flatten(
         used.checkpoint_ledger(
             account=Account(
                 account_id=exchange.account_spec().account_id,
-                genesis_collateral=Decimal("0"),
+                genesis_collateral=Decimal(cash),
                 genesis_ts_ns=0,
             ),
+            positions=booked,
             ts_ns=0,
         )
     engine = Engine(

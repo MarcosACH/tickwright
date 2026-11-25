@@ -32,9 +32,11 @@ from hyperliquid_flatten import (
     HYPE_ASSET,
     START_MS,
     AnswersFirst,
+    BookedLongBesideAGap,
     FillsHalfAfterOracleRejects,
     HalfClosesBesideAGap,
     HeldShort,
+    HeldShortWithMaintenance,
     priced_frames,
     run_flatten,
 )
@@ -115,6 +117,48 @@ def test_an_account_pass_waits_for_another_symbols_close_to_be_booked(tmp_path: 
     # Only the first pass heals HYPE: the short opened by hand.
     healed = [log for log in logs if log["event"] == "account.healed" and log["symbol"] == "HYPE"]
     assert [(log["ledger"], log["venue"]) for log in healed] == [("0", "-2.0")]
+
+
+def test_a_size_gap_does_not_hold_back_the_closes_on_a_valuation_alert(tmp_path: Path) -> None:
+    # The HYPE gap makes flatten run account passes. The ledger values BTC at
+    # 65000 and the venue at 65309, past the band, and no new mark comes. The
+    # 60 s cadence waits for one. Flatten reads no alert, so it must not (#694).
+    # BTC gets its trade last, so HYPE's first pass takes the lock first.
+    venue = BookedLongBesideAGap()
+    frames = [
+        asset_ctx_frame("BTC", "65000.0"),
+        *priced_frames(),
+        trades_frame(trade("BTC", "65000.0", 8, time=START_MS)),
+    ]
+
+    with capture_events() as logs:
+        exit_code, _, _ = run_flatten(tmp_path / "saga.db", venue, frames, booked=(venue.BOOKED,))
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    # The alert did fire in an account pass, so there was something to wait on.
+    diverged = {log["symbol"] for log in logs if log["event"] == "valuation.divergence"}
+    assert "BTC" in diverged
+    assert venue.closed_at == {"BTC": 0, "HYPE": 0}
+    assert logs[-1]["outcome"] == "done"
+
+
+def test_a_size_gap_alone_does_not_hold_back_its_close_on_a_maintenance_alert(
+    tmp_path: Path,
+) -> None:
+    # The books miss HYPE, so the venue's maintenance is not explained by the size
+    # gap and alerts. No other symbol is needed. A cash gap would silence it, so
+    # the ledger's cash matches the venue's (#694).
+    venue = HeldShortWithMaintenance()
+
+    with capture_events() as logs:
+        exit_code, _, _ = run_flatten(tmp_path / "saga.db", venue, priced_frames(), cash="100")
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    # The alert did fire in both account passes, so there was something to wait on.
+    diverged = [log["field"] for log in logs if log["event"] == "valuation.divergence"]
+    assert diverged == ["maintenance_margin", "maintenance_margin"]
+    assert venue.closed_at == 0
+    assert logs[-1]["outcome"] == "done"
 
 
 def test_flatten_subscribes_and_closes_a_held_coin_the_config_never_named(

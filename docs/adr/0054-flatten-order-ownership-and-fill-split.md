@@ -44,6 +44,9 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   [#475](https://github.com/MarcosACH/tickwright/issues/475):** #473 built the size check and the
   drain. #475 added the account pass. When the drain leaves a gap on a venue with account truth,
   flatten runs `reconcile_account()` and checks again.**)**
+  **(Amended by [#694](https://github.com/MarcosACH/tickwright/issues/694):** that pass heals as
+  before but never waits for a mark. The wait held back every close. The rule is in ADR-0040
+  §6.**)**
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
   zero. Each split piece uses the real fill price.
 - **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A

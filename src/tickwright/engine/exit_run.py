@@ -87,7 +87,8 @@ class ExitContext:
     reconcile_account: Callable[[], Awaitable[object]] | None
     """One account reconcile pass, or ``None`` on a venue with no account truth.
     It heals a position the books cannot see into the unattributed partition
-    (ADR-0038), so flatten can size a close against it (ADR-0054)."""
+    (ADR-0038), so flatten can size a close against it (ADR-0054). It never waits
+    for a mark, because flatten holds back every close while it runs (#694)."""
 
 
 class ExitJob(Protocol):

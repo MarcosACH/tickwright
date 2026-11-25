@@ -13,12 +13,14 @@ import json
 import os
 import signal
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from never_wakes import NeverWakes
+from parking_clock import ParkingClock
 from recovery_stores import RecoveryOrderStore
 from store_backends import SQLiteBackend
 from structlog.typing import EventDict
@@ -31,6 +33,7 @@ from venue_doubles import (
     VenueLink,
     account_state,
     answerable,
+    margined,
 )
 
 from tickwright.adapters.bus import InMemoryBus
@@ -60,6 +63,7 @@ from tickwright.domain import (
     PlaceOrder,
     PlaceSignal,
     Portfolio,
+    Position,
     Side,
     Signal,
     Strategy,
@@ -72,6 +76,7 @@ from tickwright.domain import (
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine, EngineConfig
+from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
@@ -1065,6 +1070,89 @@ def test_a_live_run_reconciles_the_account_on_its_own_cadence(tmp_path: Path) ->
         ComponentState.STOPPED,
     )
     assert venue.account_reads == 2, "the barrier's read, then exactly one cycle's"
+
+
+def test_the_account_cadence_still_waits_for_a_mark_beside_a_size_gap(tmp_path: Path) -> None:
+    """Flatten's passes never wait for a mark, and the cadence still must (#694).
+
+    The book is the one that made flatten wait. The venue holds ETH the ledger
+    has no row for. It values BTC at 65309 and the ledger at 65000, past the
+    band on three BTC figures. The next mark is 65309, so a pass that waits
+    clears all three and alerts on none.
+    """
+    base = account_state("100001.000", "1.000")
+    (btc,) = base.positions
+    eth = margined(
+        replace(
+            btc,
+            symbol="ETH",
+            signed_size=Decimal("0.05"),
+            entry_price=Decimal("3000"),
+            notional=Decimal("150"),
+            unrealized_pnl=Decimal("0"),
+        )
+    )
+    venue = _LiveShapedVenue(state=replace(base, positions=(btc, eth)))
+    store = SQLiteStore(tmp_path / "saga.db")
+    store.checkpoint_ledger(
+        account=Account(
+            account_id=LIVE_ACCOUNT_ID, genesis_collateral=Decimal("100000"), genesis_ts_ns=0
+        ),
+        positions=(
+            Position(
+                strategy_id="opened",
+                symbol="BTC",
+                signed_size=Decimal("0.002"),
+                entry_price=Decimal("64809"),
+            ),
+        ),
+        ts_ns=0,
+    )
+
+    def mark(price: str, ts_ns: int) -> MarkTick:
+        return MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol="BTC", price=Decimal(price))
+
+    async def one_life(logs: list[EventDict]) -> tuple[int, bool]:
+        bus = InMemoryBus()
+        clock = ParkingClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+
+        def reconciled() -> bool:
+            return any(log["event"] == NamedEvent.ACCOUNT_RECONCILED.value for log in logs)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await bus.publish(mark("65000", _ACCOUNT_INTERVAL_NS - 1))
+        await bus.drain()
+        clock.parked.clear()
+        clock.advance_to(_ACCOUNT_INTERVAL_NS)
+        # A pass that does not wait ends here, so the case fails on its
+        # assertions instead of hanging.
+        await asyncio.wait_for(_until(lambda: clock.parked.is_set() or reconciled()), timeout=5)
+        waited = not reconciled()
+        await bus.publish(mark("65309", _ACCOUNT_INTERVAL_NS))
+        await asyncio.wait_for(_until(reconciled), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), waited
+
+    with capture_events() as logs:
+        exit_code, waited = asyncio.run(one_life(logs))
+
+    assert exit_code == 0
+    assert waited, "the pass ended before the next mark came"
+    (record,) = [log for log in logs if log["event"] == NamedEvent.ACCOUNT_RECONCILED.value]
+    assert (record["tier_1"], record["cleared"]) == (1, 3)
+    assert [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value] == []
 
 
 def test_no_paper_run_schedules_the_account_cadence(tmp_path: Path) -> None:
