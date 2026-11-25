@@ -1376,9 +1376,10 @@ class PortfolioProjection:
         ``_mark_observed``'s counterpart: one cache, read for its two halves.
         The folds want only the price. The reconcile cycle wants both, for the
         ``valuation.divergence`` log (#682) and the clear rule (#695), and reads
-        them off ``LedgerReading``. Written out at each of the five call sites it had, the valuation folds and the account view would each hold their
-        own claim about which field values a position — and the one that drifted
-        would value the book against a different mark than the reading beside it.
+        them off ``LedgerReading``. Written out at each of the five call sites it
+        had, the valuation folds and the account view would each hold their own
+        claim about which field values a position — and the one that drifted would
+        value the book against a different mark than the reading beside it.
         """
         return {symbol: mark.price for symbol, mark in self._marks.items()}
 
