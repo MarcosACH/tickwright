@@ -232,6 +232,13 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   The cost is that flatten can log a `valuation.divergence` a later mark would have cleared. A late close is worse than an extra log line.**)**
 
+**(Corrected by [#696](https://github.com/MarcosACH/tickwright/issues/696): a pass with no symbol to wait for does not wait.** The #682 and #690 blocks above make every pass with alerts wait for a new mark on the symbols its alerts sum over. A `maintenance_margin` alert sums over no symbol when the ledger holds no cross position. The wait then ended at once, and the pass checked the same gap in a tight loop for 5 s.
+
+  - When no alert in the pass has a symbol, the first check's alerts stand, with `rechecked=0` and `cleared=0`.
+  - When any alert has a symbol, the pass still waits on the symbols its alerts sum over.
+
+  The cost is small. No mark can change a sum over no symbols, so the wait could not have cleared the alert.**)**
+
 ## 7. Paper account genesis numbers
 
 Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-check against. Given the genesis collateral configured by [#136](https://github.com/MarcosACH/tickwright/issues/136) (that ticket owns the *config*; this owns the *formulas*) — **since settled by ADR-0042**, which makes it a strictly positive `PaperExchangeConfig` field with no default, **demanded by `AppConfig`'s validator whenever `exchange == "paper"`** (never required at field level, which would force a paper number onto a live run — ADR-0042 §1), and ingests the live path's from the venue:

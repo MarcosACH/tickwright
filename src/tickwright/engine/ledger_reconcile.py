@@ -268,8 +268,8 @@ class _Standing:
     valued at, and that mark's age, from the same comparison.
 
     ``rechecked`` counts the mark updates checked in the wait (#690). Zero
-    means no new mark arrived, or the pass did not wait (#694). It tells that
-    apart from several marks that all left the gap open.
+    means no new mark arrived, or the pass did not wait (#694, #696). It tells
+    that apart from several marks that all left the gap open.
     """
 
     alerts: tuple[Divergence, ...]
