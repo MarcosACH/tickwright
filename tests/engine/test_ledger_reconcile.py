@@ -2394,6 +2394,38 @@ def test_a_venue_first_fill_landing_inside_the_mode_check_is_not_booked_twice(
     ] == [(DivergenceField.NET_CASH, Decimal("5"))]
 
 
+def test_a_size_heal_on_another_symbol_still_books_beside_a_fill_in_the_mode_check() -> None:
+    """Only the symbols a fill touched lose their size heal (#700).
+
+    The ETH position was opened by hand, and two passes have seen it. A BTC fill
+    says nothing about it. Held back too, it would stay out of the ledger for
+    two more passes. The cash heal still waits, so ``deferred`` counts one.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _SlowModeVenue(
+        _held("100005", ("BTC", "0.002", "0"), ("ETH", "0.1", "0"), entry={"ETH": "3000"}),
+        during=lambda: _book_fill(ledger, quantity="0.002", price="64809", seq=2, fee="0.05"),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.004"), "ETH": Decimal("0.1")}
+    opened_by_hand = ledger.position("ETH", strategy_id=None)
+    assert opened_by_hand is not None
+    assert opened_by_hand.entry_price == Decimal("3000")
+    assert ledger.position("BTC", strategy_id=None) is None
+    assert ledger.account().cash == Decimal("99999.95")
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (2, 1)
+
+
 def test_the_max_position_holds_after_a_venue_first_sell_lands_inside_the_mode_check() -> None:
     """A sell booked twice reads as a smaller position than the venue holds (#700).
 
