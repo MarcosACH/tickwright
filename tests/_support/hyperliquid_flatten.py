@@ -102,16 +102,21 @@ def _short(coin: str, size: str, entry: str) -> dict:
     }
 
 
-class _SocketPacedClock(ManualClock):
-    """A ``ManualClock`` whose ``sleep`` also lets the socket reader run.
+class _TurnPacedClock(ManualClock):
+    """A ``ManualClock`` whose ``sleep`` lets the loop run many turns before time moves.
 
     A plain ``ManualClock`` returns from ``sleep`` without yielding, so flatten's
     first-price wait would always time out before the feed reads a frame. On a
     real clock the venue's subscribe answer arrives well inside that wait.
+
+    The fakes do no real IO, so every answer takes a few loop turns. A count of
+    turns gives them the same room on any machine. A real sleep does not, because
+    a slow frame can use it up. These runs need 11 turns, so 100 leaves room.
     """
 
     async def sleep(self, seconds: float) -> None:
-        await asyncio.sleep(0.001)
+        for _ in range(100):
+            await asyncio.sleep(0)
         await super().sleep(seconds)
 
 
@@ -123,7 +128,7 @@ class HeldShort:
 
     def __init__(self) -> None:
         self.held = True
-        self.clock: ManualClock = _SocketPacedClock(start_ns=START_MS * 1_000_000)
+        self.clock = _TurnPacedClock(start_ns=START_MS * 1_000_000)
 
     def account(self, payload: dict) -> dict:
         return _account(_short("HYPE", "-2.0", "25.0")) if self.held else _account()
@@ -189,20 +194,6 @@ class HalfClosesBesideAGap(HeldShort):
         ]
 
 
-class _TurnPacedClock(ManualClock):
-    """A ``ManualClock`` whose ``sleep`` lets the loop run many turns before time moves.
-
-    The fakes do no real IO, so every answer takes a few loop turns. A wait that
-    something can end early then ends early on any machine. ``_SocketPacedClock``
-    yields 1 ms of real time instead, which a slow store write can use up.
-    """
-
-    async def sleep(self, seconds: float) -> None:
-        for _ in range(500):
-            await asyncio.sleep(0)
-        await super().sleep(seconds)
-
-
 class BookedLongBesideAGap(HeldShort):
     """A BTC long the books hold, beside the HYPE short opened by hand.
 
@@ -219,7 +210,6 @@ class BookedLongBesideAGap(HeldShort):
 
     def __init__(self) -> None:
         super().__init__()
-        self.clock = _TurnPacedClock(start_ns=START_MS * 1_000_000)
         self.closed_at: dict[str, int] = {}
         self._filled: list[dict] = []
 
@@ -256,7 +246,6 @@ class HeldShortWithMaintenance(HeldShort):
 
     def __init__(self) -> None:
         super().__init__()
-        self.clock = _TurnPacedClock(start_ns=START_MS * 1_000_000)
         self.closed_at: int | None = None
 
     def account(self, payload: dict) -> dict:
