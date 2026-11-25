@@ -4556,6 +4556,48 @@ def test_alerts_carry_the_last_check_that_had_a_figure_outside_the_band() -> Non
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_a_cost_basis_gap_on_a_cross_book_is_still_alerted_off_the_venues_mark() -> None:
+    """A cross book reaches the bug with no figure pinned (#695).
+
+    The same BTC gap on cross 5x. Every venue figure is the one its own mark
+    of 65309 gives. Its free margin is ``100001.000 − 130.618 / 5 =
+    99974.8764`` and its maintenance is ``130.618 × 0.0125 = 1.632725``. So
+    only ``unrealized_pnl`` is past the band. At 65359 no figure is.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(
+        SQLiteStore(":memory:"),
+        equity="100000",
+        clock=clock,
+        leverage=_BTC_CROSS_5X,
+        specs={"BTC": _BTC_SPEC},
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65309")
+    venue = _levered(
+        _held(
+            "100001.000",
+            ("BTC", "0.002", "1.200"),
+            entry={"BTC": "64709"},
+            free_margin="99974.8764",
+            maintenance="1.632725",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65359", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == [
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "1.000", "venue": "1.200"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
     """``cleared`` is 0 or every alert, never a part (#690).
 
