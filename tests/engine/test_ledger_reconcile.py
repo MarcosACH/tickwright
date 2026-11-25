@@ -2426,6 +2426,61 @@ def test_a_size_heal_on_another_symbol_still_books_beside_a_fill_in_the_mode_che
     assert (record["tier_1"], record["deferred"]) == (2, 1)
 
 
+@pytest.mark.parametrize(
+    ("write", "cash"),
+    [
+        pytest.param("ETH fill", "99999.95", id="fill on another symbol"),
+        pytest.param("BTC funding", "99999.5", id="funding on the same symbol"),
+    ],
+)
+def test_a_size_heal_still_books_when_its_symbol_was_filled_only_before_the_mode_check(
+    write: str, cash: str
+) -> None:
+    """Only a fill inside the mode check makes a size heal stale (#700).
+
+    BTC has a fill from earlier in the run, and two passes have seen its size
+    gap. What lands in the check is a fill on ETH, or a funding payment, which
+    moves no size. The earlier BTC fill is already in the reading the heal was
+    planned on. So the heal books, and ``deferred`` counts the cash heal alone.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_write_lands() -> None:
+        if write == "ETH fill":
+            _book_fill(ledger, symbol="ETH", quantity="0.1", price="3000", seq=2, fee="0.05")
+            return
+        keeper.checkpoint_funding(
+            FundingAccrual(
+                ts_event=3_600,
+                ts_init=3_600,
+                account_id=LIVE_ACCOUNT_ID,
+                symbol="BTC",
+                boundary_ts_ns=3_600,
+                amount=Decimal("-0.5"),
+            )
+        )
+
+    venue = _SlowModeVenue(_held("100005", ("BTC", "0.004", "0")), during=a_write_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert venue.mode_reads == 1
+    assert ledger.account_net()["BTC"] == Decimal("0.004")
+    healed = ledger.position("BTC", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("0.002")
+    assert ledger.account().cash == Decimal(cash)
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (2, 1)
+
+
 def test_the_max_position_holds_after_a_venue_first_sell_lands_inside_the_mode_check() -> None:
     """A sell booked twice reads as a smaller position than the venue holds (#700).
 
