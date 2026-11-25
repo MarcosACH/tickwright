@@ -808,8 +808,8 @@ class PortfolioProjection:
         its own pass can land before the second.
 
         The cycle reads it beside its ledger reading and after the mode check
-        (#700). A change means the planned cash heal is stale. The Tier-2
-        recheck reads it before its wait, which is after the heals, and on each
+        (#700). A change means the planned cash heal is stale, and the pass
+        skips the Tier-2 recheck (#698). The recheck reads it before its wait, which is after the heals, and on each
         new mark (#682, #690). Either write moves a figure the venue snapshot
         cannot see, so a change means no later check can be trusted.
         """

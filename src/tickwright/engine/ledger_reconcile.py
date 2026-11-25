@@ -278,8 +278,8 @@ class Standing:
     alerts clear only with each at the venue's mark (#695).
 
     ``rechecked`` counts the mark updates checked in the wait (#690). Zero
-    means no new mark arrived, or the pass did not wait (#694, #696). It tells
-    that apart from several marks that all left the gap open. It can count
+    means no new mark arrived, or the pass did not wait (#694, #696, #698). It
+    tells that apart from several marks that all left the gap open. It can count
     later checks than the one the alerts come from (#695).
     """
 
@@ -1494,7 +1494,8 @@ class LedgerReconciliation:
         pass with a cash gap to close: the mode guard's venue read. A write that
         lands there drops the heals it made stale, and a later pass makes them
         (#700). A second reading is taken then, but only to ask which symbols
-        moved. Nothing is compared against it.
+        moved. Nothing is compared against it. The wait is skipped too, so the
+        first comparison's alerts stand (#698).
 
         The classification itself is ``ReconcileFindings.classify``, which reads
         nothing and emits nothing: what stays here is the venue read, the write

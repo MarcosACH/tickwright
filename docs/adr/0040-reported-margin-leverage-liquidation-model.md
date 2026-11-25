@@ -250,6 +250,13 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   The first check, the band, `rtol`, `atol` and the 5 s limit do not change. The first check can still hide a split gap. If the feed skips the venue's mark, the alerts stand. That errs toward alerting.**)**
 
+**(Corrected by [#698](https://github.com/MarcosACH/tickwright/issues/698): a write during the mode check also leaves the first check's alerts standing.** The #682 and #690 blocks above cover only a write during the wait. A pass with a cash heal planned checks the account mode before the wait, and that check is a venue read. A fill there was already in the ledger when the wait began, so the wait did not see it as a write. The checks read it as a size gap, which silenced that symbol's figures, and a real gap cleared.
+
+  - A fill or a funding payment during the mode check skips the wait. The first check's alerts stand, with `rechecked=0` and `cleared=0`. This holds on every mode verdict.
+  - The pass's own heals are not such a write. A pass that heals a size and cash still waits, and the next marks can clear its alerts.
+
+  The cost is that a fill or a funding payment during the mode check can leave an alert a later mark would have cleared. The heals do not change here. ADR-0046 §4 says what a write does to them.**)**
+
 ## 7. Paper account genesis numbers
 
 Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-check against. Given the genesis collateral configured by [#136](https://github.com/MarcosACH/tickwright/issues/136) (that ticket owns the *config*; this owns the *formulas*) — **since settled by ADR-0042**, which makes it a strictly positive `PaperExchangeConfig` field with no default, **demanded by `AppConfig`'s validator whenever `exchange == "paper"`** (never required at field level, which would force a paper number onto a live run — ADR-0042 §1), and ingests the live path's from the venue:
