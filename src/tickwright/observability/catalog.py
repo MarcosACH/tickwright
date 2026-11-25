@@ -139,7 +139,8 @@ class NamedEvent(StrEnum):
     # ``deferred`` and ``unpriced`` do the same for Tier-1 (#335). A finding
     # the pass held back is still inside ``tier_1``, so a pass that deferred
     # read like one that healed. ``deferred`` counts the findings a fill inside
-    # the venue read held back. It clears on the next pass. ``unpriced`` counts
+    # the venue read held back, and the heals a write inside the mode check made
+    # stale (#700). It clears on the next pass. ``unpriced`` counts
     # the size findings the venue posts no entry price for. It persists while
     # the venue does not price the symbol. Two counts and not one, because a
     # stuck symbol must not read like a busy one.

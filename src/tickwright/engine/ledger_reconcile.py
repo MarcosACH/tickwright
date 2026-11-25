@@ -14,7 +14,7 @@ with itself. What paper has in its place is the atomic ledger write.
 
 import asyncio
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
@@ -1052,6 +1052,7 @@ class ReconcileFindings:
     """The Tier-1 cash finding this pass heals, with the correction that closes it."""
     deferred: int
     """Tier-1 findings a fill inside the read held back. Clears on the next pass.
+    Also the heals a write inside the mode check made stale (#700).
     Also a cash finding held back while an unconfirmed size finding waits (#582)."""
     unconfirmed: int
     """Tier-1 findings not in ``previous``. Heals on the next pass if the same gap is there."""
@@ -1245,6 +1246,21 @@ class ReconcileFindings:
             seen=seen,
         )
 
+    def deferring(self, moved: frozenset[str]) -> "ReconcileFindings":
+        """These findings without the heals a write in the mode check made stale (#700).
+
+        ``moved`` is the set of symbols a fill touched in the check. Any write
+        moves the cash line, so the cash heal goes whatever ``moved`` holds. A
+        size heal goes only when its own symbol moved. The rest compared a
+        ledger that has not changed.
+
+        Each heal dropped here is counted in ``deferred``. ``classify`` left it
+        out of ``seen``, so it takes two more passes to heal.
+        """
+        heals = tuple(heal for heal in self.heals if heal.fill.symbol not in moved)
+        dropped = len(self.heals) - len(heals) + (self.cash is not None)
+        return replace(self, heals=heals, cash=None, deferred=self.deferred + dropped)
+
     def still_alerting(
         self,
         state: VenueAccountState,
@@ -1406,9 +1422,10 @@ class LedgerReconciliation:
         same either way.
 
         One thing does come between that reading and the write, and only on a
-        pass with a cash gap to close: the mode guard's venue read. What a
-        concurrent fill costs there, and why the answer is the next deadline
-        rather than a second reading, is ``_mode_verified`` below.
+        pass with a cash gap to close: the mode guard's venue read. A write that
+        lands there drops the heals it made stale, and a later pass makes them
+        (#700). A second reading is taken then, but only to ask which symbols
+        moved. Nothing is compared against it.
 
         The classification itself is ``ReconcileFindings.classify``, which reads
         nothing and emits nothing: what stays here is the venue read, the write
@@ -1446,6 +1463,9 @@ class LedgerReconciliation:
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
         reading = self._portfolio.ledger_reading(snapshot=state)
+        # Beside the reading, so a change is a write the reading does not have.
+        fills_at_reading = self._portfolio.fills_applied
+        writes_at_reading = self._portfolio.writes_applied
         # The clock is read here rather than inside the classification,
         # because a mark's age is a fact about the snapshot this pass
         # compared against: taken beside the alerts instead, it would be
@@ -1466,8 +1486,14 @@ class LedgerReconciliation:
         # decision that needs the venue: the mode gate on the cash correction
         # (ADR-0046 §4). A plan with no cash heal never asks.
         cash = findings.cash
-        if cash is not None and not await self._mode_verified():
-            cash = None
+        if cash is not None:
+            verified = await self._mode_verified()
+            # On every verdict, because the mode gates the cash heal alone. The
+            # second reading is asked only which symbols moved (#700).
+            if self._portfolio.writes_applied != writes_at_reading:
+                after = self._portfolio.ledger_reading(snapshot=state)
+                findings = findings.deferring(after.filled_since(fills_at_reading))
+            cash = findings.cash if verified else None
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in findings.heals),
             cash=None if cash is None else cash.correction,
@@ -1667,24 +1693,12 @@ class LedgerReconciliation:
         cross-check and the heal, not the ledger.
 
         This is also the cycle's **one yield point between classifying and
-        writing**, and it is worth naming because the caller's own docstring
-        reasons about a ledger side read once for the pass. The cadence runs
-        beside the saga in the runner's ``TaskGroup``, so a fill can be
-        checkpointed while this read is in flight, and the correction booked
-        after it was computed against the book as it was before: the cash line is
-        an assignment to a target, so that fill's cash effect is overwritten and
-        the size heals are deltas against a net that has since moved.
-
-        Accepted rather than closed, on ADR-0034's own terms: the ledger
-        over-reads for **one cadence interval** and heals back, because the next
-        snapshot carries the fill and the exact cash comparison finds the gap it
-        left. Closing it is not available at this grain anyway — the venue
-        snapshot predates the await too, so re-reading the ledger side would heal
-        toward the same figure against a book the venue has not seen, and the
-        only sound response to "a fill landed" is the pass this one already is:
-        one the next deadline repeats. The window is a round-trip on a path that
-        only runs when something diverged, and it costs nothing on the far commoner
-        pass that finds no cash gap and never opens it.
+        writing**. The cadence runs beside the saga in the runner's
+        ``TaskGroup``, so a fill or a funding payment can be checkpointed while
+        this read is in flight. The heals planned before it are then stale. The
+        caller compares the write count after this call, on every verdict, and
+        drops them (``ReconcileFindings.deferring``, #700). It does not plan
+        them again, because the venue snapshot is older than the write.
         """
         verdict = await self._exchange.verify_account_mode()
         if verdict is AccountModeVerdict.VERIFIED:

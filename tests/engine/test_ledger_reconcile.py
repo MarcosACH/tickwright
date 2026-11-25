@@ -13,7 +13,7 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
-from typing import Final
+from typing import Any, Final
 
 import pytest
 from ledgers import book_fill
@@ -40,6 +40,7 @@ from tickwright.domain import (
     AccountAnchor,
     AccountModeVerdict,
     AccountSpec,
+    Denied,
     ExternalOrderRef,
     FundingAccrual,
     InstrumentSpec,
@@ -48,15 +49,19 @@ from tickwright.domain import (
     MarkTick,
     Order,
     OrderFilled,
+    OrderType,
+    PlaceSignal,
     Position,
     Side,
     Store,
+    TimeInForce,
     VenueAccountState,
     VenueOpenOrder,
     VenuePositionState,
     VenueReadFailure,
 )
 from tickwright.engine.checkpoint import Checkpointer
+from tickwright.engine.guard import PreTradeLimits, RealGuard, SymbolLimits
 from tickwright.engine.ledger_reconcile import (
     Divergence,
     DivergenceField,
@@ -143,6 +148,32 @@ class _SlowAccountVenue(_AccountVenue):
         self._during()
         await asyncio.sleep(0)
         return state
+
+
+class _SlowModeVenue(_AccountVenue):
+    """A mode check with a round trip inside it (#700).
+
+    The same difference ``_SlowAccountVenue`` makes, on the pass's other venue
+    read. ``during`` runs once, inside the first mode check. The later checks
+    answer at once, so a case can show the pass that heals after it.
+    """
+
+    def __init__(
+        self,
+        *answers: VenueAccountState | None,
+        during: Callable[[], None],
+        mode: AccountModeVerdict = AccountModeVerdict.VERIFIED,
+    ) -> None:
+        super().__init__(*answers, mode=mode)
+        self._during = during
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        verdict = await super().verify_account_mode()
+        if self.mode_reads == 1:
+            await asyncio.sleep(0)  # the wire: the loop is free to run the fill handler
+            self._during()
+            await asyncio.sleep(0)
+        return verdict
 
 
 def _ledger(
@@ -2188,6 +2219,312 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
     # Both findings were held back, and the record says so (#335).
     record = _recorded(logs)
     assert (record["tier_1"], record["deferred"], record["unpriced"]) == (2, 2, 0)
+
+
+@pytest.mark.parametrize(
+    ("fill", "cash", "after", "entry"),
+    [
+        pytest.param(
+            {"symbol": "BTC", "side": Side.BUY, "quantity": "0.002", "price": "64809"},
+            "99999.95",
+            (("BTC", "0.004", "0"),),
+            None,
+            id="buy",
+        ),
+        pytest.param(
+            {"symbol": "BTC", "side": Side.SELL, "quantity": "0.002", "price": "65809"},
+            "100001.95",
+            (),
+            None,
+            id="closing sell",
+        ),
+        pytest.param(
+            {"symbol": "ETH", "side": Side.BUY, "quantity": "0.1", "price": "3000"},
+            "99999.95",
+            (("BTC", "0.002", "0"), ("ETH", "0.1", "0")),
+            {"ETH": "3000"},
+            id="buy of another symbol",
+        ),
+    ],
+)
+def test_a_fill_landing_inside_the_mode_check_defers_the_cash_heal(
+    fill: Mapping[str, Any],
+    cash: str,
+    after: tuple[tuple[str, str, str], ...],
+    entry: Mapping[str, str] | None,
+) -> None:
+    """The mode check is a venue read too, so a fill can land inside it (#700).
+
+    The cash heal adds the ledger's cost basis to the venue's net cash. The
+    fill moves that cost basis and the venue's figure predates the fill. Healed
+    then, cash is wrong by the whole cost of the fill. So the heal waits.
+
+    The venue's cash is 5 above the ledger's throughout. The fill pays a fee of
+    0.05, and the closing sell realizes 2. After the fill the gap of 5 is still
+    there. The next pass sees it again and the one after heals it.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    before = _held("100005", ("BTC", "0.002", "0"))
+    venue = _SlowModeVenue(
+        before,
+        before,
+        _held(str(Decimal(cash) + 5), *after, entry=entry),
+        during=lambda: _book_fill(ledger, seq=2, fee="0.05", **fill),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account().cash == Decimal(cash)
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (1, 1)
+    clock.advance_to(9)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal(cash)
+    clock.advance_to(10)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal(cash) + 5
+
+
+def test_a_funding_payment_landing_inside_the_mode_check_defers_the_cash_heal() -> None:
+    """A funding payment moves the cash line without a fill (#700).
+
+    The venue's figure predates the payment. Healed toward it, the ledger loses
+    the payment it just booked. So the heal waits, as it does for a fill.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_funding_payment_lands() -> None:
+        keeper.checkpoint_funding(
+            FundingAccrual(
+                ts_event=3_600,
+                ts_init=3_600,
+                account_id=LIVE_ACCOUNT_ID,
+                symbol="BTC",
+                boundary_ts_ns=3_600,
+                amount=Decimal("-0.5"),
+            )
+        )
+
+    before = _held("100005", ("BTC", "0.002", "0"))
+    venue = _SlowModeVenue(
+        before,
+        before,
+        _held("100004.5", ("BTC", "0.002", "0")),
+        during=a_funding_payment_lands,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account().cash == Decimal("99999.5")
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (1, 1)
+    clock.advance_to(9)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal("99999.5")
+    clock.advance_to(10)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal("100004.5")
+
+
+@pytest.mark.parametrize("mode", list(AccountModeVerdict))
+@pytest.mark.parametrize(
+    ("side", "quantity", "size"),
+    [
+        pytest.param(Side.BUY, "0.002", "0.004", id="buy"),
+        pytest.param(Side.SELL, "0.001", "0.001", id="sell"),
+    ],
+)
+def test_a_venue_first_fill_landing_inside_the_mode_check_is_not_booked_twice(
+    side: Side, quantity: str, size: str, mode: AccountModeVerdict
+) -> None:
+    """A size heal is stale too when its own fill lands in the mode check (#700).
+
+    The venue booked the fill two passes ago, so the size gap is confirmed. The
+    engine then books the fill while the mode is checked. The heal planned
+    before it would book the same fill a second time.
+
+    The mode verdict gates the cash heal alone. So the size heal must be held
+    back on all three verdicts, and ``deferred`` counts both heals on each.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _SlowModeVenue(
+        _held("100005", ("BTC", size, "0")),
+        during=lambda: _book_fill(ledger, quantity=quantity, price="64809", side=side, seq=2),
+        mode=mode,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal(size)}
+    assert ledger.position("BTC", strategy_id=None) is None
+    assert ledger.account().cash == Decimal("100000")
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (2, 2)
+    # Only the old cash gap is left. The size agrees without a heal.
+    clock.advance_to(9)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert [
+        (found.field, found.venue - found.ledger)
+        for found in divergences or ()
+        if found.tier is DivergenceTier.TIER_1
+    ] == [(DivergenceField.NET_CASH, Decimal("5"))]
+
+
+def test_a_size_heal_on_another_symbol_still_books_beside_a_fill_in_the_mode_check() -> None:
+    """Only the symbols a fill touched lose their size heal (#700).
+
+    The ETH position was opened by hand, and two passes have seen it. A BTC fill
+    says nothing about it. Held back too, it would stay out of the ledger for
+    two more passes. The cash heal still waits, so ``deferred`` counts one.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _SlowModeVenue(
+        _held("100005", ("BTC", "0.002", "0"), ("ETH", "0.1", "0"), entry={"ETH": "3000"}),
+        during=lambda: _book_fill(ledger, quantity="0.002", price="64809", seq=2, fee="0.05"),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.004"), "ETH": Decimal("0.1")}
+    opened_by_hand = ledger.position("ETH", strategy_id=None)
+    assert opened_by_hand is not None
+    assert opened_by_hand.entry_price == Decimal("3000")
+    assert ledger.position("BTC", strategy_id=None) is None
+    assert ledger.account().cash == Decimal("99999.95")
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (2, 1)
+
+
+@pytest.mark.parametrize(
+    ("write", "cash"),
+    [
+        pytest.param("ETH fill", "99999.95", id="fill on another symbol"),
+        pytest.param("BTC funding", "99999.5", id="funding on the same symbol"),
+    ],
+)
+def test_a_size_heal_still_books_when_its_symbol_was_filled_only_before_the_mode_check(
+    write: str, cash: str
+) -> None:
+    """Only a fill inside the mode check makes a size heal stale (#700).
+
+    BTC has a fill from earlier in the run, and two passes have seen its size
+    gap. What lands in the check is a fill on ETH, or a funding payment, which
+    moves no size. The earlier BTC fill is already in the reading the heal was
+    planned on. So the heal books, and ``deferred`` counts the cash heal alone.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_write_lands() -> None:
+        if write == "ETH fill":
+            _book_fill(ledger, symbol="ETH", quantity="0.1", price="3000", seq=2, fee="0.05")
+            return
+        keeper.checkpoint_funding(
+            FundingAccrual(
+                ts_event=3_600,
+                ts_init=3_600,
+                account_id=LIVE_ACCOUNT_ID,
+                symbol="BTC",
+                boundary_ts_ns=3_600,
+                amount=Decimal("-0.5"),
+            )
+        )
+
+    venue = _SlowModeVenue(_held("100005", ("BTC", "0.004", "0")), during=a_write_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert venue.mode_reads == 1
+    assert ledger.account_net()["BTC"] == Decimal("0.004")
+    healed = ledger.position("BTC", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("0.002")
+    assert ledger.account().cash == Decimal(cash)
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (2, 1)
+
+
+def test_the_max_position_holds_after_a_venue_first_sell_lands_inside_the_mode_check() -> None:
+    """A sell booked twice reads as a smaller position than the venue holds (#700).
+
+    The venue holds 0.001 BTC after the sell. The cap is 0.002, so a buy of
+    0.002 must be denied. Booked twice, the sell left the ledger flat, and the
+    guard let the buy through.
+    """
+    clock = ManualClock(7)
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _SlowModeVenue(
+        _held("100005", ("BTC", "0.001", "0")),
+        during=lambda: _book_fill(ledger, quantity="0.001", price="64809", side=Side.SELL, seq=2),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    guard = RealGuard(
+        specs={"BTC": _BTC_SPEC},
+        store=store,
+        clock=clock,
+        limits=PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("0.002"))}),
+    )
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    decision = guard.check(
+        PlaceSignal(
+            ts_event=8,
+            ts_init=8,
+            strategy_id="alpha",
+            symbol="BTC",
+            seq=3,
+            side=Side.BUY,
+            quantity=Decimal("0.002"),
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            price=Decimal("64809"),
+        ),
+        keeper.pre_trade_reading("BTC", Side.BUY, strategy_id="alpha"),
+    )
+    assert decision == Denied(reason="above max position 0.002")
 
 
 def test_a_fill_the_venue_booked_first_is_not_healed_before_the_engine_books_it() -> None:
