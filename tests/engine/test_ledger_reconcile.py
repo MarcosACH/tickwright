@@ -4545,6 +4545,45 @@ def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
     assert not clock.parked.is_set()
 
 
+def test_two_passes_told_not_to_wait_still_heal_a_size_gap() -> None:
+    """Flatten runs these passes for their heals, so the heals must stay (#694).
+
+    The venue holds 0.05 ETH the ledger has no row for. BTC is booked, but its
+    venue uPnL is past the band, which is the alert a pass would wait on. A
+    gap heals only on the second pass that finds it (#574). So the first pass
+    books nothing and the second books the ETH.
+    """
+    clock = _WaitingClock()
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    venue = _held(
+        "100001.000", ("BTC", "0.002", "1.000"), ("ETH", "0.05", "0"), entry={"ETH": "3000"}
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as first:
+        _during_the_wait(cycle, clock, wait_for_marks=False)
+
+    assert not clock.parked.is_set()
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+    assert _alerts(first) != []
+
+    clock.advance_to(8)
+    with capture_events() as second:
+        _during_the_wait(cycle, clock, wait_for_marks=False)
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002"), "ETH": Decimal("0.05")}
+    assert _alerts(second) != []
+    healed = [
+        [log["symbol"] for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+        for logs in (first, second)
+    ]
+    assert healed == [[], ["ETH"]]
+    assert not clock.parked.is_set()
+
+
 def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
     """A real gap survives the second check (#682).
 
