@@ -4529,6 +4529,48 @@ def test_an_alert_with_no_mark_to_wait_for_stands_at_once() -> None:
     assert not clock.parked.is_set()
 
 
+def test_an_alert_with_no_mark_to_wait_for_does_not_end_the_wait_of_one_beside_it() -> None:
+    """A BTC alert keeps its wait beside an alert computed from no symbol (#696).
+
+    The book is the one above, with the soak's BTC race beside it. The ledger
+    values BTC at 65000 and the venue's mark is 65309. BTC's three figures have
+    a mark to wait for, so the pass waits. At 65309 the ledger's notional is
+    ``0.002 × 65309 = 130.618``, the venue's own figure.
+
+    The ``maintenance_margin`` gap stays, so no check is clean and the pass
+    must alert. ``rechecked`` is 1 because it checked the one new mark.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    venue = _levered(
+        _held(
+            "100002.000",
+            ("BTC", "0.002", "1.000"),
+            ("ETH", "0.1", "1.000"),
+            entry={"ETH": "2990"},
+            maintenance="2.500",
+        ),
+        _CROSS_5X,
+        symbol="ETH",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["venue"], log["rechecked"]) for log in alerts] == [
+        ("maintenance_margin", "2.500", 1)
+    ]
+    assert clock.parked.is_set()
+
+
 def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
     """The pass flatten runs alerts at once, with ``rechecked`` 0 (#694).
 
