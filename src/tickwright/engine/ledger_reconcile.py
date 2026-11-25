@@ -1555,11 +1555,14 @@ class LedgerReconciliation:
         # decision that needs the venue: the mode gate on the cash correction
         # (ADR-0046 §4). A plan with no cash heal never asks.
         cash = findings.cash
+        written = False
         if cash is not None:
             verified = await self._mode_verified()
+            # Read before the heals, because a size heal raises this count too.
+            written = self._portfolio.writes_applied != writes_at_reading
             # On every verdict, because the mode gates the cash heal alone. The
             # second reading is asked only which symbols moved (#700).
-            if self._portfolio.writes_applied != writes_at_reading:
+            if written:
                 after = self._portfolio.ledger_reading(snapshot=state)
                 findings = findings.deferring(after.filled_since(fills_at_reading))
             cash = findings.cash if verified else None
@@ -1578,8 +1581,10 @@ class LedgerReconciliation:
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
         standing = findings.standing(reading, now_ns=now_ns)
-        # After the heals, so the wait never delays one (#682).
-        if wait_for_marks:
+        # After the heals, so the wait never delays one (#682). A write in the
+        # mode check is in the ledger but not in the snapshot. A second check
+        # could read it as a gap that hides a real alert, so there is none (#698).
+        if wait_for_marks and not written:
             standing = await self._recheck(state, findings, standing)
         alerts = standing.alerts
         # Ahead of the pass's own summary, as the heal records are: the summary

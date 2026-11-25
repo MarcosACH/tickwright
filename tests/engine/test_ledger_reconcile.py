@@ -5677,6 +5677,57 @@ def test_a_funding_payment_during_the_wait_leaves_the_first_checks_alerts_standi
     assert _recorded(logs)["cleared"] == 0
 
 
+@pytest.mark.parametrize("mode", list(AccountModeVerdict))
+@pytest.mark.parametrize(
+    ("side", "price"),
+    [
+        pytest.param(Side.BUY, "64809", id="buy"),
+        pytest.param(Side.SELL, "65809", id="closing sell"),
+    ],
+)
+def test_a_fill_in_the_mode_check_leaves_the_first_checks_alerts_standing(
+    side: Side, price: str, mode: AccountModeVerdict
+) -> None:
+    """A fill in the mode check must not clear a real gap (#698).
+
+    The gap is real. The venue entered BTC at 64309 and the ledger at 64809, so
+    uPnL is 1.000 apart at the venue's own mark, 65309. The venue's cash is 5
+    above the ledger's, so the second pass checks the mode. A BTC fill lands in
+    that check. The next mark is 65309.
+
+    The snapshot was read before the fill, so a second check would see a BTC
+    size gap and silence BTC's figures. So the pass does not wait. The alerts
+    of the first check stand, on every mode verdict.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    state = _held("100007.000", ("BTC", "0.002", "2.000"), entry={"BTC": "64309"})
+    venue = _SlowModeVenue(
+        state,
+        state,
+        during=lambda: _book_fill(ledger, quantity="0.002", price=price, side=side, seq=2),
+        mode=mode,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _during_the_wait(cycle, clock, wait_for_marks=False)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock, lambda: _mark(ledger, "BTC", "65309", ts_ns=_MARK_TS_NS + 1))
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["ledger"], log["venue"], log["rechecked"]) for log in alerts] == [
+        ("unrealized_pnl", "0.382", "2.000", 0),
+        ("notional", "130.000", "130.618", 0),
+        ("margin_used", "0.382", "2.000", 0),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+    assert not clock.parked.is_set()
+
+
 def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -> None:
     """The next unexplained gap can be read from the log alone (#682).
 
