@@ -4687,6 +4687,61 @@ def test_one_symbol_at_the_venues_mark_does_not_clear_a_gap_on_another() -> None
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_float_noise_in_the_venues_notional_does_not_keep_a_race_alerting() -> None:
+    """The venue's notional can carry float noise (#695).
+
+    Some large mainnet positions report a notional such as
+    ``8584360.3213500008``. The plain race again, with noise of that kind on
+    the venue's 130.618. The feed reaches 65309, so the alerts clear.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    (btc,) = venue.positions
+    noisy = replace(venue, positions=(replace(btc, notional=Decimal("130.6180000000008")),))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(noisy), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 4
+
+
+def test_a_mark_close_to_the_venues_but_not_the_same_does_not_clear() -> None:
+    """The tolerance absorbs float noise and nothing else (#695).
+
+    The plain race again, but the feed stops at 65309.001. That is 1.5e-8 of
+    the price away from the venue's 65309. No figure is outside the band
+    there, but it is a different mark. So the alerts stand.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309.001", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert [(alert["field"], alert["symbol"]) for alert in _alerts(logs)] == [
+        ("equity", None),
+        ("unrealized_pnl", "BTC"),
+        ("notional", "BTC"),
+        ("margin_used", "BTC"),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
     """``cleared`` is 0 or every alert, never a part (#690).
 

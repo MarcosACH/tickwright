@@ -40,6 +40,10 @@ _ZERO = Decimal("0")
 # Testnet sends a mark about once a second, and the soak saw the next one
 # 0.0 to 1.1 s after the comparison. Far below the 60 s account interval.
 _RECHECK_WAIT_SECONDS = 5.0
+# How close, as a share of the notional, the ledger's mark must be to the
+# venue's to count as the same mark (#695). It only absorbs float noise in the
+# venue's notional.
+_SAME_MARK_RTOL = Decimal("1e-9")
 _NS_PER_SECOND = Decimal(1_000_000_000)
 _MILLISECOND = Decimal("0.001")
 
@@ -481,7 +485,8 @@ def _at_venue_marks(
         mark = reading.mark_prices.get(symbol)
         if position is None or mark is None:
             return False
-        if mark * abs(position.signed_size) != position.notional:
+        gap = abs(mark * abs(position.signed_size) - position.notional)
+        if gap > _SAME_MARK_RTOL * abs(position.notional):
             return False
     return True
 
