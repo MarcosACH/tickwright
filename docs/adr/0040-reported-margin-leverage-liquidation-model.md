@@ -224,6 +224,14 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   The band, `rtol`, `atol`, `mark_max_age_seconds`, the 5 s limit and the heals do not change. A real gap now alerts after 5 s, not after about 1 s. Valuing the ledger at the venue's own mark was rejected. It needs a new `Exchange` seam field and a mark history, and the evidence shows the cause is the wait.**)**
 
+**(Amended by [#694](https://github.com/MarcosACH/tickwright/issues/694): an account pass in an exit run never waits for a mark.** The #682 and #690 blocks above make every pass with alerts wait. Flatten runs account passes before a close, and every close shares their lock. So one size gap could hold closes back 5 to 10 s, for an alert flatten never reads.
+
+  - Flatten's pass logs the first check's alerts as they stand, with `rechecked=0` and `cleared=0`. So `rechecked=0` now also means the pass did not wait.
+  - It heals as before. The heals run before the wait.
+  - The 60 s cadence keeps its wait.
+
+  The cost is that flatten can log a `valuation.divergence` a later mark would have cleared. A late close is worse than an extra log line.**)**
+
 ## 7. Paper account genesis numbers
 
 Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-check against. Given the genesis collateral configured by [#136](https://github.com/MarcosACH/tickwright/issues/136) (that ticket owns the *config*; this owns the *formulas*) — **since settled by ADR-0042**, which makes it a strictly positive `PaperExchangeConfig` field with no default, **demanded by `AppConfig`'s validator whenever `exchange == "paper"`** (never required at field level, which would force a paper number onto a live run — ADR-0042 §1), and ingests the live path's from the venue:

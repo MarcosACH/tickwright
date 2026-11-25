@@ -235,6 +235,8 @@ context. Starts the feed through the `FeedHandle`.
   a short opened by hand on a coin the config never named. The account pass takes the same lock
   as a close and a reconcile pass. Beside another symbol's close, it could heal a fill the engine
   has not booked yet, and the fill would then book twice.**)**
+- **(Amended by #694:** the runner passes `reconcile_account(wait_for_marks=False)` into the
+  context. The pass heals as before but never waits for a mark (ADR-0040 §6).**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.
