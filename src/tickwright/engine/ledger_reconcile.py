@@ -1540,6 +1540,11 @@ class LedgerReconciliation:
                 for alert in first.alerts
             )
         )
+        # A ``maintenance_margin`` alert has no terms when the ledger holds no
+        # cross position. No mark can change that figure, and ``marks_after``
+        # returns at once for no symbols, so the loop below would spin (#696).
+        if not terms:
+            return first
         writes_before = self._portfolio.writes_applied
         standing = first
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))

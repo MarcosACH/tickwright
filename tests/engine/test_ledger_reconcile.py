@@ -4491,6 +4491,44 @@ def test_a_gap_with_no_new_mark_says_it_checked_no_update() -> None:
     assert {log["rechecked"] for log in alerts} == {0}
 
 
+def test_an_alert_with_no_mark_to_wait_for_stands_at_once() -> None:
+    """A maintenance alert computed from no symbol does not start the wait (#696).
+
+    An operator opened a cross ETH position by hand, and an earlier pass healed
+    it into the books. Config does not name ETH, so the ledger values it at the
+    isolated 1x fallback, and the feed sends it no mark. The ledger's cross sum
+    is then a sum over no symbols, which is 0. The venue publishes 2.500. No
+    other figure can be compared, so this alert is the only one.
+
+    No mark can change that 0. A wait here checked the same gap in a tight loop
+    until the 5 s ran out. So the alert stands at once, and the clock must
+    never see a sleep.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    _book_fill(keeper.portfolio, quantity="0.1", price="2990", symbol="ETH")
+    venue = _levered(
+        _held(
+            "100001.000",
+            ("ETH", "0.1", "1.000"),
+            entry={"ETH": "2990"},
+            maintenance="2.500",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock)
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["venue"], log["rechecked"]) for log in alerts] == [
+        ("maintenance_margin", "2.500", 0)
+    ]
+    assert _recorded(logs)["cleared"] == 0
+    assert not clock.parked.is_set()
+
+
 def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
     """The pass flatten runs alerts at once, with ``rechecked`` 0 (#694).
 
