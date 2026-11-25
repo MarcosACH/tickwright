@@ -36,6 +36,7 @@ from hyperliquid_flatten import (
     FillsHalfAfterOracleRejects,
     HalfClosesBesideAGap,
     HeldShort,
+    HeldShortWithMaintenance,
     priced_frames,
     run_flatten,
 )
@@ -138,6 +139,25 @@ def test_a_size_gap_does_not_hold_back_the_closes_on_a_valuation_alert(tmp_path:
     diverged = {log["symbol"] for log in logs if log["event"] == "valuation.divergence"}
     assert "BTC" in diverged
     assert venue.closed_at == {"BTC": 0, "HYPE": 0}
+    assert logs[-1]["outcome"] == "done"
+
+
+def test_a_size_gap_alone_does_not_hold_back_its_close_on_a_maintenance_alert(
+    tmp_path: Path,
+) -> None:
+    # The books miss HYPE, so the venue's maintenance is not explained by the size
+    # gap and alerts. No other symbol is needed. A cash gap would silence it, so
+    # the ledger's cash matches the venue's (#694).
+    venue = HeldShortWithMaintenance()
+
+    with capture_events() as logs:
+        exit_code, _, _ = run_flatten(tmp_path / "saga.db", venue, priced_frames(), cash="100")
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    # The alert did fire in both account passes, so there was something to wait on.
+    diverged = [log["field"] for log in logs if log["event"] == "valuation.divergence"]
+    assert diverged == ["maintenance_margin", "maintenance_margin"]
+    assert venue.closed_at == 0
     assert logs[-1]["outcome"] == "done"
 
 

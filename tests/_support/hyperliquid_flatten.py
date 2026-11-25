@@ -248,6 +248,26 @@ class BookedLongBesideAGap(HeldShort):
         return self._filled
 
 
+class HeldShortWithMaintenance(HeldShort):
+    """The HYPE short alone, with a maintenance margin the ledger has no row for.
+
+    ``closed_at`` is how long after the start the close came in, on the run's clock.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock = _TurnPacedClock(start_ns=START_MS * 1_000_000)
+        self.closed_at: int | None = None
+
+    def account(self, payload: dict) -> dict:
+        maintenance = "30.0" if self.held else "0.0"
+        return super().account(payload) | {"crossMaintenanceMarginUsed": maintenance}
+
+    def order(self, payload: dict) -> object:
+        self.closed_at = self.clock.timestamp_ns() - START_MS * 1_000_000
+        return super().order(payload)
+
+
 class FillsHalfAfterOracleRejects(HeldShort):
     """Rejects closes against its oracle, but fills half the short once ``fill_after_s`` passed.
 
@@ -284,12 +304,14 @@ def run_flatten(
     engine_config: EngineConfig | None = None,
     transport: Callable[[FakeExchangeApi], PostJson] | None = None,
     booked: tuple[Position, ...] = (),
+    cash: str = "0",
 ) -> tuple[int, FakeExchangeApi, FakeWsConnection]:
     """Run ``flatten`` once and return its exit code, the HTTP fake and the socket fake.
 
     ``engine_config`` lets a test change the reconcile timing. ``None`` keeps the defaults.
     ``transport`` wraps the HTTP fake, so a test can hold an answer open.
-    ``booked`` is what the ledger already holds at boot.
+    ``booked`` and ``cash`` are what the ledger already holds at boot. The venue's
+    cash is 100, so the default leaves a cash gap.
     """
     post = FakeExchangeApi(
         {
@@ -327,7 +349,7 @@ def run_flatten(
         used.checkpoint_ledger(
             account=Account(
                 account_id=exchange.account_spec().account_id,
-                genesis_collateral=Decimal("0"),
+                genesis_collateral=Decimal(cash),
                 genesis_ts_ns=0,
             ),
             positions=booked,
