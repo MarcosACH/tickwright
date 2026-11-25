@@ -4343,6 +4343,30 @@ def test_a_gap_the_next_mark_closes_is_not_alerted_and_is_counted_as_cleared() -
     assert _recorded(logs)["cleared"] == 4
 
 
+def test_a_gap_the_next_mark_closes_on_a_short_is_not_alerted() -> None:
+    """The same race on a short position (#695).
+
+    The venue reports a short's size as negative and its notional as positive.
+    So the clear rule must use the size without its sign, or no short could
+    ever be at the venue's mark.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809", side=Side.SELL)
+    _mark(projection, "BTC", "65000")
+    venue = _held("99999.000", ("BTC", "-0.002", "-1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 4
+
+
 def test_a_gap_a_later_mark_closes_after_a_repeated_price_is_not_alerted() -> None:
     """The soak's race on a repeated price (#690).
 
