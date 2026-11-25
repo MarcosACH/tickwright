@@ -5771,6 +5771,35 @@ def test_a_funding_payment_in_the_mode_check_leaves_the_first_checks_alerts_stan
     assert not clock.parked.is_set()
 
 
+def test_a_pass_that_heals_a_size_and_cash_still_clears_on_the_next_mark() -> None:
+    """The pass's own heals are not a write in the mode check (#698).
+
+    The BTC gap is the one-step mark race, and 65309 closes it. The pass also
+    heals 0.1 ETH opened by hand and a cash gap of 5. A size heal raises
+    ``writes_applied``. Counted as a write, it would skip the second check or
+    end the wait, and the race would alert.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    venue = _AccountVenue(
+        _held("100006.000", ("BTC", "0.002", "1.000"), ("ETH", "0.1", "0"), entry={"ETH": "3000"})
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _during_the_wait(cycle, clock, wait_for_marks=False)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock, lambda: _mark(ledger, "BTC", "65309", ts_ns=_MARK_TS_NS + 1))
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002"), "ETH": Decimal("0.1")}
+    assert ledger.account().cash == Decimal("100005")
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 3
+
+
 def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -> None:
     """The next unexplained gap can be read from the log alone (#682).
 
