@@ -13,7 +13,7 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
-from typing import Final
+from typing import Any, Final
 
 import pytest
 from ledgers import book_fill
@@ -143,6 +143,32 @@ class _SlowAccountVenue(_AccountVenue):
         self._during()
         await asyncio.sleep(0)
         return state
+
+
+class _SlowModeVenue(_AccountVenue):
+    """A mode check with a round trip inside it (#700).
+
+    The same difference ``_SlowAccountVenue`` makes, on the pass's other venue
+    read. ``during`` runs once, inside the first mode check. The later checks
+    answer at once, so a case can show the pass that heals after it.
+    """
+
+    def __init__(
+        self,
+        *answers: VenueAccountState | None,
+        during: Callable[[], None],
+        mode: AccountModeVerdict = AccountModeVerdict.VERIFIED,
+    ) -> None:
+        super().__init__(*answers, mode=mode)
+        self._during = during
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        verdict = await super().verify_account_mode()
+        if self.mode_reads == 1:
+            await asyncio.sleep(0)  # the wire: the loop is free to run the fill handler
+            self._during()
+            await asyncio.sleep(0)
+        return verdict
 
 
 def _ledger(
@@ -2188,6 +2214,78 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
     # Both findings were held back, and the record says so (#335).
     record = _recorded(logs)
     assert (record["tier_1"], record["deferred"], record["unpriced"]) == (2, 2, 0)
+
+
+@pytest.mark.parametrize(
+    ("fill", "cash", "after", "entry"),
+    [
+        pytest.param(
+            {"symbol": "BTC", "side": Side.BUY, "quantity": "0.002", "price": "64809"},
+            "99999.95",
+            (("BTC", "0.004", "0"),),
+            None,
+            id="buy",
+        ),
+        pytest.param(
+            {"symbol": "BTC", "side": Side.SELL, "quantity": "0.002", "price": "65809"},
+            "100001.95",
+            (),
+            None,
+            id="closing sell",
+        ),
+        pytest.param(
+            {"symbol": "ETH", "side": Side.BUY, "quantity": "0.1", "price": "3000"},
+            "99999.95",
+            (("BTC", "0.002", "0"), ("ETH", "0.1", "0")),
+            {"ETH": "3000"},
+            id="buy of another symbol",
+        ),
+    ],
+)
+def test_a_fill_landing_inside_the_mode_check_defers_the_cash_heal(
+    fill: Mapping[str, Any],
+    cash: str,
+    after: tuple[tuple[str, str, str], ...],
+    entry: Mapping[str, str] | None,
+) -> None:
+    """The mode check is a venue read too, so a fill can land inside it (#700).
+
+    The cash heal adds the ledger's cost basis to the venue's net cash. The
+    fill moves that cost basis and the venue's figure predates the fill. Healed
+    then, cash is wrong by the whole cost of the fill. So the heal waits.
+
+    The venue's cash is 5 above the ledger's throughout. The fill pays a fee of
+    0.05, and the closing sell realizes 2. After the fill the gap of 5 is still
+    there. The next pass sees it again and the one after heals it.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    before = _held("100005", ("BTC", "0.002", "0"))
+    venue = _SlowModeVenue(
+        before,
+        before,
+        _held(str(Decimal(cash) + 5), *after, entry=entry),
+        during=lambda: _book_fill(ledger, seq=2, fee="0.05", **fill),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account().cash == Decimal(cash)
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (1, 1)
+    clock.advance_to(9)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal(cash)
+    clock.advance_to(10)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal(cash) + 5
 
 
 def test_a_fill_the_venue_booked_first_is_not_healed_before_the_engine_books_it() -> None:

@@ -14,7 +14,7 @@ with itself. What paper has in its place is the atomic ledger write.
 
 import asyncio
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
@@ -1245,6 +1245,10 @@ class ReconcileFindings:
             seen=seen,
         )
 
+    def deferring(self) -> "ReconcileFindings":
+        """These findings with the heals a write in the mode check made stale (#700)."""
+        return replace(self, cash=None, deferred=self.deferred + (self.cash is not None))
+
     def still_alerting(
         self,
         state: VenueAccountState,
@@ -1446,6 +1450,8 @@ class LedgerReconciliation:
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
         reading = self._portfolio.ledger_reading(snapshot=state)
+        # Beside the reading, so a change is a write the reading does not have.
+        fills_at_reading = self._portfolio.fills_applied
         # The clock is read here rather than inside the classification,
         # because a mark's age is a fact about the snapshot this pass
         # compared against: taken beside the alerts instead, it would be
@@ -1466,8 +1472,11 @@ class LedgerReconciliation:
         # decision that needs the venue: the mode gate on the cash correction
         # (ADR-0046 §4). A plan with no cash heal never asks.
         cash = findings.cash
-        if cash is not None and not await self._mode_verified():
-            cash = None
+        if cash is not None:
+            verified = await self._mode_verified()
+            if self._portfolio.fills_applied != fills_at_reading:
+                findings = findings.deferring()
+            cash = findings.cash if verified else None
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in findings.heals),
             cash=None if cash is None else cash.correction,
