@@ -40,6 +40,7 @@ from tickwright.domain import (
     AccountAnchor,
     AccountModeVerdict,
     AccountSpec,
+    Denied,
     ExternalOrderRef,
     FundingAccrual,
     InstrumentSpec,
@@ -48,15 +49,19 @@ from tickwright.domain import (
     MarkTick,
     Order,
     OrderFilled,
+    OrderType,
+    PlaceSignal,
     Position,
     Side,
     Store,
+    TimeInForce,
     VenueAccountState,
     VenueOpenOrder,
     VenuePositionState,
     VenueReadFailure,
 )
 from tickwright.engine.checkpoint import Checkpointer
+from tickwright.engine.guard import PreTradeLimits, RealGuard, SymbolLimits
 from tickwright.engine.ledger_reconcile import (
     Divergence,
     DivergenceField,
@@ -2387,6 +2392,52 @@ def test_a_venue_first_fill_landing_inside_the_mode_check_is_not_booked_twice(
         for found in divergences or ()
         if found.tier is DivergenceTier.TIER_1
     ] == [(DivergenceField.NET_CASH, Decimal("5"))]
+
+
+def test_the_max_position_holds_after_a_venue_first_sell_lands_inside_the_mode_check() -> None:
+    """A sell booked twice reads as a smaller position than the venue holds (#700).
+
+    The venue holds 0.001 BTC after the sell. The cap is 0.002, so a buy of
+    0.002 must be denied. Booked twice, the sell left the ledger flat, and the
+    guard let the buy through.
+    """
+    clock = ManualClock(7)
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _SlowModeVenue(
+        _held("100005", ("BTC", "0.001", "0")),
+        during=lambda: _book_fill(ledger, quantity="0.001", price="64809", side=Side.SELL, seq=2),
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    guard = RealGuard(
+        specs={"BTC": _BTC_SPEC},
+        store=store,
+        clock=clock,
+        limits=PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("0.002"))}),
+    )
+    _seen(cycle)
+    clock.advance_to(8)
+
+    asyncio.run(cycle.reconcile_account())
+
+    decision = guard.check(
+        PlaceSignal(
+            ts_event=8,
+            ts_init=8,
+            strategy_id="alpha",
+            symbol="BTC",
+            seq=3,
+            side=Side.BUY,
+            quantity=Decimal("0.002"),
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            price=Decimal("64809"),
+        ),
+        keeper.pre_trade_reading("BTC", Side.BUY, strategy_id="alpha"),
+    )
+    assert decision == Denied(reason="above max position 0.002")
 
 
 def test_a_fill_the_venue_booked_first_is_not_healed_before_the_engine_books_it() -> None:
