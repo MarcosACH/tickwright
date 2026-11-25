@@ -17,6 +17,7 @@ from typing import Final
 
 import pytest
 from ledgers import book_fill
+from parking_clock import ParkingClock
 from venue_doubles import (
     CROSSLESS_MAINTENANCE,
     LIVE_ACCOUNT_ID,
@@ -4281,28 +4282,9 @@ def test_a_widened_band_is_the_one_the_cycle_judges_with() -> None:
     assert _alerts(logs) == []
 
 
-class _WaitingClock(ManualClock):
-    """A clock whose ``sleep`` waits like a real one (#682).
-
-    ``ManualClock.sleep`` returns at once, as if the time had passed with
-    nothing in it. That is the right answer for "no mark arrived in time". A
-    case that delivers a mark *during* the wait needs the wait to stay open
-    until the case decides what happens in it. ``parked`` tells the case the
-    cycle is now waiting.
-    """
-
-    def __init__(self, start_ns: int = 7) -> None:
-        super().__init__(start_ns)
-        self.parked = asyncio.Event()
-
-    async def sleep(self, seconds: float) -> None:
-        self.parked.set()
-        await self.sleep_until(self.timestamp_ns() + int(seconds * 1_000_000_000))
-
-
 def _during_the_wait(
     cycle: LedgerReconciliation,
-    clock: _WaitingClock,
+    clock: ParkingClock,
     *acts: Callable[[], None],
     wait_for_marks: bool = True,
 ) -> tuple[Divergence, ...] | None:
@@ -4344,7 +4326,7 @@ def test_a_gap_the_next_mark_closes_is_not_alerted_and_is_counted_as_cleared() -
 
     The race stays visible on the pass's record as ``cleared``.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4369,7 +4351,7 @@ def test_a_gap_a_later_mark_closes_after_a_repeated_price_is_not_alerted() -> No
     stamp. Here the feed pushes 65000 again, then the venue's 65309. The pass
     must keep checking until 65309 arrives, and then nothing is left to alert.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4397,7 +4379,7 @@ def test_a_gap_only_repeated_prices_follow_is_alerted_with_the_updates_it_checke
     0.5 s old, and ``rechecked`` says two updates were checked. So "no new
     mark" and "two marks, none matched" read differently in the log.
     """
-    clock = _WaitingClock(start_ns=10_000_000_000)
+    clock = ParkingClock(start_ns=10_000_000_000)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4437,7 +4419,7 @@ def test_a_cost_basis_gap_a_mark_move_shifts_to_another_figure_is_still_alerted(
     equity are 0.2 out instead. No update cleared every figure at once, so the
     pass alerts on the figures outside the band at the last update checked.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4469,7 +4451,7 @@ def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
     65409 only notional and equity are still out. That update did not clear
     the account, so nothing was cleared, even though two figures closed.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4493,7 +4475,7 @@ def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
 
 def test_a_gap_with_no_new_mark_says_it_checked_no_update() -> None:
     """``rechecked`` is 0 when the feed sends nothing in the wait (#690)."""
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4518,7 +4500,7 @@ def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
     ``0.002 × 191 = 0.382`` against the venue's 1.000. The clock must never
     see a sleep.
     """
-    clock = _WaitingClock(start_ns=10_000_000_000)
+    clock = ParkingClock(start_ns=10_000_000_000)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4553,7 +4535,7 @@ def test_two_passes_told_not_to_wait_still_heal_a_size_gap() -> None:
     gap heals only on the second pass that finds it (#574). So the first pass
     books nothing and the second books the ETH.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     ledger = keeper.portfolio
     _book_fill(ledger, quantity="0.002", price="64809")
@@ -4595,7 +4577,7 @@ def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
     The alert carries the ledger's figures at the new mark. That is the
     comparison the alert stands on, so it is the one an operator reads.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4625,7 +4607,7 @@ def test_a_gap_with_no_new_mark_inside_the_wait_is_still_alerted() -> None:
     the ledger at 65000 against the venue at 65309, as it did before the
     second check existed.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4659,7 +4641,7 @@ def test_an_equity_gap_waits_for_a_new_mark_on_every_held_symbol() -> None:
     valued equity off a new BTC mark and an old ETH mark would mix two moments.
     So the equity alert stands.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4697,7 +4679,7 @@ def test_a_fill_during_the_wait_leaves_the_first_checks_alerts_standing() -> Non
     would vanish from the alerts. So the pass skips the second check and
     alerts on the first one, as it did before the second check existed.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4731,7 +4713,7 @@ def test_a_fill_after_a_repeated_price_ends_the_wait_with_every_alert_standing()
     wait. The alerts stand at the last update checked, the repeat, and
     ``rechecked`` says one update was checked.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4768,7 +4750,7 @@ def test_a_funding_payment_during_the_wait_leaves_the_first_checks_alerts_standi
     vanish from the alerts. Funding settles on the hour, which is when the
     soak saw most of these gaps.
     """
-    clock = _WaitingClock()
+    clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
@@ -4810,7 +4792,7 @@ def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -
     stamped 0.3 s before the clock reads it. Equity sums BTC alone, so it
     names the same one mark.
     """
-    clock = _WaitingClock(start_ns=10_000_000_000)
+    clock = ParkingClock(start_ns=10_000_000_000)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")

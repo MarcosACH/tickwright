@@ -20,6 +20,7 @@ from pathlib import Path
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from never_wakes import NeverWakes
+from parking_clock import ParkingClock
 from recovery_stores import RecoveryOrderStore
 from store_backends import SQLiteBackend
 from structlog.typing import EventDict
@@ -1071,22 +1072,6 @@ def test_a_live_run_reconciles_the_account_on_its_own_cadence(tmp_path: Path) ->
     assert venue.account_reads == 2, "the barrier's read, then exactly one cycle's"
 
 
-class _ParkingClock(ManualClock):
-    """A clock whose ``sleep`` stays open until the case moves time on.
-
-    ``ManualClock.sleep`` returns at once, so a wait on it ends before a mark
-    can arrive. ``parked`` says a ``sleep`` is open.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.parked = False
-
-    async def sleep(self, seconds: float) -> None:
-        self.parked = True
-        await self.sleep_until(self.timestamp_ns() + int(seconds * 1_000_000_000))
-
-
 def test_the_account_cadence_still_waits_for_a_mark_beside_a_size_gap(tmp_path: Path) -> None:
     """Flatten's passes never wait for a mark, and the cadence still must (#694).
 
@@ -1129,7 +1114,7 @@ def test_the_account_cadence_still_waits_for_a_mark_beside_a_size_gap(tmp_path: 
 
     async def one_life(logs: list[EventDict]) -> tuple[int, bool]:
         bus = InMemoryBus()
-        clock = _ParkingClock()
+        clock = ParkingClock()
         feed = _BlockingFeed()
         engine = Engine(
             bus=bus,
@@ -1149,11 +1134,11 @@ def test_the_account_cadence_still_waits_for_a_mark_beside_a_size_gap(tmp_path: 
         await asyncio.wait_for(feed.started.wait(), timeout=5)
         await bus.publish(mark("65000", _ACCOUNT_INTERVAL_NS - 1))
         await bus.drain()
-        clock.parked = False
+        clock.parked.clear()
         clock.advance_to(_ACCOUNT_INTERVAL_NS)
         # A pass that does not wait ends here, so the case fails on its
         # assertions instead of hanging.
-        await asyncio.wait_for(_until(lambda: clock.parked or reconciled()), timeout=5)
+        await asyncio.wait_for(_until(lambda: clock.parked.is_set() or reconciled()), timeout=5)
         waited = not reconciled()
         await bus.publish(mark("65309", _ACCOUNT_INTERVAL_NS))
         await asyncio.wait_for(_until(reconciled), timeout=5)
