@@ -44,6 +44,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
+    AccountModeVerdict,
     ComponentState,
     Exchange,
     ExternalOrderRef,
@@ -59,6 +60,7 @@ from tickwright.domain import (
     OrderLive,
     OrderRef,
     OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     PlaceSignal,
@@ -1153,6 +1155,130 @@ def test_the_account_cadence_still_waits_for_a_mark_beside_a_size_gap(tmp_path: 
     (record,) = [log for log in logs if log["event"] == NamedEvent.ACCOUNT_RECONCILED.value]
     assert (record["tier_1"], record["cleared"]) == (1, 3)
     assert [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value] == []
+
+
+class _HeldModeVenue(_LiveShapedVenue):
+    """A live venue whose mode check stays open until the case ends it (#700)."""
+
+    def __init__(self, *, state: VenueAccountState, view: VenueOrderView) -> None:
+        super().__init__(state=state, view=view)
+        self.checking = asyncio.Event()
+        self.answer = asyncio.Event()
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        self.checking.set()
+        await self.answer.wait()
+        return await super().verify_account_mode()
+
+
+def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
+    tmp_path: Path,
+) -> None:
+    """A fill can land while the account pass checks the mode (#700).
+
+    The strategy holds 0.002 BTC and the venue's cash is 5 above the ledger's.
+    The second pass wants to heal that gap, so it checks the mode. The strategy
+    then buys 0.002 BTC more and pays a fee of 0.05. Its cash is 100000 less
+    that fee, in this run and after a restart.
+    """
+    right = Decimal("99999.95")
+    buy = FillReport(
+        ts_event=900,
+        ts_init=900,
+        cloid=_LIVE_CLOID,
+        symbol="BTC",
+        trade_id="t-1",
+        quantity=Decimal("0.002"),
+        price=Decimal("64809"),
+        fee=Decimal("0.05"),
+    )
+    resting = OrderStatusReport(
+        ts_event=600,
+        ts_init=600,
+        cloid=_LIVE_CLOID,
+        symbol="BTC",
+        status=OrderState.LIVE,
+        venue_oid="777",
+    )
+    state = account_state("100005", "0")
+    store = SQLiteStore(tmp_path / "saga.db")
+    store.checkpoint_ledger(
+        account=Account(
+            account_id=LIVE_ACCOUNT_ID, genesis_collateral=Decimal("100000"), genesis_ts_ns=0
+        ),
+        positions=(
+            Position(
+                strategy_id="trivial",
+                symbol="BTC",
+                signed_size=Decimal("0.002"),
+                entry_price=Decimal("64809"),
+            ),
+        ),
+        ts_ns=0,
+    )
+    # Submitted, not resting: the boot takes the venue's ack for it.
+    store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+
+    async def first_life(logs: list[EventDict]) -> tuple[int, Decimal]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        feed = _BlockingFeed()
+        venue = _HeldModeVenue(state=state, view=VenueOrderView(status=resting))
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+        portfolio = engine.portfolio_for("trivial")
+
+        def passes() -> int:
+            return sum(log["event"] == NamedEvent.ACCOUNT_RECONCILED.value for log in logs)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        clock.advance_to(_ACCOUNT_INTERVAL_NS)
+        await asyncio.wait_for(_until(lambda: passes() == 1), timeout=5)
+        for _ in range(50):  # the cadence parks on its next deadline
+            await asyncio.sleep(0)
+        clock.advance_to(2 * _ACCOUNT_INTERVAL_NS)
+        await asyncio.wait_for(venue.checking.wait(), timeout=5)
+        await bus.publish(buy)
+        await bus.drain()
+        assert portfolio.account().cash == right, "the fill must land inside the check"
+        venue.answer.set()
+        await asyncio.wait_for(_until(lambda: passes() == 2), timeout=5)
+        cash = portfolio.account().cash
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), cash
+
+    async def second_life() -> tuple[int, Decimal]:
+        bus = InMemoryBus()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=ManualClock(),
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=_LiveShapedVenue(
+                state=state, view=VenueOrderView(status=resting, fills=(buy,))
+            ),
+            feed=feed,
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        cash = engine.portfolio_for("trivial").account().cash
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), cash
+
+    with capture_events() as logs:
+        first = asyncio.run(first_life(logs))
+
+    # Both lives are asserted together, so a failure shows what each one read.
+    assert (first, asyncio.run(second_life())) == ((0, right), (0, right))
 
 
 def test_no_paper_run_schedules_the_account_cadence(tmp_path: Path) -> None:

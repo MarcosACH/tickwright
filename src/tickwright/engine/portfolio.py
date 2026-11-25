@@ -229,10 +229,11 @@ class LedgerReading:
     mode guard puts a real ``await`` between the classification and that write
     (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
 
-    One part of the pass does take more readings: the checks on each new mark
-    in the wait (#682, #690). They read after the heal, so they leave out
-    every figure the first reading's Tier-1 findings explained. See
-    ``ReconcileFindings.recheck``.
+    Two parts of the pass do take more readings. The checks on each new mark
+    in the wait (#682, #690) read after the heal, so they leave out every
+    figure the first reading's Tier-1 findings explained. See
+    ``ReconcileFindings.recheck``. The other is a write inside the mode
+    check (#700). That reading is asked only which symbols a fill touched.
 
     Deliberately **not** carrying the leverage book. ``leverage_for`` reads
     configuration resolved at startup, so no fill can move it and there is no
@@ -282,7 +283,7 @@ class LedgerReading:
 
     The cycle's movement signal, and a stamp like ``mark_observed`` rather than
     a compared figure on the row. ``filled_since`` reads it: a symbol stamped
-    above the count the cycle read before its venue read took a fill while the
+    above the count the cycle read before a venue read took a fill while that
     read was in flight. A net compare misses a fill and its reverse inside one
     read window. This does not. A symbol no fill touched this run is absent."""
 
@@ -320,10 +321,11 @@ class LedgerReading:
         """The symbols a fill touched after the ledger's count stood at
         ``fills_before``. The cycle's one movement predicate (#324).
 
-        The cycle reads ``fills_applied`` before its venue read and asks this
-        of the reading it takes after. A symbol named here took a fill while
-        the read was in flight, so its finding compares a fresh fold against a
-        stale snapshot and is reported rather than healed.
+        The cycle reads ``fills_applied`` before its account read and asks this
+        of the reading it takes after. It does the same around the mode check
+        (#700). A symbol named here took a fill while that venue read was in
+        flight. Its size finding may be stale, so it is reported rather than
+        healed.
 
         Read off the stamps and not the net, because the rule is "any fill
         touched it". A fill and its reverse inside one read window leave the net
@@ -366,13 +368,14 @@ class PortfolioProjection:
         # The fill stamp (#324). One count over every accepted fill, and per
         # symbol the count as of its last one. Run state, not ledger state: it
         # exists so the reconcile cycle can tell a symbol a fill moved during
-        # the venue read from one that diverged, and a pass compares only
-        # stamps taken on either side of its own read. So it is not stored and
-        # starts over at zero on a restart.
+        # a venue read from one that diverged, and a pass compares only stamps
+        # taken on either side of its own reads. So it is not stored and starts
+        # over at zero on a restart.
         self._fills_applied = 0
         self._last_fills: dict[str, int] = {}
         # Fills and funding payments together. Run state for the same reason
-        # the fill stamp is. The second Tier-2 check reads it (#682).
+        # the fill stamp is. The Tier-2 recheck reads it (#682), and so does
+        # the check after the mode read (#700).
         self._writes_applied = 0
         # The Tier-2 half, and the asymmetry with the line above is the model:
         # accumulated ledger state is ordering-critical and so is written
@@ -787,7 +790,8 @@ class PortfolioProjection:
     def fills_applied(self) -> int:
         """How many fills this ledger has accepted this run.
 
-        The reconcile cycle reads it once before its venue read and hands it to
+        The reconcile cycle reads it before its account read and again beside
+        its ledger reading, for the mode check (#700). Each count goes to
         ``LedgerReading.filled_since`` after. A symbol stamped above that count
         took a fill while the read was in flight (#324). One integer, not a
         fold: it replaced the pre-read ``account_net`` fold #284 took, which
@@ -799,10 +803,15 @@ class PortfolioProjection:
     def writes_applied(self) -> int:
         """How many fills and funding payments this ledger has accepted this run.
 
-        These are the two writes that reach the ledger from outside the
-        reconcile cycle. The Tier-2 recheck reads it before its wait and on
-        each new mark (#682, #690). Either write moves a figure the venue
-        snapshot cannot see, so a change means no later check can be trusted.
+        The reconcile cycle's own size heals count too, because they go through
+        ``apply_fill``. So each reader takes its first count where no heal of
+        its own pass can land before the second.
+
+        The cycle reads it beside its ledger reading and after the mode check
+        (#700). A change means the planned cash heal is stale. The Tier-2
+        recheck reads it before its wait, which is after the heals, and on each
+        new mark (#682, #690). Either write moves a figure the venue snapshot
+        cannot see, so a change means no later check can be trusted.
         """
         return self._writes_applied
 
@@ -1305,11 +1314,13 @@ class PortfolioProjection:
         write, and this is a read. The reading never uses the liquidation
         prices, so the comparison does not depend on when that write runs.
 
-        The cadence reads one integer beside this: ``fills_applied``, before
-        the venue read (#284, #324). It is not a reading and no venue figure is
-        compared against it. It exists so ``filled_since`` can tell which
-        symbols a fill touched while the read was in flight. The venue
-        comparison still runs off this one reading.
+        The cadence also reads two integers. ``fills_applied`` is read before
+        the account read (#284, #324) and again beside this reading (#700). It
+        lets ``filled_since`` tell which symbols a fill touched while a venue
+        read was in flight. ``writes_applied`` is read beside this reading, so
+        the pass can tell if anything was written during the mode check (#700).
+        Neither is a reading and no venue figure is compared against them. The
+        venue comparison still runs off this one reading.
 
         The ``snapshot`` values each partition at the bucket the venue posts in
         it, not the one on the row. Live never computes the bucket. It takes it
