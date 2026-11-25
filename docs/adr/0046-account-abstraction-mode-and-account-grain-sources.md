@@ -530,6 +530,21 @@ quoted, beneath the caller's `ACCOUNT_MODE_UNVERIFIED`. The two records answer d
 presents as the first one repeating on every heal-bearing cycle, which is the only form of it an
 operator can act on.**)**
 
+**(Corrected by [#700](https://github.com/MarcosACH/tickwright/issues/700): the first cost above is
+no longer accepted.** A fill or a funding payment can land while the mode is checked. The block above
+says it costs one pass. It cost two passes, about 120 s. Since
+[#582](https://github.com/MarcosACH/tickwright/issues/582) the cash error was the whole cost of the
+fill, not its fee alone. A size heal could also book a fill a second time, and then the pre-trade
+guard let a buy past `max_position`.
+
+The pass now notes the fill count and the write count beside its ledger reading. It compares the
+write count after the mode check, on all three verdicts, because the mode gates the cash heal alone.
+If anything was written, the pass drops the cash heal. It also drops the size heals on the symbols a
+fill touched. The other size heals still book, because their symbols did not change. `deferred`
+counts each dropped heal, and the cash heal counts on every verdict. A dropped heal is made two
+passes later if the gap is still there. The block above is still right that planning again would not
+help, because the venue snapshot is older than the write.**)**
+
 ## 5. ADR-0040 §6's alert band: the relative term scales by notional
 
 **Decision: `alert iff |computed − venue| > max(atol, rtol × reference)`, where `reference` is the

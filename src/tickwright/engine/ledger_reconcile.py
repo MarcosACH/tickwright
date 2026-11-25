@@ -1052,6 +1052,7 @@ class ReconcileFindings:
     """The Tier-1 cash finding this pass heals, with the correction that closes it."""
     deferred: int
     """Tier-1 findings a fill inside the read held back. Clears on the next pass.
+    Also the heals a write inside the mode check made stale (#700).
     Also a cash finding held back while an unconfirmed size finding waits (#582)."""
     unconfirmed: int
     """Tier-1 findings not in ``previous``. Heals on the next pass if the same gap is there."""
@@ -1421,9 +1422,10 @@ class LedgerReconciliation:
         same either way.
 
         One thing does come between that reading and the write, and only on a
-        pass with a cash gap to close: the mode guard's venue read. What a
-        concurrent fill costs there, and why the answer is the next deadline
-        rather than a second reading, is ``_mode_verified`` below.
+        pass with a cash gap to close: the mode guard's venue read. A write that
+        lands there drops the heals it made stale, and a later pass makes them
+        (#700). A second reading is taken then, but only to ask which symbols
+        moved. Nothing is compared against it.
 
         The classification itself is ``ReconcileFindings.classify``, which reads
         nothing and emits nothing: what stays here is the venue read, the write
@@ -1691,24 +1693,12 @@ class LedgerReconciliation:
         cross-check and the heal, not the ledger.
 
         This is also the cycle's **one yield point between classifying and
-        writing**, and it is worth naming because the caller's own docstring
-        reasons about a ledger side read once for the pass. The cadence runs
-        beside the saga in the runner's ``TaskGroup``, so a fill can be
-        checkpointed while this read is in flight, and the correction booked
-        after it was computed against the book as it was before: the cash line is
-        an assignment to a target, so that fill's cash effect is overwritten and
-        the size heals are deltas against a net that has since moved.
-
-        Accepted rather than closed, on ADR-0034's own terms: the ledger
-        over-reads for **one cadence interval** and heals back, because the next
-        snapshot carries the fill and the exact cash comparison finds the gap it
-        left. Closing it is not available at this grain anyway — the venue
-        snapshot predates the await too, so re-reading the ledger side would heal
-        toward the same figure against a book the venue has not seen, and the
-        only sound response to "a fill landed" is the pass this one already is:
-        one the next deadline repeats. The window is a round-trip on a path that
-        only runs when something diverged, and it costs nothing on the far commoner
-        pass that finds no cash gap and never opens it.
+        writing**. The cadence runs beside the saga in the runner's
+        ``TaskGroup``, so a fill or a funding payment can be checkpointed while
+        this read is in flight. The heals planned before it are then stale. The
+        caller compares the write count after this call, on every verdict, and
+        drops them (``ReconcileFindings.deferring``, #700). It does not plan
+        them again, because the venue snapshot is older than the write.
         """
         verdict = await self._exchange.verify_account_mode()
         if verdict is AccountModeVerdict.VERIFIED:
