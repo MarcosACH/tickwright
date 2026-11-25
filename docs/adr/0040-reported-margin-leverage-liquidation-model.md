@@ -241,7 +241,8 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
 **(Corrected by [#695](https://github.com/MarcosACH/tickwright/issues/695): the #690 block above clears on any mark that puts every figure inside the band. Only the venue's own mark can clear now.** At another mark, a price move can split one real gap between `unrealized_pnl` and `notional`. Each part is inside the band, so a real `unrealized_pnl` error of up to twice the band cleared. A `free_margin` error on a cross short could be larger.
 
-  - A check clears when both are true. Every symbol the first check's alerts sum over has a ledger mark equal to the venue's. No Tier-2 figure is outside the band, as before.
+  - A check clears when both are true. Every symbol the alerts sum over has a ledger mark equal to the venue's. No Tier-2 figure is outside the band, as before.
+  - Those are the symbols of every check's alerts so far, not only the first check's. A figure can leave the band for the first time during the wait. Its symbols then join the wait, and they must reach the venue's mark too. Otherwise a real gap on them could clear at a mark that splits it. The cost is that a race which reaches a second symbol must reach both marks on one check.
   - The venue's mark is `notional / |signed_size|` on the snapshot's `VenuePositionState`. Equal means within a relative 1e-9. That only absorbs float noise in the venue's notional.
   - A symbol the venue does not hold has no mark to match, so the alerts stand.
   - A check can be in band but not at the venue's mark. It does not clear, and it does not end the wait.

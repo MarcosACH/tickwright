@@ -232,7 +232,7 @@ class LedgerReading:
     One part of the pass does take more readings: the checks on each new mark
     in the wait (#682, #690). They read after the heal, so they leave out
     every figure the first reading's Tier-1 findings explained. See
-    ``ReconcileFindings.still_alerting``.
+    ``ReconcileFindings.recheck``.
 
     Deliberately **not** carrying the leverage book. ``leverage_for`` reads
     configuration resolved at startup, so no fill can move it and there is no
@@ -273,9 +273,10 @@ class LedgerReading:
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
     mark_prices: Mapping[str, Decimal]
-    """The mark each row was valued at. Only the ``valuation.divergence`` log
-    reads it (#682). No default, so a reading cannot drop the prices without
-    saying so. An absent price shows as ``none`` in the log."""
+    """The mark each row was valued at. The ``valuation.divergence`` log shows
+    it (#682), and an alert clears only when it equals the venue's mark (#695).
+    No default, so a reading cannot drop the prices without saying so. An absent
+    price shows as ``none`` in the log and never clears an alert."""
     last_fills: Mapping[str, int]
     """The ledger's fill count as of each symbol's last accepted fill (#324).
 
@@ -1373,9 +1374,9 @@ class PortfolioProjection:
         """The price half of the mark cache, as every fold below wants it.
 
         ``_mark_observed``'s counterpart: one cache, read for its two halves.
-        The folds want only the price. The ``valuation.divergence`` log wants
-        both, and reads them off ``LedgerReading`` (#682). Written out at each of the five call sites
-        it had, the valuation folds and the account view would each hold their
+        The folds want only the price. The reconcile cycle wants both, for the
+        ``valuation.divergence`` log (#682) and the clear rule (#695), and reads
+        them off ``LedgerReading``. Written out at each of the five call sites it had, the valuation folds and the account view would each hold their
         own claim about which field values a position — and the one that drifted
         would value the book against a different mark than the reading beside it.
         """
