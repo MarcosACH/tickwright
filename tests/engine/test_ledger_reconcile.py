@@ -4301,7 +4301,10 @@ class _WaitingClock(ManualClock):
 
 
 def _during_the_wait(
-    cycle: LedgerReconciliation, clock: _WaitingClock, *acts: Callable[[], None]
+    cycle: LedgerReconciliation,
+    clock: _WaitingClock,
+    *acts: Callable[[], None],
+    wait_for_marks: bool = True,
 ) -> tuple[Divergence, ...] | None:
     """Run one pass and do each of ``acts`` while the pass waits for a new mark.
 
@@ -4312,7 +4315,7 @@ def _during_the_wait(
     """
 
     async def scenario() -> tuple[Divergence, ...] | None:
-        task = asyncio.create_task(cycle.reconcile_account())
+        task = asyncio.create_task(cycle.reconcile_account(wait_for_marks=wait_for_marks))
         parked = asyncio.create_task(clock.parked.wait())
         await asyncio.wait((task, parked), return_when=asyncio.FIRST_COMPLETED)
         parked.cancel()
@@ -4504,6 +4507,42 @@ def test_a_gap_with_no_new_mark_says_it_checked_no_update() -> None:
     alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
     assert len(alerts) == 4
     assert {log["rechecked"] for log in alerts} == {0}
+
+
+def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
+    """The pass flatten runs alerts at once, with ``rechecked`` 0 (#694).
+
+    Same race as the case where the next mark closes the gap. A pass that
+    waits clears all four alerts when 65309 arrives. This pass must not wait,
+    so its alerts stand at 65000. At that mark the ledger's uPnL is
+    ``0.002 × 191 = 0.382`` against the venue's 1.000. The clock must never
+    see a sleep.
+    """
+    clock = _WaitingClock(start_ns=10_000_000_000)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000", ts_ns=9_000_000_000)
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65309", ts_ns=9_500_000_000),
+            wait_for_marks=False,
+        )
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["ledger"], log["marks"], log["rechecked"]) for log in alerts] == [
+        ("equity", "100000.382", "BTC=65000 age=1.000s", 0),
+        ("unrealized_pnl", "0.382", "BTC=65000 age=1.000s", 0),
+        ("notional", "130.000", "BTC=65000 age=1.000s", 0),
+        ("margin_used", "0.382", "BTC=65000 age=1.000s", 0),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+    assert not clock.parked.is_set()
 
 
 def test_a_gap_the_next_mark_does_not_close_is_alerted_at_that_mark() -> None:
