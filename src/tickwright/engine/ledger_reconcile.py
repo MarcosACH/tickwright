@@ -1245,9 +1245,20 @@ class ReconcileFindings:
             seen=seen,
         )
 
-    def deferring(self) -> "ReconcileFindings":
-        """These findings with the heals a write in the mode check made stale (#700)."""
-        return replace(self, cash=None, deferred=self.deferred + (self.cash is not None))
+    def deferring(self, moved: frozenset[str]) -> "ReconcileFindings":
+        """These findings without the heals a write in the mode check made stale (#700).
+
+        ``moved`` is the set of symbols a fill touched in the check. Any write
+        moves the cash line, so the cash heal goes whatever ``moved`` holds. A
+        size heal goes only when its own symbol moved. The rest compared a
+        ledger that has not changed.
+
+        Each heal dropped here is counted in ``deferred``. ``classify`` left it
+        out of ``seen``, so it takes two more passes to heal.
+        """
+        heals = tuple(heal for heal in self.heals if heal.fill.symbol not in moved)
+        dropped = len(self.heals) - len(heals) + (self.cash is not None)
+        return replace(self, heals=heals, cash=None, deferred=self.deferred + dropped)
 
     def still_alerting(
         self,
@@ -1451,6 +1462,7 @@ class LedgerReconciliation:
         self._portfolio.observe_venue_liquidation(state)
         reading = self._portfolio.ledger_reading(snapshot=state)
         # Beside the reading, so a change is a write the reading does not have.
+        fills_at_reading = self._portfolio.fills_applied
         writes_at_reading = self._portfolio.writes_applied
         # The clock is read here rather than inside the classification,
         # because a mark's age is a fact about the snapshot this pass
@@ -1474,8 +1486,11 @@ class LedgerReconciliation:
         cash = findings.cash
         if cash is not None:
             verified = await self._mode_verified()
+            # On every verdict, because the mode gates the cash heal alone. The
+            # second reading is asked only which symbols moved (#700).
             if self._portfolio.writes_applied != writes_at_reading:
-                findings = findings.deferring()
+                after = self._portfolio.ledger_reading(snapshot=state)
+                findings = findings.deferring(after.filled_since(fills_at_reading))
             cash = findings.cash if verified else None
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in findings.heals),

@@ -2337,6 +2337,58 @@ def test_a_funding_payment_landing_inside_the_mode_check_defers_the_cash_heal() 
     assert ledger.account().cash == Decimal("100004.5")
 
 
+@pytest.mark.parametrize("mode", list(AccountModeVerdict))
+@pytest.mark.parametrize(
+    ("side", "quantity", "size"),
+    [
+        pytest.param(Side.BUY, "0.002", "0.004", id="buy"),
+        pytest.param(Side.SELL, "0.001", "0.001", id="sell"),
+    ],
+)
+def test_a_venue_first_fill_landing_inside_the_mode_check_is_not_booked_twice(
+    side: Side, quantity: str, size: str, mode: AccountModeVerdict
+) -> None:
+    """A size heal is stale too when its own fill lands in the mode check (#700).
+
+    The venue booked the fill two passes ago, so the size gap is confirmed. The
+    engine then books the fill while the mode is checked. The heal planned
+    before it would book the same fill a second time.
+
+    The mode verdict gates the cash heal alone. So the size heal must be held
+    back on all three verdicts, and ``deferred`` counts both heals on each.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    venue = _SlowModeVenue(
+        _held("100005", ("BTC", size, "0")),
+        during=lambda: _book_fill(ledger, quantity=quantity, price="64809", side=side, seq=2),
+        mode=mode,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal(size)}
+    assert ledger.position("BTC", strategy_id=None) is None
+    assert ledger.account().cash == Decimal("100000")
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (2, 2)
+    # Only the old cash gap is left. The size agrees without a heal.
+    clock.advance_to(9)
+    divergences = asyncio.run(cycle.reconcile_account())
+    assert [
+        (found.field, found.venue - found.ledger)
+        for found in divergences or ()
+        if found.tier is DivergenceTier.TIER_1
+    ] == [(DivergenceField.NET_CASH, Decimal("5"))]
+
+
 def test_a_fill_the_venue_booked_first_is_not_healed_before_the_engine_books_it() -> None:
     """A size finding heals only when the previous pass found it too (#574).
 
