@@ -4598,6 +4598,49 @@ def test_a_cost_basis_gap_on_a_cross_book_is_still_alerted_off_the_venues_mark()
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_a_cost_basis_gap_beside_a_second_isolated_position_is_still_alerted() -> None:
+    """The soak's own book, with BTC and ETH both open at isolated 1x (#695).
+
+    The same BTC gap, with no figure pinned. ETH agrees with the venue: 0.1
+    entered at 2990 and marked at 3000. The venue's free margin is
+    ``100002.000 − 2.200 = 99999.800`` against the ledger's 100000.000. That
+    0.2 gap would alert on BTC alone. Here the account's band is ``0.001 ×
+    430.618``, so it is covered.
+
+    The BTC alert then rests on figures a mark can move. At 65359 none of them
+    is outside the band.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65309")
+    _mark(projection, "ETH", "3000")
+    venue = _held(
+        "100002.000",
+        ("BTC", "0.002", "1.200"),
+        ("ETH", "0.1", "1.000"),
+        entry={"BTC": "64709", "ETH": "2990"},
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65359", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    assert divergences is not None
+    assert [(d.field, d.ledger, d.venue) for d in divergences if d.symbol is None] == [
+        (DivergenceField.FREE_MARGIN, Decimal("100000.000"), Decimal("99999.800"))
+    ]
+    assert _alerts(logs) == [
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "1.000", "venue": "1.200"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "1.000", "venue": "1.200"},
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
     """``cleared`` is 0 or every alert, never a part (#690).
 
