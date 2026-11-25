@@ -1615,6 +1615,11 @@ class LedgerReconciliation:
                 now_ns = self._checkpointer.clock.timestamp_ns()
                 alerts = findings.still_alerting(state, reading, band=self._band, now_ns=now_ns)
                 rechecked = standing.rechecked + 1
+                # A figure can leave the band for the first time here. Its
+                # symbols join the wait and must reach the venue's mark too.
+                terms = terms.union(
+                    *(_terms(reading, field=alert.field, symbol=alert.symbol) for alert in alerts)
+                )
                 if alerts or _at_venue_marks(state, reading, terms):
                     standing = _Standing(
                         alerts=alerts, reading=reading, now_ns=now_ns, rechecked=rechecked

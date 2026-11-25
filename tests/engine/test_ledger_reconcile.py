@@ -4687,6 +4687,97 @@ def test_one_symbol_at_the_venues_mark_does_not_clear_a_gap_on_another() -> None
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_a_symbol_that_alerts_during_the_wait_must_reach_the_venues_mark_too() -> None:
+    """A gap first seen at a later check cannot be cleared off the venue's mark (#695).
+
+    ETH is the real gap of the case above, marked at 3002, where it is split
+    and in band. BTC is the race, so only BTC alerts at the first check.
+
+    Then ETH is at the venue's own 3000, and its 0.4 of uPnL shows whole. So
+    ETH alerts too. Then BTC reaches 65309 and ETH is back at 3002. No figure
+    is outside the band, but ETH is not at the venue's mark. So the alerts
+    stand, with the figures of the check that showed ETH's gap.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65160")
+    _mark(projection, "ETH", "3002")
+    venue = _held(
+        "100002.000",
+        ("BTC", "0.002", "1.000"),
+        ("ETH", "0.1", "1.400"),
+        entry={"ETH": "2986"},
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    def eth_at_the_venues_mark() -> None:
+        _mark(projection, "ETH", "3000", ts_ns=_MARK_TS_NS + 1)
+        _mark(projection, "BTC", "65160", ts_ns=_MARK_TS_NS + 1)
+
+    def btc_at_the_venues_mark() -> None:
+        _mark(projection, "ETH", "3002", ts_ns=_MARK_TS_NS + 2)
+        _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 2)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock, eth_at_the_venues_mark, btc_at_the_venues_mark)
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert {(log["field"], log["symbol"], Decimal(str(log["ledger"]))) for log in alerts} == {
+        ("unrealized_pnl", "BTC", Decimal("0.702")),
+        ("notional", "BTC", Decimal("130.32")),
+        ("margin_used", "BTC", Decimal("0.702")),
+        ("unrealized_pnl", "ETH", Decimal("1")),
+        ("margin_used", "ETH", Decimal("1")),
+    }
+    assert {log["rechecked"] for log in alerts} == {2}
+    assert _recorded(logs)["cleared"] == 0
+
+
+def test_a_symbol_that_alerts_during_the_wait_joins_the_marks_waited_for() -> None:
+    """A race that reaches a second symbol clears at both venue marks (#695).
+
+    Both positions are sound, and only BTC alerts at the first check. Then ETH
+    moves to 3004, 0.4 from the venue's and past its band of 0.3, so it alerts
+    too. Then BTC reaches 65309, and after it ETH reaches 3000.
+
+    The pass waits for a newer mark on both by then. So it checks once both are
+    in, finds each at the venue's mark, and clears the three BTC alerts.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65160")
+    _mark(projection, "ETH", "3000")
+    venue = _held(
+        "100002.000",
+        ("BTC", "0.002", "1.000"),
+        ("ETH", "0.1", "1.000"),
+        entry={"ETH": "2990"},
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    def eth_moves_away() -> None:
+        _mark(projection, "ETH", "3004", ts_ns=_MARK_TS_NS + 1)
+        _mark(projection, "BTC", "65160", ts_ns=_MARK_TS_NS + 1)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            eth_moves_away,
+            lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 2),
+            lambda: _mark(projection, "ETH", "3000", ts_ns=_MARK_TS_NS + 2),
+        )
+
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 3
+
+
 def test_float_noise_in_the_venues_notional_does_not_keep_a_race_alerting() -> None:
     """The venue's notional can carry float noise (#695).
 
