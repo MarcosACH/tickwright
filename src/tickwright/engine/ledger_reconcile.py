@@ -268,8 +268,8 @@ class _Standing:
     valued at, and that mark's age, from the same comparison.
 
     ``rechecked`` counts the mark updates checked in the wait (#690). Zero
-    means no new mark arrived. It tells that apart from several marks that
-    all left the gap open.
+    means no new mark arrived, or the pass did not wait (#694). It tells that
+    apart from several marks that all left the gap open.
     """
 
     alerts: tuple[Divergence, ...]
@@ -1367,7 +1367,9 @@ class LedgerReconciliation:
         """The account anchor came back empty: record it and infer nothing."""
         named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN, scope=caller.value)
 
-    async def reconcile_account(self) -> tuple[Divergence, ...] | None:
+    async def reconcile_account(
+        self, *, wait_for_marks: bool = True
+    ) -> tuple[Divergence, ...] | None:
         """One cycle: read the venue account once, classify what disagrees.
 
         The single ``fetch_account_state`` read is the anchor and the whole
@@ -1397,6 +1399,11 @@ class LedgerReconciliation:
         the heal. That is safe because a heal moves only figures a Tier-1
         finding explained, and those checks leave every such figure out. See
         ``ReconcileFindings.still_alerting``.
+
+        ``wait_for_marks=False`` skips those checks, so the first comparison's
+        alerts stand. Flatten passes it, because it holds back every close
+        while a pass runs, and it reads no alert (#694). The heals are the
+        same either way.
 
         One thing does come between that reading and the write, and only on a
         pass with a cash gap to close: the mode guard's venue read. What a
@@ -1476,7 +1483,10 @@ class LedgerReconciliation:
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
         # After the heals, so the wait never delays one (#682).
-        standing = await self._recheck(state, findings, reading=reading, now_ns=now_ns)
+        if wait_for_marks:
+            standing = await self._recheck(state, findings, reading=reading, now_ns=now_ns)
+        else:
+            standing = _Standing(alerts=findings.alerts, reading=reading, now_ns=now_ns)
         alerts = standing.alerts
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
