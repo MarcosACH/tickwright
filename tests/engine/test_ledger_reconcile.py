@@ -4571,6 +4571,57 @@ def test_an_alert_with_no_mark_to_wait_for_does_not_end_the_wait_of_one_beside_i
     assert clock.parked.is_set()
 
 
+def test_an_alert_with_no_mark_to_wait_for_stands_on_the_pass_that_heals_its_gap() -> None:
+    """The cost of not waiting: one more alert on the pass that heals (#696).
+
+    BTC is configured cross 5x, and the ledger missed the fill that opened it.
+    Net cash agrees, so only the size is healed. The ledger has no BTC row, so
+    the size finding does not explain ``maintenance_margin`` (#322).
+
+    The first pass confirms the size gap, and the second heals it. Both alert
+    on ``maintenance_margin``, because the pass does not compare the healed
+    ledger. The third pass does, and finds nothing.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(
+        SQLiteStore(":memory:"),
+        equity="100000",
+        clock=clock,
+        leverage=_BTC_CROSS_5X,
+        specs={"BTC": _BTC_SPEC},
+    )
+    _mark(keeper.portfolio, "BTC", "65309")
+    # 0.002 × 65309 = 130.618. A fifth is the margin, and 0.0125 is the rate.
+    venue = _levered(
+        _held(
+            "100001.000",
+            ("BTC", "0.002", "1.000"),
+            free_margin="99974.8764",
+            maintenance="1.632725",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    passes = []
+    for _ in range(3):
+        # Each pass runs on its own event loop, and an event belongs to one.
+        clock.parked = asyncio.Event()
+        with capture_events() as logs:
+            _during_the_wait(cycle, clock)
+        assert not clock.parked.is_set()
+        passes.append(logs)
+
+    alerts = [
+        [log["field"] for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+        for logs in passes
+    ]
+    assert alerts == [["maintenance_margin"], ["maintenance_margin"], []]
+    assert [_recorded(logs)["unconfirmed"] for logs in passes] == [1, 0, 0]
+    assert [_recorded(logs)["cleared"] for logs in passes] == [0, 0, 0]
+    assert (_recorded(passes[2])["tier_1"], _recorded(passes[2])["tier_2"]) == (0, 0)
+
+
 def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
     """The pass flatten runs alerts at once, with ``rechecked`` 0 (#694).
 
