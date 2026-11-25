@@ -4641,6 +4641,52 @@ def test_a_cost_basis_gap_beside_a_second_isolated_position_is_still_alerted() -
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_one_symbol_at_the_venues_mark_does_not_clear_a_gap_on_another() -> None:
+    """Every symbol the alerts sum over must be at the venue's mark (#695).
+
+    BTC is the race: 65000 against the venue's 65309. ETH is a real gap. The
+    venue entered it at 2986, the ledger at 2990, so at the venue's mark of
+    3000 the uPnL is 0.4 apart, past ETH's band of 0.3.
+
+    Then BTC reaches 65309 exactly, and ETH moves to 3002. That splits ETH's
+    gap into 0.2 of uPnL and 0.2 of notional, so no figure is outside the band.
+    BTC is at the venue's mark but ETH is not. So every alert stands.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3000")
+    venue = _held(
+        "100002.000",
+        ("BTC", "0.002", "1.000"),
+        ("ETH", "0.1", "1.400"),
+        entry={"ETH": "2986"},
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    def both_marks() -> None:
+        _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        _mark(projection, "ETH", "3002", ts_ns=_MARK_TS_NS + 1)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock, both_marks)
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert {(log["field"], log["symbol"], Decimal(str(log["ledger"]))) for log in alerts} == {
+        ("equity", None, Decimal("100001.382")),
+        ("unrealized_pnl", "BTC", Decimal("0.382")),
+        ("notional", "BTC", Decimal("130")),
+        ("margin_used", "BTC", Decimal("0.382")),
+        ("unrealized_pnl", "ETH", Decimal("1")),
+        ("margin_used", "ETH", Decimal("1")),
+    }
+    assert {log["rechecked"] for log in alerts} == {1}
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
     """``cleared`` is 0 or every alert, never a part (#690).
 
