@@ -268,8 +268,8 @@ class _Standing:
     valued at, and that mark's age, from the same comparison.
 
     ``rechecked`` counts the mark updates checked in the wait (#690). Zero
-    means no new mark arrived, or the pass did not wait (#694). It tells that
-    apart from several marks that all left the gap open.
+    means no new mark arrived, or the pass did not wait (#694, #696). It tells
+    that apart from several marks that all left the gap open.
     """
 
     alerts: tuple[Divergence, ...]
@@ -1540,6 +1540,14 @@ class LedgerReconciliation:
                 for alert in first.alerts
             )
         )
+        # An account figure can have no terms. For example, a
+        # ``maintenance_margin`` alert has none when the ledger holds no cross
+        # position. There is then no mark to wait for, and ``marks_after``
+        # returns at once for no symbols, so the loop below would spin (#696).
+        # This pass's heal may already have closed the gap. The alert still
+        # stands, and the next pass compares the healed ledger (ADR-0040 §6).
+        if not terms:
+            return first
         writes_before = self._portfolio.writes_applied
         standing = first
         timer = asyncio.ensure_future(self._checkpointer.clock.sleep(_RECHECK_WAIT_SECONDS))

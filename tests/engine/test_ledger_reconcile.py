@@ -4491,6 +4491,137 @@ def test_a_gap_with_no_new_mark_says_it_checked_no_update() -> None:
     assert {log["rechecked"] for log in alerts} == {0}
 
 
+def test_an_alert_with_no_mark_to_wait_for_stands_at_once() -> None:
+    """A maintenance alert computed from no symbol does not start the wait (#696).
+
+    An operator opened a cross ETH position by hand, and an earlier pass healed
+    it into the books. Config does not name ETH, so the ledger values it at the
+    isolated 1x fallback, and the feed sends it no mark. The ledger's cross sum
+    is then a sum over no symbols, which is 0. The venue publishes 2.500. No
+    other figure can be compared, so this alert is the only one.
+
+    No mark can change that 0. A wait here checked the same gap in a tight loop
+    until the 5 s ran out. So the alert stands at once, and the clock must
+    never see a sleep.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    _book_fill(keeper.portfolio, quantity="0.1", price="2990", symbol="ETH")
+    venue = _levered(
+        _held(
+            "100001.000",
+            ("ETH", "0.1", "1.000"),
+            entry={"ETH": "2990"},
+            maintenance="2.500",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock)
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["venue"], log["rechecked"]) for log in alerts] == [
+        ("maintenance_margin", "2.500", 0)
+    ]
+    assert _recorded(logs)["cleared"] == 0
+    assert not clock.parked.is_set()
+
+
+def test_an_alert_with_no_mark_to_wait_for_does_not_end_the_wait_of_one_beside_it() -> None:
+    """A BTC alert keeps its wait beside an alert computed from no symbol (#696).
+
+    The book is the one above, with the soak's BTC race beside it. The ledger
+    values BTC at 65000 and the venue's mark is 65309. BTC's three figures have
+    a mark to wait for, so the pass waits. At 65309 the ledger's notional is
+    ``0.002 × 65309 = 130.618``, the venue's own figure.
+
+    The ``maintenance_margin`` gap stays, so no check is clean and the pass
+    must alert. ``rechecked`` is 1 because it checked the one new mark.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.1", price="2990", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    venue = _levered(
+        _held(
+            "100002.000",
+            ("BTC", "0.002", "1.000"),
+            ("ETH", "0.1", "1.000"),
+            entry={"ETH": "2990"},
+            maintenance="2.500",
+        ),
+        _CROSS_5X,
+        symbol="ETH",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle, clock, lambda: _mark(projection, "BTC", "65309", ts_ns=_MARK_TS_NS + 1)
+        )
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["venue"], log["rechecked"]) for log in alerts] == [
+        ("maintenance_margin", "2.500", 1)
+    ]
+    assert clock.parked.is_set()
+
+
+def test_an_alert_with_no_mark_to_wait_for_stands_on_the_pass_that_heals_its_gap() -> None:
+    """The cost of not waiting: one more alert on the pass that heals (#696).
+
+    BTC is configured cross 5x, and the ledger missed the fill that opened it.
+    Net cash agrees, so only the size is healed. The ledger has no BTC row, so
+    the size finding does not explain ``maintenance_margin`` (#322).
+
+    The first pass confirms the size gap, and the second heals it. Both alert
+    on ``maintenance_margin``, because the pass does not compare the healed
+    ledger. The third pass does, and finds nothing.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(
+        SQLiteStore(":memory:"),
+        equity="100000",
+        clock=clock,
+        leverage=_BTC_CROSS_5X,
+        specs={"BTC": _BTC_SPEC},
+    )
+    _mark(keeper.portfolio, "BTC", "65309")
+    # 0.002 × 65309 = 130.618. A fifth is the margin, and 0.0125 is the rate.
+    venue = _levered(
+        _held(
+            "100001.000",
+            ("BTC", "0.002", "1.000"),
+            free_margin="99974.8764",
+            maintenance="1.632725",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    passes = []
+    for _ in range(3):
+        # Each pass runs on its own event loop, and an event belongs to one.
+        clock.parked = asyncio.Event()
+        with capture_events() as logs:
+            _during_the_wait(cycle, clock)
+        assert not clock.parked.is_set()
+        passes.append(logs)
+
+    alerts = [
+        [log["field"] for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+        for logs in passes
+    ]
+    assert alerts == [["maintenance_margin"], ["maintenance_margin"], []]
+    assert [_recorded(logs)["unconfirmed"] for logs in passes] == [1, 0, 0]
+    assert [_recorded(logs)["cleared"] for logs in passes] == [0, 0, 0]
+    assert (_recorded(passes[2])["tier_1"], _recorded(passes[2])["tier_2"]) == (0, 0)
+
+
 def test_a_pass_told_not_to_wait_alerts_on_its_first_check() -> None:
     """The pass flatten runs alerts at once, with ``rechecked`` 0 (#694).
 
