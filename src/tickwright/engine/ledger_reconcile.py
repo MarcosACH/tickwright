@@ -1451,7 +1451,7 @@ class LedgerReconciliation:
         self._portfolio.observe_venue_liquidation(state)
         reading = self._portfolio.ledger_reading(snapshot=state)
         # Beside the reading, so a change is a write the reading does not have.
-        fills_at_reading = self._portfolio.fills_applied
+        writes_at_reading = self._portfolio.writes_applied
         # The clock is read here rather than inside the classification,
         # because a mark's age is a fact about the snapshot this pass
         # compared against: taken beside the alerts instead, it would be
@@ -1474,7 +1474,7 @@ class LedgerReconciliation:
         cash = findings.cash
         if cash is not None:
             verified = await self._mode_verified()
-            if self._portfolio.fills_applied != fills_at_reading:
+            if self._portfolio.writes_applied != writes_at_reading:
                 findings = findings.deferring()
             cash = findings.cash if verified else None
         booked = self._checkpointer.checkpoint_heal(

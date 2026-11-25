@@ -2288,6 +2288,55 @@ def test_a_fill_landing_inside_the_mode_check_defers_the_cash_heal(
     assert ledger.account().cash == Decimal(cash) + 5
 
 
+def test_a_funding_payment_landing_inside_the_mode_check_defers_the_cash_heal() -> None:
+    """A funding payment moves the cash line without a fill (#700).
+
+    The venue's figure predates the payment. Healed toward it, the ledger loses
+    the payment it just booked. So the heal waits, as it does for a fill.
+    """
+    clock = ManualClock(7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_funding_payment_lands() -> None:
+        keeper.checkpoint_funding(
+            FundingAccrual(
+                ts_event=3_600,
+                ts_init=3_600,
+                account_id=LIVE_ACCOUNT_ID,
+                symbol="BTC",
+                boundary_ts_ns=3_600,
+                amount=Decimal("-0.5"),
+            )
+        )
+
+    before = _held("100005", ("BTC", "0.002", "0"))
+    venue = _SlowModeVenue(
+        before,
+        before,
+        _held("100004.5", ("BTC", "0.002", "0")),
+        during=a_funding_payment_lands,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account().cash == Decimal("99999.5")
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"]) == (1, 1)
+    clock.advance_to(9)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal("99999.5")
+    clock.advance_to(10)
+    asyncio.run(cycle.reconcile_account())
+    assert ledger.account().cash == Decimal("100004.5")
+
+
 def test_a_fill_the_venue_booked_first_is_not_healed_before_the_engine_books_it() -> None:
     """A size finding heals only when the previous pass found it too (#574).
 
