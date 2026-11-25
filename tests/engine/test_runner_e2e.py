@@ -1171,36 +1171,33 @@ class _HeldModeVenue(_LiveShapedVenue):
         return await super().verify_account_mode()
 
 
-def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
-    tmp_path: Path,
-) -> None:
-    """A fill can land while the account pass checks the mode (#700).
+_RESTING_BUY = OrderStatusReport(
+    ts_event=600,
+    ts_init=600,
+    cloid=_LIVE_CLOID,
+    symbol="BTC",
+    status=OrderState.LIVE,
+    venue_oid="777",
+)
+"""What the venue says about the strategy's buy at boot: it rests."""
+_BUY_FILL = FillReport(
+    ts_event=900,
+    ts_init=900,
+    cloid=_LIVE_CLOID,
+    symbol="BTC",
+    trade_id="t-1",
+    quantity=Decimal("0.002"),
+    price=Decimal("64809"),
+    fee=Decimal("0.05"),
+)
+"""The fill of that buy. A case publishes it while the mode check is held."""
 
-    The strategy holds 0.002 BTC and the venue's cash is 5 above the ledger's.
-    The second pass wants to heal that gap, so it checks the mode. The strategy
-    then buys 0.002 BTC more and pays a fee of 0.05. Its cash is 100000 less
-    that fee, in this run and after a restart.
+
+def _holding_with_a_resting_buy(tmp_path: Path) -> SQLiteStore:
+    """A live store where ``trivial`` holds 0.002 BTC at 64809 and has a buy out.
+
+    Genesis cash is 100000. The buy is the one ``_RESTING_BUY`` describes.
     """
-    right = Decimal("99999.95")
-    buy = FillReport(
-        ts_event=900,
-        ts_init=900,
-        cloid=_LIVE_CLOID,
-        symbol="BTC",
-        trade_id="t-1",
-        quantity=Decimal("0.002"),
-        price=Decimal("64809"),
-        fee=Decimal("0.05"),
-    )
-    resting = OrderStatusReport(
-        ts_event=600,
-        ts_init=600,
-        cloid=_LIVE_CLOID,
-        symbol="BTC",
-        status=OrderState.LIVE,
-        venue_oid="777",
-    )
-    state = account_state("100005", "0")
     store = SQLiteStore(tmp_path / "saga.db")
     store.checkpoint_ledger(
         account=Account(
@@ -1218,12 +1215,28 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
     )
     # Submitted, not resting: the boot takes the venue's ack for it.
     store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+    return store
+
+
+def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
+    tmp_path: Path,
+) -> None:
+    """A fill can land while the account pass checks the mode (#700).
+
+    The strategy holds 0.002 BTC and the venue's cash is 5 above the ledger's.
+    The second pass wants to heal that gap, so it checks the mode. The strategy
+    then buys 0.002 BTC more and pays a fee of 0.05. Its cash is 100000 less
+    that fee, in this run and after a restart.
+    """
+    right = Decimal("99999.95")
+    state = account_state("100005", "0")
+    store = _holding_with_a_resting_buy(tmp_path)
 
     async def first_life(logs: list[EventDict]) -> tuple[int, Decimal]:
         bus = InMemoryBus()
         clock = ManualClock()
         feed = _BlockingFeed()
-        venue = _HeldModeVenue(state=state, view=VenueOrderView(status=resting))
+        venue = _HeldModeVenue(state=state, view=VenueOrderView(status=_RESTING_BUY))
         engine = Engine(
             bus=bus,
             clock=clock,
@@ -1247,7 +1260,7 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
             await asyncio.sleep(0)
         clock.advance_to(2 * _ACCOUNT_INTERVAL_NS)
         await asyncio.wait_for(venue.checking.wait(), timeout=5)
-        await bus.publish(buy)
+        await bus.publish(_BUY_FILL)
         await bus.drain()
         assert portfolio.account().cash == right, "the fill must land inside the check"
         venue.answer.set()
@@ -1264,7 +1277,7 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
             clock=ManualClock(),
             store=SQLiteStore(tmp_path / "saga.db"),
             exchange=_LiveShapedVenue(
-                state=state, view=VenueOrderView(status=resting, fills=(buy,))
+                state=state, view=VenueOrderView(status=_RESTING_BUY, fills=(_BUY_FILL,))
             ),
             feed=feed,
         )
@@ -1294,44 +1307,9 @@ def test_a_fill_in_the_mode_check_does_not_hide_a_valuation_alert(tmp_path: Path
     (btc,) = base.positions
     row = margined(replace(btc, entry_price=Decimal("64309"), notional=Decimal("130.618")))
     venue = _HeldModeVenue(
-        state=replace(base, positions=(row,)),
-        view=VenueOrderView(
-            status=OrderStatusReport(
-                ts_event=600,
-                ts_init=600,
-                cloid=_LIVE_CLOID,
-                symbol="BTC",
-                status=OrderState.LIVE,
-                venue_oid="777",
-            )
-        ),
+        state=replace(base, positions=(row,)), view=VenueOrderView(status=_RESTING_BUY)
     )
-    buy = FillReport(
-        ts_event=900,
-        ts_init=900,
-        cloid=_LIVE_CLOID,
-        symbol="BTC",
-        trade_id="t-1",
-        quantity=Decimal("0.002"),
-        price=Decimal("64809"),
-        fee=Decimal("0.05"),
-    )
-    store = SQLiteStore(tmp_path / "saga.db")
-    store.checkpoint_ledger(
-        account=Account(
-            account_id=LIVE_ACCOUNT_ID, genesis_collateral=Decimal("100000"), genesis_ts_ns=0
-        ),
-        positions=(
-            Position(
-                strategy_id="trivial",
-                symbol="BTC",
-                signed_size=Decimal("0.002"),
-                entry_price=Decimal("64809"),
-            ),
-        ),
-        ts_ns=0,
-    )
-    store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+    store = _holding_with_a_resting_buy(tmp_path)
 
     def mark(price: str, ts_ns: int) -> MarkTick:
         return MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol="BTC", price=Decimal(price))
@@ -1373,7 +1351,7 @@ def test_a_fill_in_the_mode_check_does_not_hide_a_valuation_alert(tmp_path: Path
         clock.parked.clear()
         clock.advance_to(2 * _ACCOUNT_INTERVAL_NS + 5_000_000_000)
         await asyncio.wait_for(venue.checking.wait(), timeout=5)
-        await bus.publish(buy)
+        await bus.publish(_BUY_FILL)
         await bus.drain()
         held = portfolio.position("BTC")
         assert held is not None and held.size == Decimal("0.004"), (
