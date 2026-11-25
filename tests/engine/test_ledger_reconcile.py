@@ -4482,6 +4482,43 @@ def test_a_cost_basis_gap_inside_the_band_at_a_mark_the_venue_never_had_is_still
     assert _recorded(logs)["cleared"] == 0
 
 
+def test_an_in_band_check_at_a_mark_the_venue_never_had_does_not_end_the_wait() -> None:
+    """The pass keeps checking until the venue's mark arrives (#695).
+
+    The same book again. At 65359 the gap is split and in band. Then the feed
+    sends 65309, the venue's own mark, and the 0.2 gap shows whole. The alerts
+    carry that second check: its mark is 0.5 s old, where the first check's
+    was 1 s old.
+    """
+    clock = ParkingClock(start_ns=10_000_000_000)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65309", ts_ns=9_000_000_000)
+    venue = _held(
+        "100001.000",
+        ("BTC", "0.002", "1.200"),
+        entry={"BTC": "64709"},
+        free_margin="100000.000",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        _during_the_wait(
+            cycle,
+            clock,
+            lambda: _mark(projection, "BTC", "65359", ts_ns=9_400_000_000),
+            lambda: _mark(projection, "BTC", "65309", ts_ns=9_500_000_000),
+        )
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["ledger"], log["marks"], log["rechecked"]) for log in alerts] == [
+        ("unrealized_pnl", "1.000", "BTC=65309 age=0.500s", 2),
+        ("margin_used", "1.000", "BTC=65309 age=0.500s", 2),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+
+
 def test_a_pass_no_update_cleared_counts_nothing_as_cleared() -> None:
     """``cleared`` is 0 or every alert, never a part (#690).
 
