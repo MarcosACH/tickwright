@@ -4468,13 +4468,24 @@ def test_a_cost_basis_gap_a_mark_move_shifts_to_another_figure_is_still_alerted(
     assert _recorded(logs)["cleared"] == 0
 
 
-def test_a_cost_basis_gap_inside_the_band_at_a_mark_the_venue_never_had_is_still_alerted() -> None:
+@pytest.mark.parametrize(
+    ("venue_upnl", "venue_entry", "next_mark"),
+    [
+        pytest.param("1.200", "64709", "65359", id="mark above the venue's"),
+        pytest.param("0.800", "64909", "65259", id="mark below the venue's"),
+    ],
+)
+def test_a_cost_basis_gap_inside_the_band_at_a_mark_the_venue_never_had_is_still_alerted(
+    venue_upnl: str, venue_entry: str, next_mark: str
+) -> None:
     """Only the venue's own mark can clear an alert (#695).
 
     The same book as above. The real gap is 0.2 of uPnL, about 1.53 times the
     band. At 65359 the price move splits it: 0.1 shows in ``unrealized_pnl``
     and 0.1 in ``notional``. Each half is inside the band, so no figure is
     outside it. But the venue's mark is 65309, so this check proves nothing.
+    The second case is the mirror. The gap has the other sign, and 65259, a
+    mark below the venue's, splits it.
 
     No more marks arrive. Every alert stands with the first check's figures,
     the only ones outside the band. ``rechecked`` still counts the check.
@@ -4486,20 +4497,20 @@ def test_a_cost_basis_gap_inside_the_band_at_a_mark_the_venue_never_had_is_still
     _mark(projection, "BTC", "65309")
     venue = _held(
         "100001.000",
-        ("BTC", "0.002", "1.200"),
-        entry={"BTC": "64709"},
+        ("BTC", "0.002", venue_upnl),
+        entry={"BTC": venue_entry},
         free_margin="100000.000",
     )
     cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     with capture_events() as logs:
         _during_the_wait(
-            cycle, clock, lambda: _mark(projection, "BTC", "65359", ts_ns=_MARK_TS_NS + 1)
+            cycle, clock, lambda: _mark(projection, "BTC", next_mark, ts_ns=_MARK_TS_NS + 1)
         )
 
     assert _alerts(logs) == [
-        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "1.000", "venue": "1.200"},
-        {"field": "margin_used", "symbol": "BTC", "ledger": "1.000", "venue": "1.200"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "1.000", "venue": venue_upnl},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "1.000", "venue": venue_upnl},
     ]
     alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
     assert {log["rechecked"] for log in alerts} == {1}
