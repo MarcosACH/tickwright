@@ -234,10 +234,10 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
 **(Corrected by [#696](https://github.com/MarcosACH/tickwright/issues/696): a pass with no symbol to wait for does not wait.** The #682 and #690 blocks above make every pass with alerts wait for a new mark on the symbols its alerts sum over. A `maintenance_margin` alert sums over no symbol when the ledger holds no cross position. The wait then ended at once, and the pass checked the same gap in a tight loop for 5 s.
 
-  - When no alert in the pass has a symbol, the first check's alerts stand, with `rechecked=0` and `cleared=0`.
-  - When any alert has a symbol, the pass still waits on the symbols its alerts sum over.
+  - When no alert in the pass sums over a symbol, the first check's alerts stand, with `rechecked=0` and `cleared=0`.
+  - When any alert sums over a symbol, the pass still waits on the symbols its alerts sum over.
 
-  The cost is small. No mark can change a sum over no symbols, so the wait could not have cleared the alert.**)**
+  The cost is one extra alert on a pass that heals a missed opening fill in a cross coin, when the ledger never traded that coin and net cash agrees. The old wait compared the healed ledger, so it cleared the alert. Now the first check's `maintenance_margin` alert stands, as the #322 block says. The next pass compares the healed ledger. On a pass that heals nothing, the wait could not have cleared the alert. No mark changes a sum over no symbols.**)**
 
 ## 7. Paper account genesis numbers
 

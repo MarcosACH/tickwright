@@ -1540,9 +1540,12 @@ class LedgerReconciliation:
                 for alert in first.alerts
             )
         )
-        # A ``maintenance_margin`` alert has no terms when the ledger holds no
-        # cross position. No mark can change that figure, and ``marks_after``
+        # An account figure can have no terms. For example, a
+        # ``maintenance_margin`` alert has none when the ledger holds no cross
+        # position. There is then no mark to wait for, and ``marks_after``
         # returns at once for no symbols, so the loop below would spin (#696).
+        # This pass's heal may already have closed the gap. The alert still
+        # stands, and the next pass compares the healed ledger (ADR-0040 §6).
         if not terms:
             return first
         writes_before = self._portfolio.writes_applied
