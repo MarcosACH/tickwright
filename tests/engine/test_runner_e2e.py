@@ -1281,6 +1281,126 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
     assert (first, asyncio.run(second_life())) == ((0, right), (0, right))
 
 
+def test_a_fill_in_the_mode_check_does_not_hide_a_valuation_alert(tmp_path: Path) -> None:
+    """A fill on the bus during the mode check must not clear a real gap (#698).
+
+    The strategy holds 0.002 BTC entered at 64809. The venue says 64309, so
+    uPnL is 1.000 apart at the venue's own mark, 65309. The venue's cash is 5
+    above the ledger's, so the second pass checks the mode. The strategy's
+    resting buy fills in that check, and the next mark is 65309. The pass must
+    alert on all three BTC figures and not wait.
+    """
+    base = account_state("100007.000", "2.000")
+    (btc,) = base.positions
+    row = margined(replace(btc, entry_price=Decimal("64309"), notional=Decimal("130.618")))
+    venue = _HeldModeVenue(
+        state=replace(base, positions=(row,)),
+        view=VenueOrderView(
+            status=OrderStatusReport(
+                ts_event=600,
+                ts_init=600,
+                cloid=_LIVE_CLOID,
+                symbol="BTC",
+                status=OrderState.LIVE,
+                venue_oid="777",
+            )
+        ),
+    )
+    buy = FillReport(
+        ts_event=900,
+        ts_init=900,
+        cloid=_LIVE_CLOID,
+        symbol="BTC",
+        trade_id="t-1",
+        quantity=Decimal("0.002"),
+        price=Decimal("64809"),
+        fee=Decimal("0.05"),
+    )
+    store = SQLiteStore(tmp_path / "saga.db")
+    store.checkpoint_ledger(
+        account=Account(
+            account_id=LIVE_ACCOUNT_ID, genesis_collateral=Decimal("100000"), genesis_ts_ns=0
+        ),
+        positions=(
+            Position(
+                strategy_id="trivial",
+                symbol="BTC",
+                signed_size=Decimal("0.002"),
+                entry_price=Decimal("64809"),
+            ),
+        ),
+        ts_ns=0,
+    )
+    store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+
+    def mark(price: str, ts_ns: int) -> MarkTick:
+        return MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol="BTC", price=Decimal(price))
+
+    async def one_life(logs: list[EventDict]) -> tuple[int, bool, list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ParkingClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+        portfolio = engine.portfolio_for("trivial")
+
+        def passes() -> int:
+            return sum(log["event"] == NamedEvent.ACCOUNT_RECONCILED.value for log in logs)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await bus.publish(mark("65000", _ACCOUNT_INTERVAL_NS - 1))
+        await bus.drain()
+        clock.parked.clear()
+        clock.advance_to(_ACCOUNT_INTERVAL_NS)
+        # The first pass waits for a mark and none comes, so the 5 s run out.
+        await asyncio.wait_for(clock.parked.wait(), timeout=5)
+        clock.advance_to(_ACCOUNT_INTERVAL_NS + 5_000_000_000)
+        await asyncio.wait_for(_until(lambda: passes() == 1), timeout=5)
+        for _ in range(50):  # the cadence parks on its next deadline
+            await asyncio.sleep(0)
+        seen = len(logs)
+        await bus.publish(mark("65000", 2 * _ACCOUNT_INTERVAL_NS - 1))
+        await bus.drain()
+        clock.parked.clear()
+        clock.advance_to(2 * _ACCOUNT_INTERVAL_NS + 5_000_000_000)
+        await asyncio.wait_for(venue.checking.wait(), timeout=5)
+        await bus.publish(buy)
+        await bus.drain()
+        held = portfolio.position("BTC")
+        assert held is not None and held.size == Decimal("0.004"), (
+            "the fill must land inside the check"
+        )
+        venue.answer.set()
+        # A pass that waits parks here, so the case fails on its assertions.
+        await asyncio.wait_for(_until(lambda: clock.parked.is_set() or passes() == 2), timeout=5)
+        waited = passes() < 2
+        await bus.publish(mark("65309", 2 * _ACCOUNT_INTERVAL_NS))
+        await asyncio.wait_for(_until(lambda: passes() == 2), timeout=5)
+        second = logs[seen:]
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), waited, second
+
+    with capture_events() as logs:
+        code, waited, second = asyncio.run(one_life(logs))
+
+    alerts = [log for log in second if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["symbol"], log["rechecked"]) for log in alerts] == [
+        ("unrealized_pnl", "BTC", 0),
+        ("notional", "BTC", 0),
+        ("margin_used", "BTC", 0),
+    ]
+    assert (code, waited) == (0, False)
+
+
 def test_no_paper_run_schedules_the_account_cadence(tmp_path: Path) -> None:
     """Paper has no second account to reconcile against, so nothing runs there
     (ADR-0034, ADR-0043 §4) — its atomic ledger write stands in.
