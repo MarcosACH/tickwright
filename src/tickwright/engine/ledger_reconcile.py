@@ -694,7 +694,7 @@ def _net_diff(
     The cycle's one definition of "these two nets differ". ``_sizes`` reads it
     for the ledger against the venue. The size heal read it too, for the
     ledger before the venue read against the ledger after it (#284), until
-    #324 replaced that compare with the reading's fill stamps. It stays named
+    #324 replaced that compare with the fill stamps. It stays named
     because the grain below is a claim of its own, not a detail of one caller.
 
     Ranged over the **union** of both symbol sets, with an absent side reading
@@ -1126,7 +1126,7 @@ class ReconcileFindings:
         *,
         band: ValuationBand,
         now_ns: int,
-        fills_before: int,
+        moved: frozenset[str],
         previous: frozenset[_Finding],
     ) -> "ReconcileFindings":
         """Compare one reading against one snapshot and decide what to say.
@@ -1143,9 +1143,10 @@ class ReconcileFindings:
         One key for the pass, so a size heal and the cash correction beside it
         retry as one unit.
 
-        ``fills_before`` is the ledger's fill count read before the venue read.
-        Asked of the reading through ``LedgerReading.filled_since``, it names
-        the symbols a fill touched while the read was in flight (#284, #324).
+        ``moved`` is the set of symbols a fill touched while the venue read was
+        in flight (#284, #324), from ``PortfolioProjection.filled_since``. It
+        must be asked no earlier than the reading. Asked earlier, it can miss a
+        fill the reading has.
 
         ``previous`` is the last pass's ``seen``. A finding heals only if the
         last pass found the same gap on the same figure (#574). The venue can
@@ -1172,13 +1173,11 @@ class ReconcileFindings:
         alerts, suppressed = _alerting(divergences, reading, band=band, now_ns=now_ns)
         # The heal plan. One loop over the Tier-1 findings, so every reason a
         # finding is held back is stated once and counted where it is decided.
-        # ``moved`` is the set of symbols a fill touched while the venue read
-        # was in flight (#284, #324). Such a finding compares a fresh fold
-        # against a stale snapshot. It is reported and not healed, and the next
+        # A finding on a symbol in ``moved`` compares a fresh fold against a
+        # stale snapshot. It is reported and not healed, and the next
         # deadline reads a snapshot that carries the fill. The cash line moves
         # with every fill, by its fee and realized PnL (ADR-0042 §4), so any
         # symbol in ``moved`` defers the cash heal too (#330).
-        moved = reading.filled_since(fills_before)
         prices = {position.symbol: position.entry_price for position in state.positions}
         heals: list[_SizeHeal] = []
         cash_findings: list[Divergence] = []
@@ -1493,9 +1492,8 @@ class LedgerReconciliation:
         One thing does come between that reading and the write, and only on a
         pass with a cash gap to close: the mode guard's venue read. A write that
         lands there drops the heals it made stale, and a later pass makes them
-        (#700). A second reading is taken then, but only to ask which symbols
-        moved. Nothing is compared against it. The wait is skipped too, so the
-        first comparison's alerts stand (#698).
+        (#700). The wait is skipped too, so the first comparison's alerts stand
+        (#698).
 
         The classification itself is ``ReconcileFindings.classify``, which reads
         nothing and emits nothing: what stays here is the venue read, the write
@@ -1547,7 +1545,8 @@ class LedgerReconciliation:
             reading,
             band=self._band,
             now_ns=now_ns,
-            fills_before=fills_before,
+            # Nothing awaits between the reading and here, so both are one instant.
+            moved=self._portfolio.filled_since(fills_before),
             previous=self._previous,
         )
         divergences = findings.divergences
@@ -1561,11 +1560,9 @@ class LedgerReconciliation:
             verified = await self._mode_verified()
             # Read before the heals, because a size heal raises this count too.
             written = self._portfolio.writes_applied != writes_at_reading
-            # On every verdict, because the mode gates the cash heal alone. The
-            # second reading is asked only which symbols moved (#700).
+            # On every verdict, because the mode gates the cash heal alone (#700).
             if written:
-                after = self._portfolio.ledger_reading(snapshot=state)
-                findings = findings.deferring(after.filled_since(fills_at_reading))
+                findings = findings.deferring(self._portfolio.filled_since(fills_at_reading))
             cash = findings.cash if verified else None
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in findings.heals),

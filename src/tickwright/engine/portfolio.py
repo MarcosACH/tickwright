@@ -229,11 +229,14 @@ class LedgerReading:
     mode guard puts a real ``await`` between the classification and that write
     (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
 
-    Two parts of the pass do take more readings. The checks on each new mark
+    One part of the pass does take more readings. The checks on each new mark
     in the wait (#682, #690) read after the heal, so they leave out every
     figure the first reading's Tier-1 findings explained. See
-    ``ReconcileFindings.recheck``. The other is a write inside the mode
-    check (#700). That reading is asked only which symbols a fill touched.
+    ``ReconcileFindings.recheck``.
+
+    The fill stamps are not here. Which symbols a fill touched is a question
+    about the ledger and compares no figure, so it needs no reading. See
+    ``PortfolioProjection.filled_since`` (#698).
 
     Deliberately **not** carrying the leverage book. ``leverage_for`` reads
     configuration resolved at startup, so no fill can move it and there is no
@@ -278,14 +281,6 @@ class LedgerReading:
     it (#682), and an alert clears only when it equals the venue's mark (#695).
     No default, so a reading cannot drop the prices without saying so. An absent
     price shows as ``none`` in the log and never clears an alert."""
-    last_fills: Mapping[str, int]
-    """The ledger's fill count as of each symbol's last accepted fill (#324).
-
-    The cycle's movement signal, and a stamp like ``mark_observed`` rather than
-    a compared figure on the row. ``filled_since`` reads it: a symbol stamped
-    above the count the cycle read before a venue read took a fill while that
-    read was in flight. A net compare misses a fill and its reverse inside one
-    read window. This does not. A symbol no fill touched this run is absent."""
 
     @property
     def net(self) -> dict[str, Decimal]:
@@ -316,25 +311,6 @@ class LedgerReading:
         """
         row = self.rows.get(symbol)
         return row is not None and row.net != _ZERO
-
-    def filled_since(self, fills_before: int) -> frozenset[str]:
-        """The symbols a fill touched after the ledger's count stood at
-        ``fills_before``. The cycle's one movement predicate (#324).
-
-        The cycle reads ``fills_applied`` before its account read and asks this
-        of the reading it takes after. It does the same around the mode check
-        (#700). A symbol named here took a fill while that venue read was in
-        flight. Its size finding may be stale, so it is reported rather than
-        healed.
-
-        Read off the stamps and not the net, because the rule is "any fill
-        touched it". A fill and its reverse inside one read window leave the net
-        where it was and are still movement. On this type for the reason
-        ``holds`` is: it owns the field the answer is read from.
-        """
-        return frozenset(
-            symbol for symbol, last_fill in self.last_fills.items() if last_fill > fills_before
-        )
 
 
 class PortfolioProjection:
@@ -792,12 +768,31 @@ class PortfolioProjection:
 
         The reconcile cycle reads it before its account read and again beside
         its ledger reading, for the mode check (#700). Each count goes to
-        ``LedgerReading.filled_since`` after. A symbol stamped above that count
-        took a fill while the read was in flight (#324). One integer, not a
-        fold: it replaced the pre-read ``account_net`` fold #284 took, which
-        saw net movement only.
+        ``filled_since`` after. A symbol stamped above that count took a fill
+        while the read was in flight (#324). One integer, not a fold: it
+        replaced the pre-read ``account_net`` fold #284 took, which saw net
+        movement only.
         """
         return self._fills_applied
+
+    def filled_since(self, fills_before: int) -> frozenset[str]:
+        """The symbols a fill touched after this ledger's count stood at
+        ``fills_before``. The cycle's one movement predicate (#324).
+
+        The cycle reads ``fills_applied`` before its account read and asks this
+        beside the reading it takes after. It does the same around the mode
+        check (#700), and takes no second reading to ask (#698). A symbol named
+        here took a fill while that venue read was in flight. Its size finding
+        may be stale, so it is reported rather than healed.
+
+        Read off the stamps and not the net, because the rule is "any fill
+        touched it". A fill and its reverse inside one read window leave the net
+        where it was and are still movement. A symbol no fill touched this run
+        has no stamp and is never named.
+        """
+        return frozenset(
+            symbol for symbol, last_fill in self._last_fills.items() if last_fill > fills_before
+        )
 
     @property
     def writes_applied(self) -> int:
@@ -1343,9 +1338,6 @@ class PortfolioProjection:
             rows=rows,
             mark_observed=self._mark_observed(),
             mark_prices=self._mark_prices(),
-            # A copy, for the reason the folds are: the reading is one instant,
-            # and a fill after it must not move a map it already handed out.
-            last_fills=dict(self._last_fills),
         )
 
     def account_net(self) -> dict[str, Decimal]:
@@ -1365,7 +1357,7 @@ class PortfolioProjection:
         The cycle itself now takes that side off ``ledger_reading().net``, the
         same fold one row per symbol (#304). It read this once more before the
         venue read as a movement detector (#284) until #324 replaced that with
-        the reading's fill stamps. The ``Checkpointer`` reads it for the guard's
+        the fill stamps. The ``Checkpointer`` reads it for the guard's
         ``PreTradeReading``. The venue caps one position per symbol, so the cap
         is judged at this grain (ADR-0051). The suites also read the book back
         through it.

@@ -385,8 +385,7 @@ def test_one_reading_folds_the_book_once(monkeypatch: pytest.MonkeyPatch) -> Non
     ran the public ``domain.valuation`` folds 18 times over one book, because
     every member was its own traversal and ``account_view`` ran three more.
     This probe counts the traversing folds by name. Two are owed: the symbol
-    rows, and the account-net fold the rows are keyed on. The fill stamps
-    beside them are a copy of a map, not a traversal (#324).
+    rows, and the account-net fold the rows are keyed on.
 
     A cost property and not an output one, so the probe is shape-coupled by
     design: it wraps the fold names where the projection binds them. A fold
@@ -431,9 +430,9 @@ def test_one_reading_folds_the_book_once(monkeypatch: pytest.MonkeyPatch) -> Non
     assert traversals == {"account_net_size": 1, "account_valuation": 1}
 
 
-def test_the_reading_stamps_each_symbol_with_the_fill_that_last_moved_it() -> None:
-    """The reading carries the projection's fill count as of each symbol's last
-    accepted fill (#324).
+def test_a_redelivered_fill_does_not_read_as_movement() -> None:
+    """Each symbol is stamped with the fill count as of its last accepted fill
+    (#324).
 
     The reconcile cycle reads the count once before the venue read. A symbol
     stamped above that count took a fill while the read was in flight, whether
@@ -454,21 +453,19 @@ def test_the_reading_stamps_each_symbol_with_the_fill_that_last_moved_it() -> No
     book_fill(projection, reduce, side=Side.SELL)
     book_fill(projection, reduce, side=Side.SELL)  # redelivered: accepted once
 
-    reading = projection.ledger_reading(snapshot=venue_holding())
-
     assert projection.fills_applied == 3
-    assert reading.last_fills == {"BTC": 3, "ETH": 2}
+    assert projection.filled_since(1) == frozenset({"BTC", "ETH"})
+    assert projection.filled_since(2) == frozenset({"BTC"})
+    assert projection.filled_since(3) == frozenset()
 
 
-def test_the_reading_names_the_symbols_a_fill_touched_since_a_count() -> None:
+def test_the_projection_names_the_symbols_a_fill_touched_since_a_count() -> None:
     """``filled_since`` is the cycle's one movement predicate, on the type that
-    owns the stamp (#324).
+    owns the stamps (#324, #698).
 
     The reconcile cycle reads ``fills_applied`` before its venue read and asks
-    the reading afterwards which symbols a fill touched since. The answer is
-    read off the stamps, so a symbol whose net came back to where it started
-    is still named. ``holds`` lives here for the same reason: one definition,
-    on the type that owns the field it reads.
+    afterwards which symbols a fill touched since. The answer is read off the
+    stamps, so a symbol whose net came back to where it started is still named.
     """
     projection = _projection("100000")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
@@ -479,12 +476,10 @@ def test_the_reading_names_the_symbols_a_fill_touched_since_a_count() -> None:
     )
     book_fill(projection, _fill(trade_id="f3", quantity="2", price="100"), side=Side.SELL)
 
-    reading = projection.ledger_reading(snapshot=venue_holding())
-
     # BTC is back at flat and still named: the question is "any fill", not net.
-    assert reading.filled_since(0) == frozenset({"BTC", "ETH"})
-    assert reading.filled_since(2) == frozenset({"BTC"})
-    assert reading.filled_since(3) == frozenset()
+    assert projection.filled_since(0) == frozenset({"BTC", "ETH"})
+    assert projection.filled_since(2) == frozenset({"BTC"})
+    assert projection.filled_since(3) == frozenset()
 
 
 def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes() -> None:
