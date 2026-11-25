@@ -273,7 +273,8 @@ class _Standing:
 
     ``rechecked`` counts the mark updates checked in the wait (#690). Zero
     means no new mark arrived, or the pass did not wait (#694, #696). It tells
-    that apart from several marks that all left the gap open.
+    that apart from several marks that all left the gap open. It can count
+    later checks than the one the alerts come from (#695).
     """
 
     alerts: tuple[Divergence, ...]
@@ -1297,6 +1298,9 @@ class ReconcileFindings:
         could look like fresh gaps. So a figure this pass's Tier-1 findings
         explained stays out, as it did at the first check.
 
+        An empty answer is not enough to clear. ``_recheck`` also needs the
+        venue's own mark (#695).
+
         The heal plan is not asked again, so this takes no fill count and no
         ``previous``.
         """
@@ -1548,9 +1552,11 @@ class LedgerReconciliation:
         The venue's read can be one mark update ahead of the feed. On testnet
         one update can move the mark past the band. So each alert waits for a
         new mark on every symbol its figure is computed from. The ledger is then
-        read again and compared against the same snapshot. A gap a new mark
-        closes was the race and is not alerted. Which alerts stay is
-        ``ReconcileFindings.still_alerting``'s answer. This method owns the wait.
+        read again and compared against the same snapshot. A gap that closes at
+        the venue's own mark was the race and is not alerted. At any other mark
+        a price move can hide a real gap, so the wait goes on (#695). Which
+        figures are outside the band is ``ReconcileFindings.still_alerting``'s
+        answer. This method owns the wait.
 
         The feed often repeats the old price with a newer stamp (#690). So the
         check runs on every update in the wait, not only the first.

@@ -239,6 +239,16 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   The cost is one extra alert on a pass that heals a missed opening fill in a cross coin, when the ledger never traded that coin and net cash agrees. The old wait compared the healed ledger, so it cleared the alert. Now the first check's `maintenance_margin` alert stands, as the #322 block says. The next pass compares the healed ledger. On a pass that heals nothing, the wait could not have cleared the alert. No mark changes a sum over no symbols.**)**
 
+**(Corrected by [#695](https://github.com/MarcosACH/tickwright/issues/695): the #690 block above clears on any mark that puts every figure inside the band. Only the venue's own mark can clear now.** At another mark, a price move can split one real gap between `unrealized_pnl` and `notional`. Each part is inside the band, so a real `unrealized_pnl` error of up to twice the band cleared. A `free_margin` error on a cross short could be larger.
+
+  - A check clears when both are true. Every symbol the first check's alerts sum over has a ledger mark equal to the venue's. No Tier-2 figure is outside the band, as before.
+  - The venue's mark is `notional / |signed_size|` on the snapshot's `VenuePositionState`. Equal means within a relative 1e-9. That only absorbs float noise in the venue's notional.
+  - A symbol the venue does not hold has no mark to match, so the alerts stand.
+  - A check can be in band but not at the venue's mark. It does not clear, and it does not end the wait.
+  - When that is the last check, the alerts carry the last check that had a figure outside the band, with that check's marks. `rechecked` still counts every check.
+
+  The first check, the band, `rtol`, `atol` and the 5 s limit do not change. The first check can still hide a split gap. If the feed skips the venue's mark, the alerts stand. That errs toward alerting.**)**
+
 ## 7. Paper account genesis numbers
 
 Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-check against. Given the genesis collateral configured by [#136](https://github.com/MarcosACH/tickwright/issues/136) (that ticket owns the *config*; this owns the *formulas*) — **since settled by ADR-0042**, which makes it a strictly positive `PaperExchangeConfig` field with no default, **demanded by `AppConfig`'s validator whenever `exchange == "paper"`** (never required at field level, which would force a paper number onto a live run — ADR-0042 §1), and ingests the live path's from the venue:
