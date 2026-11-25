@@ -4806,8 +4806,10 @@ def test_float_noise_in_the_venues_notional_does_not_keep_a_race_alerting() -> N
     """The venue's notional can carry float noise (#695).
 
     Some large mainnet positions report a notional such as
-    ``8584360.3213500008``. The plain race again, with noise of that kind on
-    the venue's 130.618. The feed reaches 65309, so the alerts clear.
+    ``8584360.3213500008``. The plain race again, with noise of 5e-8 on the
+    venue's 130.618. That is inside 1e-9 of the notional but over 1e-9 itself,
+    so the tolerance must scale with the notional. The feed reaches 65309, so
+    the alerts clear.
     """
     clock = ParkingClock(start_ns=7)
     keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
@@ -4816,7 +4818,7 @@ def test_float_noise_in_the_venues_notional_does_not_keep_a_race_alerting() -> N
     _mark(projection, "BTC", "65000")
     venue = _held("100001.000", ("BTC", "0.002", "1.000"))
     (btc,) = venue.positions
-    noisy = replace(venue, positions=(replace(btc, notional=Decimal("130.6180000000008")),))
+    noisy = replace(venue, positions=(replace(btc, notional=Decimal("130.61800005")),))
     cycle = LedgerReconciliation(exchange=_AccountVenue(noisy), checkpointer=keeper)
 
     with capture_events() as logs:
