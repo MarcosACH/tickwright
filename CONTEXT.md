@@ -336,7 +336,7 @@ The ledger's **whole side of one [[Ledger reconciliation]] pass**, folded in one
 comparison's venue side always had as its account snapshot and its own side did not. Carries the
 [[AccountView]] plus one `SymbolValuation` row per symbol, with every account-grain figure the
 cycle compares on it (net size, unrealized PnL, notional, margin used, maintenance margin), and each
-mark's **stamp**, never its price. It owns the cycle's one **held-ness** predicate,
+mark's **stamp** and **price**. It owns the cycle's one **held-ness** predicate,
 `holds(symbol)`, which reads the row's **net** so that flat and absent are one state at both tiers.
 Deliberately **not** the leverage book: that is configuration resolved at startup, which no fill
 can move, so it is not part of one-fold-per-pass. A row does report the leverage pair its figures

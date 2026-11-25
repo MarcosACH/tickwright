@@ -11,7 +11,7 @@ A reading is built here by hand for exactly that reason. It is the same freedom
 a recorded venue body already has, pointed at the other side of the comparison.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from decimal import Decimal
 
@@ -35,6 +35,7 @@ from tickwright.engine.ledger_reconcile import (
     DivergenceField,
     DivergenceTier,
     ReconcileFindings,
+    Standing,
     ValuationBand,
 )
 from tickwright.engine.portfolio import LedgerReading
@@ -1233,12 +1234,23 @@ def _two_leg_venue() -> VenueAccountState:
     )
 
 
-def _two_leg_reading(*, btc_upnl: str, eth_upnl: str, eth_net: str = "10") -> LedgerReading:
+_VENUE_MARKS = {"BTC": "120000", "ETH": "2050"}
+"""The marks ``_two_leg_venue`` is valued at: ``60000 / 0.5`` and ``20500 / 10``."""
+
+
+def _two_leg_reading(
+    *,
+    btc_upnl: str,
+    eth_upnl: str,
+    eth_net: str = "10",
+    marks: Mapping[str, str] = _VENUE_MARKS,
+) -> LedgerReading:
     """The ledger's side of ``_two_leg_venue``, with each leg's uPnL as given.
 
     The account figures are set to agree, so each leg's uPnL is the only figure
     that can alert. ``eth_net`` other than the venue's 10 is a Tier-1 size
-    finding on ETH.
+    finding on ETH. ``marks`` are the prices the ledger holds. They move no
+    figure here, so a case can put a leg off the venue's mark and in band.
     """
     return LedgerReading(
         account=AccountView(
@@ -1255,7 +1267,7 @@ def _two_leg_reading(*, btc_upnl: str, eth_upnl: str, eth_net: str = "10") -> Le
                 "ETH", net=eth_net, unrealized_pnl=eth_upnl, notional="20500", entry_price="2000"
             ),
         },
-        mark_prices={},
+        mark_prices={symbol: Decimal(price) for symbol, price in marks.items()},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
         last_fills={},
     )
@@ -1272,24 +1284,102 @@ def _first_check(reading: LedgerReading) -> ReconcileFindings:
     )
 
 
-def test_a_gap_the_newer_reading_closes_no_longer_alerts() -> None:
-    """The second check on the next mark (#682), on its own.
+def _checked(findings: ReconcileFindings, *readings: LedgerReading) -> tuple[Standing, ...]:
+    """What stands after the first check, then after each later reading."""
+    standings = [findings.standing(readings[0], now_ns=_NOW_NS)]
+    for reading in readings[1:]:
+        standings.append(
+            findings.recheck(
+                standings[-1], _two_leg_venue(), reading, band=ValuationBand(), now_ns=_NOW_NS
+            )
+        )
+    return tuple(standings)
+
+
+def test_a_gap_the_newer_reading_closes_at_the_venues_mark_clears() -> None:
+    """The check on the next mark (#682, #695), on its own.
 
     The first reading values BTC's uPnL 1,000 under the venue's, far past its
-    band. The newer reading values it at the venue's own figure. So nothing is
-    left to alert on.
+    band. The newer reading values it at the venue's own figure and holds the
+    venue's own mark. So nothing is left to alert on.
     """
-    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500"))
-    assert [(d.field, d.symbol) for d in first.alerts] == [(DivergenceField.UNREALIZED_PNL, "BTC")]
+    first_reading = _two_leg_reading(btc_upnl="9000", eth_upnl="500")
+    findings = _first_check(first_reading)
+    assert [(d.field, d.symbol) for d in findings.alerts] == [
+        (DivergenceField.UNREALIZED_PNL, "BTC")
+    ]
 
-    still = first.still_alerting(
-        _two_leg_venue(),
-        _two_leg_reading(btc_upnl="10000", eth_upnl="500"),
-        band=ValuationBand(),
-        now_ns=_NOW_NS,
+    first, second = _checked(
+        findings, first_reading, _two_leg_reading(btc_upnl="10000", eth_upnl="500")
     )
 
-    assert still == ()
+    assert (first.alerts, first.terms, first.rechecked) == (findings.alerts, {"BTC"}, 0)
+    assert (second.alerts, second.rechecked) == ((), 1)
+
+
+@pytest.mark.parametrize(
+    "marks",
+    [
+        pytest.param({"BTC": "120001", "ETH": "2050"}, id="another mark"),
+        pytest.param({"ETH": "2050"}, id="no mark"),
+    ],
+)
+def test_a_gap_the_newer_reading_closes_off_the_venues_mark_stands(
+    marks: Mapping[str, str],
+) -> None:
+    """In band proves nothing at a mark the venue did not have (#695).
+
+    The check has no figure outside the band, so the older check's alerts stand
+    with that check's reading. Only the count of checks moves.
+    """
+    first_reading = _two_leg_reading(btc_upnl="9000", eth_upnl="500")
+
+    first, second = _checked(
+        _first_check(first_reading),
+        first_reading,
+        _two_leg_reading(btc_upnl="10000", eth_upnl="500", marks=marks),
+    )
+
+    assert second == replace(first, rechecked=1)
+
+
+def test_a_symbol_off_the_venues_mark_that_no_alert_sums_over_does_not_block_the_clear() -> None:
+    """Only the symbols the alerts sum over must reach the venue's mark (#695)."""
+    first_reading = _two_leg_reading(btc_upnl="9000", eth_upnl="500")
+
+    _, second = _checked(
+        _first_check(first_reading),
+        first_reading,
+        _two_leg_reading(btc_upnl="10000", eth_upnl="500", marks={"BTC": "120000", "ETH": "2051"}),
+    )
+
+    assert second.alerts == ()
+
+
+def test_a_symbol_that_first_alerts_at_a_later_check_must_reach_the_venues_mark() -> None:
+    """The clear rule remembers every symbol that alerted in the wait (#695).
+
+    BTC alerts at the first check. ETH's uPnL is 100 under at the second, past
+    its band of 20.5, so ETH alerts too. At the third check both are in band
+    but ETH is off the venue's mark, so the second check's alerts stand. At the
+    fourth both are at the venue's marks, and the alerts clear.
+    """
+    first_reading = _two_leg_reading(btc_upnl="9000", eth_upnl="500")
+    agreed = _two_leg_reading(btc_upnl="10000", eth_upnl="500")
+
+    first, second, third, fourth = _checked(
+        _first_check(first_reading),
+        first_reading,
+        _two_leg_reading(btc_upnl="10000", eth_upnl="400"),
+        replace(agreed, mark_prices={"BTC": Decimal("120000"), "ETH": Decimal("2051")}),
+        agreed,
+    )
+
+    assert first.terms == {"BTC"}
+    assert [(d.field, d.symbol) for d in second.alerts] == [(DivergenceField.UNREALIZED_PNL, "ETH")]
+    assert second.terms == {"BTC", "ETH"}
+    assert third == replace(second, rechecked=2)
+    assert (fourth.alerts, fourth.rechecked) == ((), 3)
 
 
 def test_the_newer_reading_never_alerts_on_a_symbol_the_first_check_found_at_tier_1() -> None:
@@ -1305,16 +1395,16 @@ def test_the_newer_reading_never_alerts_on_a_symbol_the_first_check_found_at_tie
     band of 20.5. It is not added. BTC's gap stays and comes back at the
     newer reading's figure.
     """
-    first = _first_check(_two_leg_reading(btc_upnl="9000", eth_upnl="500", eth_net="9"))
+    first_reading = _two_leg_reading(btc_upnl="9000", eth_upnl="500", eth_net="9")
 
-    still = first.still_alerting(
-        _two_leg_venue(),
+    _, second = _checked(
+        _first_check(first_reading),
+        first_reading,
         _two_leg_reading(btc_upnl="9500", eth_upnl="300"),
-        band=ValuationBand(),
-        now_ns=_NOW_NS,
     )
 
-    assert still == (
+    assert second.terms == {"BTC"}
+    assert second.alerts == (
         Divergence(
             tier=DivergenceTier.TIER_2,
             field=DivergenceField.UNREALIZED_PNL,

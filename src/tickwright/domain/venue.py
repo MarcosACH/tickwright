@@ -168,6 +168,10 @@ class VenuePositionState:
     long, negative short — where our own ledger keeps a magnitude and rides the
     side on the saga.
 
+    ``notional`` is valued at the venue's own mark at the read, and it is never
+    negative. So ``notional / |signed_size|`` is that mark. The reconcile needs
+    this: it clears a Tier-2 alert only at the venue's mark (#695, ADR-0040 §6).
+
     ``isolated_collateral`` is the position's own locked bucket, and its
     ``None`` is what says the position is **cross**: a cross position is backed
     by the account pool and has no bucket of its own, while an isolated one
