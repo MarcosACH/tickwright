@@ -198,3 +198,13 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   band, so a real gap can no longer hide behind a price move. `valuation.divergence` logs
   `rechecked`, the number of updates checked. `cleared` on `account.reconciled` is now 0 or
   every alert (#690). Bump PR backed by #692.
+- **v0.8.8** (2026-11-26). Fixes to the account pass for the testnet soak. PATCH, because no seam,
+  `TICKWRIGHT_*` variable, or CLI command changed. `VenuePositionState` now states that `notional`
+  is at the venue's own mark. No type changed, and an adapter that breaks it keeps its alerts
+  standing (#695). Flatten's account pass no longer waits for a mark. So one size gap no longer
+  holds closes back 5 to 10 s (#694). A pass with no symbol to wait for no longer spins the CPU
+  for 5 s (#696). A fill or funding payment during the mode check no longer makes the cash heal
+  save wrong cash. `deferred` counts the heals it drops (#700). A fill during the mode check no
+  longer hides a real valuation alert either (#698). The recheck clears alerts only at the venue's
+  own mark (#695). A heal that opens an isolated position posts its margin on the same pass (#703).
+  Runtime bump: pydantic 2.14.4. Bump PR backed by #712.
