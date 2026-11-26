@@ -574,17 +574,17 @@ class PortfolioProjection:
                 # and the cycle emits at most one size finding per symbol, so a
                 # set loses nothing a list would have kept.
                 applied.add(fill.event_id)
-        ingested = () if snapshot is None else self._ingest_collateral(snapshot)
+        # A heal can open a partition that ``project`` files only later. The
+        # ingest and the cash line both need it now (#703).
+        held = dict(self._positions)
+        held.update(
+            ((change.position.strategy_id, change.position.symbol), change.position)
+            for change in folded
+        )
+        ingested = () if snapshot is None else self._ingest_collateral(snapshot, held.values())
         if not applied and cash is None and not ingested:
             return None
         if cash is not None:
-            # A heal can open a partition that ``project`` files only later, so
-            # the folded positions count alongside the filed ones.
-            held = dict(self._positions)
-            held.update(
-                ((change.position.strategy_id, change.position.symbol), change.position)
-                for change in folded
-            )
             basis = sum((position.cost_basis for position in held.values()), _ZERO)
             self._account.correct_cash(cash.net_cash + basis, event_id=cash.event_id)
         return HealChange(
@@ -594,8 +594,14 @@ class PortfolioProjection:
             collateral=ingested,
         )
 
-    def _ingest_collateral(self, snapshot: VenueAccountState) -> tuple[Position, ...]:
+    def _ingest_collateral(
+        self, snapshot: VenueAccountState, held: Iterable[Position]
+    ) -> tuple[Position, ...]:
         """Take the venue's locked buckets onto the partitions holding them.
+
+        ``held`` is the filed partitions plus any the same heal opened. The
+        heal's are not filed yet, and skipping them left their bucket unposted
+        for a whole pass (#703).
 
         Iterates **our** partitions rather than the venue's positions, which is
         what makes an absent symbol mean something: the snapshot carries every
@@ -627,14 +633,15 @@ class PortfolioProjection:
         we no longer hold, so its bucket is not ours. A partition whose bucket
         is posted takes its share as before.
         """
+        partitions = tuple(held)
         venue = {position.symbol: position.signed_size for position in snapshot.positions}
         carried = {
             symbol
-            for symbol, net in account_net_size(self._positions.values()).items()
+            for symbol, net in account_net_size(partitions).items()
             if venue.get(symbol, _ZERO) == net
         }
         moved: list[Position] = []
-        for position, share in self._venue_shares(snapshot):
+        for position, share in self._venue_shares(snapshot, partitions):
             if position.isolated_collateral is None and position.symbol not in carried:
                 continue
             if position.isolated_collateral != share:
@@ -642,8 +649,11 @@ class PortfolioProjection:
                 moved.append(position)
         return tuple(moved)
 
-    def _venue_shares(self, snapshot: VenueAccountState) -> list[tuple[Position, Decimal]]:
-        """Each partition beside its share of the bucket the venue posts.
+    def _venue_shares(
+        self, snapshot: VenueAccountState, held: Iterable[Position]
+    ) -> list[tuple[Position, Decimal]]:
+        """Each partition in ``held`` beside its share of the bucket the venue
+        posts.
 
         Shared by the ingest and by ``ledger_reading``, so the reconcile
         compares against the same bucket the ingest is about to write (#402).
@@ -651,7 +661,7 @@ class PortfolioProjection:
         # The one place that decides which venue field the bucket is read from.
         venue = {position.symbol: position.isolated_collateral for position in snapshot.positions}
         by_symbol: dict[str, list[Position]] = {}
-        for position in self._positions.values():
+        for position in held:
             by_symbol.setdefault(position.symbol, []).append(position)
         shares: list[tuple[Position, Decimal]] = []
         for symbol, partitions in by_symbol.items():
@@ -1330,7 +1340,7 @@ class PortfolioProjection:
         rows = self._rows(
             [
                 replace(position, isolated_collateral=share)
-                for position, share in self._venue_shares(snapshot)
+                for position, share in self._venue_shares(snapshot, self._positions.values())
             ]
         )
         return LedgerReading(
