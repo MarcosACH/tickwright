@@ -5677,6 +5677,103 @@ def test_a_funding_payment_during_the_wait_leaves_the_first_checks_alerts_standi
     assert _recorded(logs)["cleared"] == 0
 
 
+@pytest.mark.parametrize("mode", list(AccountModeVerdict))
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(
+            lambda keeper: _book_fill(keeper.portfolio, quantity="0.002", price="64809", seq=2),
+            id="buy",
+        ),
+        pytest.param(
+            lambda keeper: _book_fill(
+                keeper.portfolio, quantity="0.002", price="65809", side=Side.SELL, seq=2
+            ),
+            id="closing sell",
+        ),
+        pytest.param(
+            lambda keeper: keeper.checkpoint_funding(
+                FundingAccrual(
+                    ts_event=3_600,
+                    ts_init=3_600,
+                    account_id=LIVE_ACCOUNT_ID,
+                    symbol="BTC",
+                    boundary_ts_ns=3_600,
+                    amount=Decimal("-0.5"),
+                )
+            ),
+            id="funding payment",
+        ),
+    ],
+)
+def test_a_write_in_the_mode_check_leaves_the_first_checks_alerts_standing(
+    write: Callable[[Checkpointer], None], mode: AccountModeVerdict
+) -> None:
+    """A write in the mode check must not clear a real gap (#698).
+
+    The gap is real. The venue entered BTC at 64309 and the ledger at 64809, so
+    uPnL is 1.000 apart at the venue's own mark, 65309. The venue's cash is 5
+    above the ledger's, so the second pass checks the mode. A write lands in
+    that check. The next mark is 65309.
+
+    The snapshot was read before the write. After a BTC fill, a second check
+    would see a BTC size gap and silence BTC's figures. A funding payment
+    changes no size, but one rule covers every write. So the pass does not
+    wait. The alerts of the first check stand, on every mode verdict.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    state = _held("100007.000", ("BTC", "0.002", "2.000"), entry={"BTC": "64309"})
+    venue = _SlowModeVenue(state, state, during=lambda: write(keeper), mode=mode)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _during_the_wait(cycle, clock, wait_for_marks=False)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock, lambda: _mark(ledger, "BTC", "65309", ts_ns=_MARK_TS_NS + 1))
+
+    alerts = [log for log in logs if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["ledger"], log["venue"], log["rechecked"]) for log in alerts] == [
+        ("unrealized_pnl", "0.382", "2.000", 0),
+        ("notional", "130.000", "130.618", 0),
+        ("margin_used", "0.382", "2.000", 0),
+    ]
+    assert _recorded(logs)["cleared"] == 0
+    assert not clock.parked.is_set()
+
+
+def test_a_pass_that_heals_a_size_and_cash_still_clears_on_the_next_mark() -> None:
+    """The pass's own heals are not a write in the mode check (#698).
+
+    The BTC gap is the one-step mark race, and 65309 closes it. The pass also
+    heals 0.1 ETH opened by hand and a cash gap of 5. A size heal raises
+    ``writes_applied``. Counted as a write, it would skip the second check or
+    end the wait, and the race would alert.
+    """
+    clock = ParkingClock(start_ns=7)
+    keeper = _ledger(SQLiteStore(":memory:"), equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    venue = _AccountVenue(
+        _held("100006.000", ("BTC", "0.002", "1.000"), ("ETH", "0.1", "0"), entry={"ETH": "3000"})
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _during_the_wait(cycle, clock, wait_for_marks=False)
+    clock.advance_to(8)
+
+    with capture_events() as logs:
+        _during_the_wait(cycle, clock, lambda: _mark(ledger, "BTC", "65309", ts_ns=_MARK_TS_NS + 1))
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002"), "ETH": Decimal("0.1")}
+    assert ledger.account().cash == Decimal("100005")
+    assert _alerts(logs) == []
+    assert _recorded(logs)["cleared"] == 3
+
+
 def test_an_alert_names_the_mark_its_ledger_figure_was_valued_at_and_its_age() -> None:
     """The next unexplained gap can be read from the log alone (#682).
 

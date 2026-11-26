@@ -1171,36 +1171,33 @@ class _HeldModeVenue(_LiveShapedVenue):
         return await super().verify_account_mode()
 
 
-def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
-    tmp_path: Path,
-) -> None:
-    """A fill can land while the account pass checks the mode (#700).
+_RESTING_BUY = OrderStatusReport(
+    ts_event=600,
+    ts_init=600,
+    cloid=_LIVE_CLOID,
+    symbol="BTC",
+    status=OrderState.LIVE,
+    venue_oid="777",
+)
+"""What the venue says about the strategy's buy at boot: it rests."""
+_BUY_FILL = FillReport(
+    ts_event=900,
+    ts_init=900,
+    cloid=_LIVE_CLOID,
+    symbol="BTC",
+    trade_id="t-1",
+    quantity=Decimal("0.002"),
+    price=Decimal("64809"),
+    fee=Decimal("0.05"),
+)
+"""The fill of that buy. A case publishes it while the mode check is held."""
 
-    The strategy holds 0.002 BTC and the venue's cash is 5 above the ledger's.
-    The second pass wants to heal that gap, so it checks the mode. The strategy
-    then buys 0.002 BTC more and pays a fee of 0.05. Its cash is 100000 less
-    that fee, in this run and after a restart.
+
+def _holding_with_a_resting_buy(tmp_path: Path) -> SQLiteStore:
+    """A live store where ``trivial`` holds 0.002 BTC at 64809 and has a buy out.
+
+    Genesis cash is 100000. The buy is the one ``_RESTING_BUY`` describes.
     """
-    right = Decimal("99999.95")
-    buy = FillReport(
-        ts_event=900,
-        ts_init=900,
-        cloid=_LIVE_CLOID,
-        symbol="BTC",
-        trade_id="t-1",
-        quantity=Decimal("0.002"),
-        price=Decimal("64809"),
-        fee=Decimal("0.05"),
-    )
-    resting = OrderStatusReport(
-        ts_event=600,
-        ts_init=600,
-        cloid=_LIVE_CLOID,
-        symbol="BTC",
-        status=OrderState.LIVE,
-        venue_oid="777",
-    )
-    state = account_state("100005", "0")
     store = SQLiteStore(tmp_path / "saga.db")
     store.checkpoint_ledger(
         account=Account(
@@ -1218,12 +1215,28 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
     )
     # Submitted, not resting: the boot takes the venue's ack for it.
     store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+    return store
+
+
+def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
+    tmp_path: Path,
+) -> None:
+    """A fill can land while the account pass checks the mode (#700).
+
+    The strategy holds 0.002 BTC and the venue's cash is 5 above the ledger's.
+    The second pass wants to heal that gap, so it checks the mode. The strategy
+    then buys 0.002 BTC more and pays a fee of 0.05. Its cash is 100000 less
+    that fee, in this run and after a restart.
+    """
+    right = Decimal("99999.95")
+    state = account_state("100005", "0")
+    store = _holding_with_a_resting_buy(tmp_path)
 
     async def first_life(logs: list[EventDict]) -> tuple[int, Decimal]:
         bus = InMemoryBus()
         clock = ManualClock()
         feed = _BlockingFeed()
-        venue = _HeldModeVenue(state=state, view=VenueOrderView(status=resting))
+        venue = _HeldModeVenue(state=state, view=VenueOrderView(status=_RESTING_BUY))
         engine = Engine(
             bus=bus,
             clock=clock,
@@ -1247,7 +1260,7 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
             await asyncio.sleep(0)
         clock.advance_to(2 * _ACCOUNT_INTERVAL_NS)
         await asyncio.wait_for(venue.checking.wait(), timeout=5)
-        await bus.publish(buy)
+        await bus.publish(_BUY_FILL)
         await bus.drain()
         assert portfolio.account().cash == right, "the fill must land inside the check"
         venue.answer.set()
@@ -1264,7 +1277,7 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
             clock=ManualClock(),
             store=SQLiteStore(tmp_path / "saga.db"),
             exchange=_LiveShapedVenue(
-                state=state, view=VenueOrderView(status=resting, fills=(buy,))
+                state=state, view=VenueOrderView(status=_RESTING_BUY, fills=(_BUY_FILL,))
             ),
             feed=feed,
         )
@@ -1279,6 +1292,91 @@ def test_a_strategy_reads_the_right_cash_when_a_fill_lands_in_the_mode_check(
 
     # Both lives are asserted together, so a failure shows what each one read.
     assert (first, asyncio.run(second_life())) == ((0, right), (0, right))
+
+
+def test_a_fill_in_the_mode_check_does_not_hide_a_valuation_alert(tmp_path: Path) -> None:
+    """A fill on the bus during the mode check must not clear a real gap (#698).
+
+    The strategy holds 0.002 BTC entered at 64809. The venue says 64309, so
+    uPnL is 1.000 apart at the venue's own mark, 65309. The venue's cash is 5
+    above the ledger's, so the second pass checks the mode. The strategy's
+    resting buy fills in that check, and the next mark is 65309. The pass must
+    alert on all three BTC figures and not wait.
+    """
+    base = account_state("100007.000", "2.000")
+    (btc,) = base.positions
+    row = margined(replace(btc, entry_price=Decimal("64309"), notional=Decimal("130.618")))
+    venue = _HeldModeVenue(
+        state=replace(base, positions=(row,)), view=VenueOrderView(status=_RESTING_BUY)
+    )
+    store = _holding_with_a_resting_buy(tmp_path)
+
+    def mark(price: str, ts_ns: int) -> MarkTick:
+        return MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol="BTC", price=Decimal(price))
+
+    async def one_life(logs: list[EventDict]) -> tuple[int, bool, list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ParkingClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+        portfolio = engine.portfolio_for("trivial")
+
+        def passes() -> int:
+            return sum(log["event"] == NamedEvent.ACCOUNT_RECONCILED.value for log in logs)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await bus.publish(mark("65000", _ACCOUNT_INTERVAL_NS - 1))
+        await bus.drain()
+        clock.parked.clear()
+        clock.advance_to(_ACCOUNT_INTERVAL_NS)
+        # The first pass waits for a mark and none comes, so the 5 s run out.
+        await asyncio.wait_for(clock.parked.wait(), timeout=5)
+        clock.advance_to(_ACCOUNT_INTERVAL_NS + 5_000_000_000)
+        await asyncio.wait_for(_until(lambda: passes() == 1), timeout=5)
+        for _ in range(50):  # the cadence parks on its next deadline
+            await asyncio.sleep(0)
+        seen = len(logs)
+        await bus.publish(mark("65000", 2 * _ACCOUNT_INTERVAL_NS - 1))
+        await bus.drain()
+        clock.parked.clear()
+        clock.advance_to(2 * _ACCOUNT_INTERVAL_NS + 5_000_000_000)
+        await asyncio.wait_for(venue.checking.wait(), timeout=5)
+        await bus.publish(_BUY_FILL)
+        await bus.drain()
+        held = portfolio.position("BTC")
+        assert held is not None and held.size == Decimal("0.004"), (
+            "the fill must land inside the check"
+        )
+        venue.answer.set()
+        # A pass that waits parks here, so the case fails on its assertions.
+        await asyncio.wait_for(_until(lambda: clock.parked.is_set() or passes() == 2), timeout=5)
+        waited = passes() < 2
+        await bus.publish(mark("65309", 2 * _ACCOUNT_INTERVAL_NS))
+        await asyncio.wait_for(_until(lambda: passes() == 2), timeout=5)
+        second = logs[seen:]
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), waited, second
+
+    with capture_events() as logs:
+        code, waited, second = asyncio.run(one_life(logs))
+
+    alerts = [log for log in second if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value]
+    assert [(log["field"], log["symbol"], log["rechecked"]) for log in alerts] == [
+        ("unrealized_pnl", "BTC", 0),
+        ("notional", "BTC", 0),
+        ("margin_used", "BTC", 0),
+    ]
+    assert (code, waited) == (0, False)
 
 
 def test_no_paper_run_schedules_the_account_cadence(tmp_path: Path) -> None:
