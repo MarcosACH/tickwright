@@ -575,13 +575,11 @@ class PortfolioProjection:
                 # set loses nothing a list would have kept.
                 applied.add(fill.event_id)
         # A heal can open a partition that ``project`` files only later. The
-        # ingest and the cash line both need it now (#703). A refused fill is
-        # left out, so a partition it never traded gets no row.
+        # ingest and the cash line both need it now (#703).
         held = dict(self._positions)
         held.update(
             ((change.position.strategy_id, change.position.symbol), change.position)
             for change in folded
-            if change.changes
         )
         ingested = () if snapshot is None else self._ingest_collateral(snapshot, held.values())
         if not applied and cash is None and not ingested:
