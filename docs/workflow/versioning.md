@@ -204,7 +204,7 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   standing (#695). Flatten's account pass no longer waits for a mark. So one size gap no longer
   holds closes back 5 to 10 s (#694). A pass with no symbol to wait for no longer spins the CPU
   for 5 s (#696). A fill or funding payment during the mode check no longer makes the cash heal
-  save wrong cash. `deferred` counts the heals it drops (#700). It no longer hides a real
-  valuation alert either (#698). The recheck clears alerts only at the venue's own mark (#695). A
-  heal that opens an isolated position posts its margin on the same pass (#703). Runtime bump:
-  pydantic 2.14.4. Bump PR backed by #712.
+  save wrong cash. `deferred` counts the heals it drops (#700). A fill during the mode check no
+  longer hides a real valuation alert either (#698). The recheck clears alerts only at the venue's
+  own mark (#695). A heal that opens an isolated position posts its margin on the same pass (#703).
+  Runtime bump: pydantic 2.14.4. Bump PR backed by #712.
