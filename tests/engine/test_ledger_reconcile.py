@@ -3527,6 +3527,36 @@ def test_a_bucket_the_ledger_has_not_ingested_yet_is_not_a_margin_divergence() -
     assert asyncio.run(cycle.reconcile_account()) == ()
 
 
+def test_a_heal_that_opens_an_isolated_position_posts_its_bucket_on_the_same_pass() -> None:
+    """The pass that heals the size also posts the bucket (#703).
+
+    The heal opens a partition the ledger did not hold. The ingest used to walk
+    only the partitions already filed, so it skipped this one. The margin then
+    read unknown for a whole pass, and the stored row held no bucket.
+
+    The figures are the ones the next pass used to reach, from the issue.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="25.9144", leverage=_BTC_ISOLATED_5X, specs={"BTC": _BTC_SPEC})
+    _mark(keeper.portfolio, "BTC", "64815")
+    venue = _AccountVenue(_isolated(account_state("25.9264", "0.012"), _BTC_BUCKET))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    _seen(cycle)
+
+    asyncio.run(cycle.reconcile_account())
+
+    healed = keeper.portfolio.position("BTC", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("0.002")
+    assert healed.margin_used == Decimal("25.910067")
+    account = keeper.portfolio.account()
+    assert account.total_margin_used == Decimal("25.910067")
+    assert account.free_margin == Decimal("0.016333")
+    assert [(p.symbol, p.isolated_collateral) for p in store.all_positions()] == [
+        ("BTC", _BTC_BUCKET)
+    ]
+
+
 def _alerts(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
     """Every ``valuation.divergence`` in ``logs``, as the four fields it is
     *about*, in the order the pass raised them.
